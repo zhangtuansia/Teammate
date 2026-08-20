@@ -5,6 +5,7 @@ import { MessageArea } from "@/components/message-area";
 import { AgentSettingsPanel } from "@/components/agent-settings-panel";
 import { AgentActivityProvider } from "@/hooks/use-agent-activity";
 import { useAppSettings } from "@/hooks/use-app-settings";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
 interface ServerInfo {
@@ -29,6 +30,44 @@ interface ChannelInfo {
 }
 
 const LOCAL_SERVICE_URL = "http://127.0.0.1:8787";
+
+function MacWindowControls() {
+  useEffect(() => {
+    if (!navigator.userAgent.includes("Macintosh")) return;
+
+    const handleDoubleClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest("[data-tauri-drag-region]")) {
+        void getCurrentWindow().toggleMaximize();
+      }
+    };
+
+    document.addEventListener("dblclick", handleDoubleClick);
+    return () => document.removeEventListener("dblclick", handleDoubleClick);
+  }, []);
+
+  const desktopWindow = getCurrentWindow();
+
+  return (
+    <div className="mac-window-controls" aria-label="Window controls">
+      <button
+        className="mac-window-control mac-window-control-close"
+        aria-label="Close window"
+        onClick={() => void desktopWindow.close()}
+      />
+      <button
+        className="mac-window-control mac-window-control-minimize"
+        aria-label="Minimize window"
+        onClick={() => void desktopWindow.minimize()}
+      />
+      <button
+        className="mac-window-control mac-window-control-zoom"
+        aria-label="Zoom window"
+        onClick={() => void desktopWindow.toggleMaximize()}
+      />
+    </div>
+  );
+}
 
 async function waitForRuntime() {
   let lastError: Error | null = null;
@@ -64,7 +103,11 @@ function WorkspaceHome({ server }: { server: ServerInfo }) {
   }, [server.id]);
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
+    <div className="relative flex flex-1 flex-col items-center justify-center px-8 text-center">
+      <div
+        className="desktop-native-drag absolute inset-x-0 top-0 h-12"
+        data-tauri-drag-region
+      />
       <div className="mb-4 flex size-16 items-center justify-center rounded-2xl bg-sanda-3 text-2xl font-semibold">
         {server.name.slice(0, 1).toUpperCase()}
       </div>
@@ -198,33 +241,43 @@ export function App() {
 
   if (error) {
     return (
-      <main className="flex h-full items-center justify-center bg-background p-8">
-        <div className="max-w-md rounded-xl border bg-card p-6 text-center shadow-sm">
-          <h1 className="text-lg font-semibold">{t("runtime.error")}</h1>
-          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-          <button
-            className="mt-5 rounded-lg bg-foreground px-4 py-2 text-sm text-background"
-            onClick={() => window.location.reload()}
-          >
-            {t("runtime.retry")}
-          </button>
-        </div>
-      </main>
+      <>
+        <MacWindowControls />
+        <main
+          className="flex h-full items-center justify-center bg-background p-8"
+          data-tauri-drag-region>
+          <div className="max-w-md rounded-xl border bg-card p-6 text-center shadow-sm">
+            <h1 className="text-lg font-semibold">{t("runtime.error")}</h1>
+            <p className="mt-2 text-sm text-muted-foreground">{error}</p>
+            <button
+              className="mt-5 rounded-lg bg-foreground px-4 py-2 text-sm text-background"
+              onClick={() => window.location.reload()}
+            >
+              {t("runtime.retry")}
+            </button>
+          </div>
+        </main>
+      </>
     );
   }
 
   if (!server) {
     return (
-      <main className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
-        {t("runtime.starting")}
-      </main>
+      <>
+        <MacWindowControls />
+        <main
+          className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground"
+          data-tauri-drag-region>
+          {t("runtime.starting")}
+        </main>
+      </>
     );
   }
 
   return (
     <AgentActivityProvider>
       <div className="desktop-shell relative flex h-full overflow-hidden bg-background">
-        <div className="desktop-drag-region" data-tauri-drag-region />
+        <MacWindowControls />
         <Sidebar serverSlug={server.slug} serverId={server.id} serverName={server.name} />
         <main className="flex flex-1 overflow-hidden border-l border-border/70 bg-card">
           <Conversation server={server} />

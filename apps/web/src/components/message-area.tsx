@@ -356,10 +356,12 @@ export function MessageArea({
   return (
     <div className="flex flex-1 flex-col bg-card max-w-full text-pretty">
       {/* Channel header */}
-      <div className="flex items-center gap-3 border-b-[0.5px] py-2 px-3">
+      <div
+        className="flex items-center gap-3 border-b-[0.5px] py-2 px-3 select-none"
+        data-tauri-drag-region>
         {channel.type === 'dm' && agentInfo ? (
           <>
-            <div className="relative size-8">
+            <div className="pointer-events-none relative size-8">
               <GeneratedAvatar id={agentInfo.id} name={agentInfo.display_name} size="md" />
               {(() => {
                 const act = agentActivities.get(agentInfo.id);
@@ -381,7 +383,7 @@ export function MessageArea({
                 );
               })()}
             </div>
-            <div className="flex-1 min-w-0">
+            <div className="pointer-events-none flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <h2 className="text-[14px] font-semibold">{agentInfo.display_name}</h2>
                 {(() => {
@@ -412,15 +414,15 @@ export function MessageArea({
           </>
         ) : (
           <>
-            <span className="text-lg text-muted-foreground">#</span>
-            <div className="flex-1 min-w-0">
+            <span className="pointer-events-none text-lg text-muted-foreground">#</span>
+            <div className="pointer-events-none flex-1 min-w-0">
               <h2 className="text-[14px] font-semibold">{channel.name}</h2>
               {channel.description && (
                 <p className="text-[12px] text-muted-foreground truncate">{channel.description}</p>
               )}
             </div>
             {channelAgents.size > 0 && (
-              <div className="flex items-center gap-1">
+              <div className="pointer-events-none flex items-center gap-1">
                 {Array.from(channelAgents.values()).map((agent) => (
                   <GeneratedAvatar key={agent.id} id={agent.id} name={agent.display_name} size="xs" />
                 ))}

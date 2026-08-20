@@ -27,21 +27,49 @@ body {
   font-family: "SN Pro", system-ui, sans-serif;
 }
 
-.desktop-drag-region {
+.desktop-native-drag {
+  user-select: none;
+}
+
+.mac-window-controls {
   display: none;
 }
 
-html[data-platform="macos"] .desktop-sidebar {
-  padding-top: 38px;
+html[data-platform="macos"] .mac-window-controls {
+  position: fixed;
+  z-index: 100;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
 }
 
-html[data-platform="macos"] .desktop-drag-region {
-  position: absolute;
-  z-index: 30;
-  top: 0;
-  left: 0;
-  right: 48px;
-  display: block;
-  height: 38px;
-  user-select: none;
+.mac-window-control {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 16%);
+}
+
+.mac-window-control:active {
+  filter: brightness(82%);
+}
+
+.mac-window-control-close {
+  background: #ff5f57;
+}
+
+.mac-window-control-minimize {
+  background: #febc2e;
+}
+
+.mac-window-control-zoom {
+  background: #28c840;
+}
+
+html[data-platform="macos"] .desktop-sidebar-header {
+  padding-left: 76px;
 }

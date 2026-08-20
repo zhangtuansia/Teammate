@@ -347,7 +347,7 @@ export function Sidebar({
   return (
     <aside className="desktop-sidebar flex h-full w-[var(--sidebar-width)] flex-col">
       {/* Header — Server switcher */}
-      <div className="relative px-2 pt-2 pb-1">
+      <div className="desktop-sidebar-header relative px-2 pt-2 pb-1">
         <button
           onClick={() => setShowServerMenu((v) => !v)}
           className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 transition-all hover:bg-accent"
