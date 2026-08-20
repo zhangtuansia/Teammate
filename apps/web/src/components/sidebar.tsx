@@ -346,6 +346,12 @@ export function Sidebar({
 
   return (
     <aside className="desktop-sidebar flex h-full w-[var(--sidebar-width)] flex-col">
+      <div
+        className="desktop-sidebar-titlebar-spacer desktop-native-drag flex-none"
+        data-tauri-drag-region
+        aria-hidden="true"
+      />
+
       {/* Header — Server switcher */}
       <div
         className="desktop-sidebar-header relative flex h-9 items-center"

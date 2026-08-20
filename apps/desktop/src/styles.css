@@ -37,6 +37,11 @@ body {
   padding-inline: 8px;
 }
 
-html[data-platform="macos"] .desktop-sidebar-header {
-  padding-inline-start: 68px;
+.desktop-sidebar-titlebar-spacer {
+  display: none;
+}
+
+html[data-platform="macos"] .desktop-sidebar-titlebar-spacer {
+  display: block;
+  height: 32px;
 }
