@@ -1,0 +1,31 @@
+{
+  "name": "@fehey/zano-cli",
+  "version": "0.1.0",
+  "description": "Zano CLI — agent communication tool for Zano platform",
+  "type": "module",
+  "bin": {
+    "zano": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["zano", "claude", "ai", "agent", "cli"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "@zano/local-client": "workspace:*",
+    "@supabase/supabase-js": "^2.104.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

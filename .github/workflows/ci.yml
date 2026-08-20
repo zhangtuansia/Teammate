@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Lint & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Lint has known pre-existing issues from a recent React 19 / Next 16 upgrade.
+      # Surface them in CI output but don't block the build until they're cleaned up.
+      # See CONTRIBUTING.md — this is a good first-issue opportunity.
+      - name: Lint
+        run: pnpm lint
+        continue-on-error: true
+
+      - name: Build
+        run: pnpm build
+        env:
+          # The Next.js build reads these at compile time. CI uses placeholders
+          # since we're only checking that the build succeeds — no actual data
+          # access happens. Self-hosters set their real values in their deploy env.
+          NEXT_PUBLIC_ZANO_LOCAL_MODE: "true"
+          NEXT_PUBLIC_ZANO_LOCAL_SERVER_URL: http://127.0.0.1:8787

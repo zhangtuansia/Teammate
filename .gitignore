@@ -1,0 +1,19 @@
+node_modules/
+.next/
+dist/
+.turbo/
+.env
+.env.local
+.env.*.local
+*.tsbuildinfo
+
+# Supabase CLI local state — should never be committed
+supabase/.temp/
+supabase/.branches/
+
+# OS / editor cruft
+.DS_Store
+*.log
+
+# Local Node/SQLite mode runtime data
+.zano/

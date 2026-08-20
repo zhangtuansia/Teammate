@@ -1,0 +1,41 @@
+{
+  "name": "@fehey/zano-bridge",
+  "version": "0.1.5",
+  "description": "Zano local bridge — connects your Claude Code agents to Zano",
+  "type": "module",
+  "bin": {
+    "zano-bridge": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "zano",
+    "claude",
+    "ai",
+    "agent",
+    "bridge"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@fehey/zano-cli": "^0.1.0",
+    "@zano/local-client": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@supabase/supabase-js": "^2.104.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
