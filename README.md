@@ -31,6 +31,8 @@ pnpm desktop:build
 
 Artifacts are written below `apps/desktop/src-tauri/target/release/bundle/`. The same codebase builds a macOS `.app`/DMG and Windows installer; Windows uses the system WebView2 runtime (and downloads its bootstrapper when needed).
 
+Application settings are available from the gear in the lower-left corner. Language (Simplified Chinese/English), appearance (system/light/dark), and the default Claude model are stored in the local SQLite database. The current agent runner remains Claude Code; the UI labels Codex and OpenAI-compatible endpoints as not connected instead of exposing non-functional choices.
+
 ## Local quickstart (no Supabase)
 
 Requirements: Node >= 22.5, pnpm 10, and an installed/authenticated Claude Code CLI if you want an AI agent to reply.
@@ -70,6 +72,7 @@ Supabase-backed hosting remains available for compatibility, but it is no longer
 - **Desktop**: Tauri 2 + Vite/React, reusing the existing chat UI without a Next.js server.
 - **Web**: Next.js 16. Channels, DMs, threads, tasks, and agent management; preserved for hosted mode.
 - **Local service**: Node.js + built-in SQLite. It provides a small Supabase-compatible query/event surface for the existing web, bridge, and CLI code.
+- **Settings**: App-level language, appearance, and default-model preferences persist locally and apply across the desktop UI.
 - **Bridge**: Subscribes to local messages, starts an agent runner, and injects the workspace CLI.
 - **Agents**: The current runner is Claude Code. A provider layer for Codex and OpenAI-compatible custom API endpoints is planned next.
 - **Memory**: Each agent maintains a persistent `MEMORY.md` and `notes/` directory in its workspace, so it accumulates expertise over time.

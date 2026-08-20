@@ -18,6 +18,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { GeneratedAvatar } from "./generated-avatar";
+import { useAppSettings } from "@/hooks/use-app-settings";
 
 interface Agent {
   id: string;
@@ -48,6 +49,7 @@ export function CreateChannelDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const supabase = createClient();
+  const { t } = useAppSettings();
 
   useEffect(() => {
     if (open) {
@@ -143,14 +145,14 @@ export function CreateChannelDialog({
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogPopup>
         <DialogHeader>
-          <DialogTitle>Create Channel</DialogTitle>
-          <DialogDescription>Create a new group channel for your workspace.</DialogDescription>
+          <DialogTitle>{t("createChannel.title")}</DialogTitle>
+          <DialogDescription>{t("createChannel.description")}</DialogDescription>
         </DialogHeader>
         <form className="contents" onSubmit={handleSubmit}>
           <DialogPanel>
             <div className="space-y-4">
               <Field>
-                <FieldLabel>Channel Name</FieldLabel>
+                <FieldLabel>{t("createChannel.name")}</FieldLabel>
                 <div className="flex items-center gap-1">
                   <span className="text-muted-foreground text-sm">#</span>
                   <Input
@@ -159,7 +161,7 @@ export function CreateChannelDialog({
                     onChange={(e) =>
                       setName((e.target as HTMLInputElement).value.toLowerCase().replace(/\s+/g, "-"))
                     }
-                    placeholder="e.g. design, marketing, dev..."
+                    placeholder={t("createChannel.namePlaceholder")}
                     required
                     autoFocus
                     className="flex-1"
@@ -169,20 +171,20 @@ export function CreateChannelDialog({
 
               <Field>
                 <FieldLabel>
-                  Description <span className="text-muted-foreground font-normal">(optional)</span>
+                  {t("createChannel.descriptionField")} <span className="text-muted-foreground font-normal">({t("createChannel.optional")})</span>
                 </FieldLabel>
                 <Input
                   type="text"
                   value={description}
                   onChange={(e) => setDescription((e.target as HTMLInputElement).value)}
-                  placeholder="What's this channel about?"
+                  placeholder={t("createChannel.descriptionPlaceholder")}
                 />
               </Field>
 
               {agents.length > 0 && (
                 <Field>
                   <FieldLabel>
-                    Invite Agents <span className="text-muted-foreground font-normal">(optional)</span>
+                    {t("createChannel.invite")} <span className="text-muted-foreground font-normal">({t("createChannel.optional")})</span>
                   </FieldLabel>
                   <div className="rounded-lg border">
                     <div className="p-2 space-y-1">
@@ -218,10 +220,10 @@ export function CreateChannelDialog({
           </DialogPanel>
           <DialogFooter>
             <DialogClose render={<Button variant="ghost" type="button" />}>
-              Cancel
+              {t("createChannel.cancel")}
             </DialogClose>
             <Button type="submit" loading={saving} disabled={!name.trim()}>
-              Create Channel
+              {t("createChannel.submit")}
             </Button>
           </DialogFooter>
         </form>

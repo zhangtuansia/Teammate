@@ -27,6 +27,7 @@ const pkgPlatform =
 const pkgArch = process.arch === "arm64" ? "arm64" : "x64";
 const pkgTarget = `node22-${pkgPlatform}-${pkgArch}`;
 const executableExtension = process.platform === "win32" ? ".exe" : "";
+const pnpmExecutable = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 
 const entries = [
   {
@@ -59,7 +60,7 @@ for (const entry of entries) {
   });
 
   execFileSync(
-    "pnpm",
+    pnpmExecutable,
     [
       "exec",
       "pkg",
@@ -71,6 +72,10 @@ for (const entry of entries) {
       "--compress",
       "GZip",
     ],
-    { cwd: desktopDir, stdio: "inherit" },
+    {
+      cwd: desktopDir,
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    },
   );
 }

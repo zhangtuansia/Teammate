@@ -4,6 +4,7 @@ import { Sidebar } from "@/components/sidebar";
 import { MessageArea } from "@/components/message-area";
 import { AgentSettingsPanel } from "@/components/agent-settings-panel";
 import { AgentActivityProvider } from "@/hooks/use-agent-activity";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
 interface ServerInfo {
@@ -45,6 +46,7 @@ async function waitForRuntime() {
 
 function WorkspaceHome({ server }: { server: ServerInfo }) {
   const [counts, setCounts] = useState({ agents: 0, channels: 0, members: 0 });
+  const { t } = useAppSettings();
 
   useEffect(() => {
     const client = createClient();
@@ -68,13 +70,15 @@ function WorkspaceHome({ server }: { server: ServerInfo }) {
       </div>
       <h1 className="text-xl font-semibold text-foreground">{server.name}</h1>
       {server.description && (
-        <p className="mt-2 max-w-md text-sm text-muted-foreground">{server.description}</p>
+        <p className="mt-2 max-w-md text-sm text-muted-foreground">
+          {server.slug === "local" ? t("workspace.description") : server.description}
+        </p>
       )}
       <div className="mt-8 flex gap-10">
         {[
-          ["Agents", counts.agents],
-          ["Channels", counts.channels],
-          ["Members", counts.members],
+          [t("workspace.agents"), counts.agents],
+          [t("workspace.channels"), counts.channels],
+          [t("workspace.members"), counts.members],
         ].map(([label, value]) => (
           <div key={label}>
             <div className="text-2xl font-semibold">{value}</div>
@@ -83,7 +87,7 @@ function WorkspaceHome({ server }: { server: ServerInfo }) {
         ))}
       </div>
       <p className="mt-9 text-sm text-muted-foreground">
-        从左侧选择一个 Agent 或频道开始协作。
+        {t("workspace.prompt")}
       </p>
     </div>
   );
@@ -98,6 +102,7 @@ function Conversation({ server }: { server: ServerInfo }) {
   const [channel, setChannel] = useState<ChannelInfo | null>(null);
   const [settingsAgent, setSettingsAgent] = useState<AgentInfo | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const { t } = useAppSettings();
 
   useEffect(() => {
     let cancelled = false;
@@ -127,7 +132,7 @@ function Conversation({ server }: { server: ServerInfo }) {
   if (!channel) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        正在加载会话…
+        {t("conversation.loading")}
       </div>
     );
   }
@@ -160,6 +165,7 @@ export function App() {
   const router = useRouter();
   const [server, setServer] = useState<ServerInfo | null>(null);
   const [error, setError] = useState("");
+  const { t } = useAppSettings();
 
   useEffect(() => {
     if (!params.slug) router.replace("/s/local");
@@ -194,13 +200,13 @@ export function App() {
     return (
       <main className="flex h-full items-center justify-center bg-background p-8">
         <div className="max-w-md rounded-xl border bg-card p-6 text-center shadow-sm">
-          <h1 className="text-lg font-semibold">Teammate runtime 启动失败</h1>
+          <h1 className="text-lg font-semibold">{t("runtime.error")}</h1>
           <p className="mt-2 text-sm text-muted-foreground">{error}</p>
           <button
             className="mt-5 rounded-lg bg-foreground px-4 py-2 text-sm text-background"
             onClick={() => window.location.reload()}
           >
-            重试
+            {t("runtime.retry")}
           </button>
         </div>
       </main>
@@ -210,7 +216,7 @@ export function App() {
   if (!server) {
     return (
       <main className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
-        正在启动本地工作区…
+        {t("runtime.starting")}
       </main>
     );
   }

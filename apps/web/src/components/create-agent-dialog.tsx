@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
   Dialog,
@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { apiUrl } from "@/lib/api-url";
+import { useAppSettings } from "@/hooks/use-app-settings";
 
 interface CreateAgentDialogProps {
   open: boolean;
@@ -31,12 +32,6 @@ interface CreateAgentDialogProps {
   onCreated: () => void;
   serverId: string;
 }
-
-const MODEL_ITEMS = [
-  { value: "opus", label: "Opus — Most capable" },
-  { value: "sonnet", label: "Sonnet — Balanced" },
-  { value: "haiku", label: "Haiku — Fastest" },
-];
 
 export function CreateAgentDialog({
   open,
@@ -50,16 +45,22 @@ export function CreateAgentDialog({
   const [systemPrompt, setSystemPrompt] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const { settings, t } = useAppSettings();
+  const modelItems = [
+    { value: "opus", label: t("settings.modelOpus") },
+    { value: "sonnet", label: t("settings.modelSonnet") },
+    { value: "haiku", label: t("settings.modelHaiku") },
+  ];
 
   useEffect(() => {
     if (open) {
       setDisplayName("");
       setDescription("");
-      setModel("opus");
+      setModel(settings.defaultModel);
       setSystemPrompt("");
       setError("");
     }
-  }, [open]);
+  }, [open, settings.defaultModel]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -101,25 +102,25 @@ export function CreateAgentDialog({
     }
   }
 
-  const selectedModel = MODEL_ITEMS.find((m) => m.value === model) ?? MODEL_ITEMS[0];
+  const selectedModel = modelItems.find((item) => item.value === model) ?? modelItems[0];
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogPopup>
         <DialogHeader>
-          <DialogTitle>Create Agent</DialogTitle>
-          <DialogDescription>Add a new AI agent to your workspace.</DialogDescription>
+          <DialogTitle>{t("createAgent.title")}</DialogTitle>
+          <DialogDescription>{t("createAgent.description")}</DialogDescription>
         </DialogHeader>
         <form className="contents" onSubmit={handleSubmit}>
           <DialogPanel>
             <div className="space-y-4">
               <Field>
-                <FieldLabel>Name</FieldLabel>
+                <FieldLabel>{t("createAgent.name")}</FieldLabel>
                 <Input
                   type="text"
                   value={displayName}
                   onChange={(e) => setDisplayName((e.target as HTMLInputElement).value)}
-                  placeholder="e.g. Design Assistant, Code Reviewer..."
+                  placeholder={t("createAgent.namePlaceholder")}
                   required
                   autoFocus
                 />
@@ -127,30 +128,30 @@ export function CreateAgentDialog({
 
               <Field>
                 <FieldLabel>
-                  Description <span className="text-muted-foreground font-normal">(optional)</span>
+                  {t("createAgent.descriptionField")} <span className="text-muted-foreground font-normal">({t("createAgent.optional")})</span>
                 </FieldLabel>
                 <Input
                   type="text"
                   value={description}
                   onChange={(e) => setDescription((e.target as HTMLInputElement).value)}
-                  placeholder="What does this agent do?"
+                  placeholder={t("createAgent.descriptionPlaceholder")}
                 />
               </Field>
 
               <Field>
-                <FieldLabel>Model</FieldLabel>
+                <FieldLabel>{t("createAgent.model")}</FieldLabel>
                 <Select
                   value={selectedModel}
                   onValueChange={(val) => {
                     if (val) setModel((val as typeof selectedModel).value);
                   }}
-                  items={MODEL_ITEMS}
+                  items={modelItems}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Select a model" />
                   </SelectTrigger>
                   <SelectPopup>
-                    {MODEL_ITEMS.map((item) => (
+                    {modelItems.map((item) => (
                       <SelectItem key={item.value} value={item}>
                         {item.label}
                       </SelectItem>
@@ -161,12 +162,12 @@ export function CreateAgentDialog({
 
               <Field>
                 <FieldLabel>
-                  Instructions <span className="text-muted-foreground font-normal">(optional)</span>
+                  {t("createAgent.instructions")} <span className="text-muted-foreground font-normal">({t("createAgent.optional")})</span>
                 </FieldLabel>
                 <Textarea
                   value={systemPrompt}
                   onChange={(e) => setSystemPrompt((e.target as HTMLTextAreaElement).value)}
-                  placeholder="Tell the agent how to behave, what it's good at, what tools to use..."
+                  placeholder={t("createAgent.instructionsPlaceholder")}
                 />
               </Field>
 
@@ -177,10 +178,10 @@ export function CreateAgentDialog({
           </DialogPanel>
           <DialogFooter>
             <DialogClose render={<Button variant="ghost" type="button" />}>
-              Cancel
+              {t("createAgent.cancel")}
             </DialogClose>
             <Button type="submit" loading={saving} disabled={!displayName.trim()}>
-              Create Agent
+              {t("createAgent.submit")}
             </Button>
           </DialogFooter>
         </form>

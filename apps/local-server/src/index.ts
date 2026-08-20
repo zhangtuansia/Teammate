@@ -212,6 +212,12 @@ db.exec(`
     record TEXT,
     created_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 seedDatabase();
@@ -234,6 +240,10 @@ const server = createServer(async (request, response) => {
         mode: "local",
         database: dbPath,
       });
+    }
+
+    if (url.pathname === "/api/settings") {
+      return handleSettingsRequest(request, response);
     }
 
     if (url.pathname === "/api/agents") {
@@ -339,6 +349,13 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 function seedDatabase() {
   const now = new Date().toISOString();
+  const insertSetting = db.prepare(
+    "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+  );
+  insertSetting.run("language", "zh-CN", now);
+  insertSetting.run("theme", "system", now);
+  insertSetting.run("default_model", "sonnet", now);
+
   const insertProfile = db.prepare(
     "INSERT OR IGNORE INTO profiles (id, email, display_name, avatar_url, created_at) VALUES (?, ?, ?, ?, ?)"
   );
@@ -449,6 +466,65 @@ function seedDatabase() {
   }
 }
 
+function readAppSettings() {
+  const rows = db.prepare("SELECT key, value FROM app_settings").all() as Array<{
+    key: string;
+    value: string;
+  }>;
+  const values = new Map(rows.map((row) => [row.key, row.value]));
+  return {
+    language: values.get("language") || "zh-CN",
+    theme: values.get("theme") || "system",
+    defaultModel: values.get("default_model") || "sonnet",
+    provider: "claude-code",
+  };
+}
+
+async function handleSettingsRequest(request: IncomingMessage, response: ServerResponse) {
+  if (request.method === "GET") {
+    return sendJson(response, 200, { settings: readAppSettings() });
+  }
+
+  if (request.method !== "PUT") {
+    return sendJson(response, 405, { error: "Method not allowed" });
+  }
+
+  const body = (await readJson(request)) as {
+    language?: string;
+    theme?: string;
+    defaultModel?: string;
+  };
+  const updates: Array<[string, string]> = [];
+
+  if (body.language !== undefined) {
+    if (!["zh-CN", "en-US"].includes(body.language)) {
+      return sendJson(response, 400, { error: "Unsupported language" });
+    }
+    updates.push(["language", body.language]);
+  }
+  if (body.theme !== undefined) {
+    if (!["system", "light", "dark"].includes(body.theme)) {
+      return sendJson(response, 400, { error: "Unsupported theme" });
+    }
+    updates.push(["theme", body.theme]);
+  }
+  if (body.defaultModel !== undefined) {
+    if (!["opus", "sonnet", "haiku"].includes(body.defaultModel)) {
+      return sendJson(response, 400, { error: "Unsupported Claude model" });
+    }
+    updates.push(["default_model", body.defaultModel]);
+  }
+
+  const upsert = db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  );
+  const now = new Date().toISOString();
+  for (const [key, value] of updates) upsert.run(key, value, now);
+
+  return sendJson(response, 200, { settings: readAppSettings() });
+}
+
 async function handleAgentsRequest(request: IncomingMessage, response: ServerResponse) {
   if (request.method === "GET") {
     const agents = db
@@ -478,9 +554,10 @@ async function handleAgentsRequest(request: IncomingMessage, response: ServerRes
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "") || "agent";
+  const defaultModel = readAppSettings().defaultModel;
   const model = ["opus", "sonnet", "haiku"].includes(body.model || "")
     ? body.model
-    : "sonnet";
+    : defaultModel;
   const agent = queryData({
     table: "agents",
     action: "insert",

@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm';
 import { GearSix } from '@phosphor-icons/react';
 import TiptapMessageInput, { type TiptapMessageInputHandle } from './tiptap-message-input';
 import { useAgentActivity } from '@/hooks/use-agent-activity';
+import { useAppSettings } from '@/hooks/use-app-settings';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
@@ -66,6 +67,7 @@ export function MessageArea({
   const inputRef = useRef<TiptapMessageInputHandle>(null);
   const supabase = createClient();
   const agentActivities = useAgentActivity();
+  const { t } = useAppSettings();
 
   useEffect(() => {
     supabase.auth.getUser().then((result: { data: { user: { id: string } | null } }) => {
@@ -323,20 +325,20 @@ export function MessageArea({
       <div className="flex flex-1 items-center justify-center bg-card">
         <div className="text-center">
           <div className="text-5xl font-light text-muted-foreground/20 mb-4">Z</div>
-          <p className="text-sm text-muted-foreground">Select a conversation to start chatting</p>
+          <p className="text-sm text-muted-foreground">{t('conversation.select')}</p>
         </div>
       </div>
     );
   }
 
   function getSenderName(msg: Message) {
-    if (msg.sender_type === 'system') return 'System';
+    if (msg.sender_type === 'system') return t('message.system');
     if (msg.sender_type === 'agent') {
       const agent = channelAgents.get(msg.sender_id);
-      return agent?.display_name || agentInfo?.display_name || 'Agent';
+      return agent?.display_name || agentInfo?.display_name || t('message.agent');
     }
     if (msg.profiles?.display_name) return msg.profiles.display_name;
-    return 'You';
+    return t('message.you');
   }
 
   function formatTime(dateStr: string) {
@@ -344,10 +346,17 @@ export function MessageArea({
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
+  const composerPlaceholder =
+    channel.type === 'dm'
+      ? t('message.agentPlaceholder', {
+          name: agentInfo?.display_name || channel.name || t('message.agent'),
+        })
+      : t('message.channelPlaceholder', { name: channel.name });
+
   return (
     <div className="flex flex-1 flex-col bg-card max-w-full text-pretty">
       {/* Channel header */}
-      <div className="flex items-center gap-3 border-b-[0.5px] py-2 px-3" data-tauri-drag-region>
+      <div className="flex items-center gap-3 border-b-[0.5px] py-2 px-3">
         {channel.type === 'dm' && agentInfo ? (
           <>
             <div className="relative size-8">
@@ -378,7 +387,7 @@ export function MessageArea({
                 {(() => {
                   const act = agentActivities.get(agentInfo.id);
                   if (!act || act.activity === 'idle' || act.activity === 'error') return null;
-                  const label = act.label || (act.activity === 'thinking' ? 'Thinking' : 'Working');
+                  const label = act.label || (act.activity === 'thinking' ? t('message.thinking') : t('message.working'));
                   return (
                     <span className="flex items-center gap-1.5 text-[11px] text-primary">
                       <span className="font-medium">{label}</span>
@@ -396,7 +405,7 @@ export function MessageArea({
                 onClick={() => onToggleSettings(showSettings ? null : agentInfo)}
                 variant={showSettings ? 'secondary' : 'ghost'}
                 size="icon-xs"
-                aria-label="Agent Settings">
+                aria-label={t('message.agentSettings')}>
                 <GearSix size={18} />
               </Button>
             )}
@@ -425,12 +434,12 @@ export function MessageArea({
       <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-5 py-4 space-y-1">
         {loadingMore && (
           <div className="flex justify-center py-3">
-            <span className="text-xs text-muted-foreground">Loading older messages...</span>
+            <span className="text-xs text-muted-foreground">{t('message.loadingOlder')}</span>
           </div>
         )}
         {!hasMore && messages.length > 0 && (
           <div className="flex justify-center py-3">
-            <span className="text-xs text-muted-foreground">Beginning of conversation</span>
+            <span className="text-xs text-muted-foreground">{t('message.beginning')}</span>
           </div>
         )}
         {messages.map((msg, i) => {
@@ -457,7 +466,7 @@ export function MessageArea({
                     <span className="text-[13px] font-semibold">{getSenderName(msg)}</span>
                     {msg.sender_type === 'agent' && (
                       <Badge variant="secondary" className="text-[10px] py-0">
-                        agent
+                        {t('message.agentBadge')}
                       </Badge>
                     )}
                     <span className="text-[11px] text-muted-foreground">{formatTime(msg.created_at)}</span>
@@ -529,14 +538,14 @@ export function MessageArea({
             const firstAgent = agentInfo || Array.from(channelAgents.values())[0];
             activeAgentName = firstAgent?.display_name || 'Agent';
             activeAgentId = firstAgent?.id || 'unknown';
-            activityLabel = 'Thinking';
+            activityLabel = t('message.thinking');
             activityDetail = '';
           }
 
           if (!isActive) return null;
 
           const isTextOutput = !activityLabel && activityDetail;
-          const displayLabel = activityLabel || 'Thinking';
+          const displayLabel = activityLabel || t('message.thinking');
 
           return (
             <div className="flex gap-3 px-2 py-1 mt-4">
@@ -610,12 +619,9 @@ export function MessageArea({
         <div className="rounded-lg border bg-card shadow-xs/5 overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24 transition-shadow">
           <div className="px-4 pt-3 pb-1 text-[15px] leading-[1.54]">
             <TiptapMessageInput
+              key={composerPlaceholder}
               ref={inputRef}
-              placeholder={
-                channel.type === 'dm'
-                  ? `Message ${agentInfo?.display_name || 'agent'}...`
-                  : `@ to mention an agent in #${channel.name}...`
-              }
+              placeholder={composerPlaceholder}
               disabled={sending}
               onSend={doSend}
               onTextUpdate={(textBeforeCursor, fullText) => {
@@ -680,7 +686,7 @@ export function MessageArea({
               }}
               disabled={sending || !hasContent}
               size="sm">
-              {sending ? 'Sending...' : 'Send'}
+              {sending ? t('message.sending') : t('message.send')}
             </Button>
           </div>
         </div>

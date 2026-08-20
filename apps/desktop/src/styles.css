@@ -40,7 +40,8 @@ html[data-platform="macos"] .desktop-drag-region {
   z-index: 30;
   top: 0;
   left: 0;
+  right: 48px;
   display: block;
-  width: var(--sidebar-width);
   height: 38px;
+  user-select: none;
 }

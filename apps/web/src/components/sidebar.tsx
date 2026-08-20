@@ -10,9 +10,10 @@ import { EditChannelDialog } from "./edit-channel-dialog";
 import { MachineDetailDialog } from "./machine-detail-dialog";
 import { ContextMenu } from "./context-menu";
 import { useAgentActivity } from "@/hooks/use-agent-activity";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
-import { ChevronDownIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, MonitorIcon } from "lucide-react";
+import { ChevronDownIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, MonitorIcon, SettingsIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 
 interface Server {
@@ -83,6 +84,7 @@ export function Sidebar({
   const router = useRouter();
   const params = useParams();
   const agentActivities = useAgentActivity();
+  const { t, openSettings } = useAppSettings();
   const localMode = process.env.NEXT_PUBLIC_ZANO_LOCAL_MODE === "true";
 
   // Determine active channel from URL
@@ -415,12 +417,12 @@ export function Sidebar({
         <div>
           <div className="mb-1.5 px-2 flex items-center justify-between h-[22px]">
             <span className="text-[12px] font-medium text-muted-foreground">
-              Agents
+              {t("nav.agents")}
             </span>
             <button
               onClick={() => setShowCreateAgent(true)}
               className="rounded-md p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-              title="Create agent"
+              title={t("nav.createAgent")}
             >
               <PlusIcon className="size-3.5" />
             </button>
@@ -466,12 +468,12 @@ export function Sidebar({
         <div>
           <div className="mb-1.5 px-2 flex items-center justify-between h-[22px]">
             <span className="text-[12px] font-medium text-muted-foreground">
-              Channels
+              {t("nav.channels")}
             </span>
             <button
               onClick={() => setShowCreateChannel(true)}
               className="rounded-md p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-              title="Create channel"
+              title={t("nav.createChannel")}
             >
               <PlusIcon className="size-3.5" />
             </button>
@@ -503,7 +505,7 @@ export function Sidebar({
           <div>
             <div className="mb-1.5 px-2 flex items-center justify-between h-[22px]">
               <span className="text-[12px] font-medium text-muted-foreground">
-                Machines
+                {t("nav.machines")}
               </span>
             </div>
             <div className="flex flex-col gap-[2px]">
@@ -545,6 +547,16 @@ export function Sidebar({
             title="Sign out"
           >
             <LogOutIcon className="size-3.5" />
+          </button>
+        )}
+        {openSettings && (
+          <button
+            onClick={openSettings}
+            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
+          >
+            <SettingsIcon className="size-3.5" />
           </button>
         )}
       </div>

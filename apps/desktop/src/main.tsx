@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
+import { DesktopSettingsProvider } from "./settings";
 import "./styles.css";
 
 document.documentElement.dataset.platform = navigator.userAgent.includes("Macintosh")
@@ -11,6 +12,8 @@ document.documentElement.dataset.platform = navigator.userAgent.includes("Macint
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <DesktopSettingsProvider>
+      <App />
+    </DesktopSettingsProvider>
   </StrictMode>,
 );
