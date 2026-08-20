@@ -11,7 +11,6 @@ import { MachineDetailDialog } from "./machine-detail-dialog";
 import { ContextMenu } from "./context-menu";
 import { useAgentActivity } from "@/hooks/use-agent-activity";
 import { useAppSettings } from "@/hooks/use-app-settings";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import { ChevronDownIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, MonitorIcon, SettingsIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
@@ -448,7 +447,12 @@ export function Sidebar({
               >
                 {/* Agent avatar */}
                 <div className="relative flex-shrink-0 size-6">
-                  <GeneratedAvatar id={dm.agent?.id || dm.id} name={dm.agent?.display_name || dm.name} size="xs" />
+                  <GeneratedAvatar
+                    id={dm.agent?.id || dm.id}
+                    name={dm.agent?.display_name || dm.name}
+                    size="xs"
+                    avatarUrl={dm.agent?.avatar_url}
+                  />
                   {/* Status dot */}
                   <div
                     className={`absolute bottom-0 right-0 h-1.5 w-1.5 translate-x-[1px] translate-y-[1px] rounded-full border-[1.5px] border-background ${getStatusDot(dm.agent?.id || "")}`}

@@ -16,7 +16,7 @@ Teammate is based on [Zano](https://github.com/EryouHao/zano) and is being refac
 
 ## Desktop quickstart (Tauri 2)
 
-Requirements for development: Node >= 22.5, pnpm 10, the Rust stable toolchain, and an installed/authenticated Claude Code CLI if you want the current AI runner to reply.
+Requirements for development: Node >= 22.5, pnpm 10, and the Rust stable toolchain. To run an agent, use an installed/authenticated Claude Code or Codex CLI, sign in with ChatGPT Plus/Pro, or add an OpenAI/Anthropic-compatible API connection in Settings.
 
 ```bash
 pnpm install
@@ -28,15 +28,15 @@ window and keeps Vite hot reload enabled, so React and CSS changes appear withou
 building an app or DMG. If a Teammate local runtime is already running, the dev
 window reuses it instead of starting a second SQLite service.
 
-The desktop app starts its own local runtime. Node, the SQLite service, bridge, and workspace CLI are bundled as sidecars; there is no separate server command and no Supabase account. Build a native installer with:
+The desktop app starts its own local runtime. Node, the SQLite service, bridge, workspace CLI, and the embedded Pi worker runtime are bundled as sidecars; there is no separate server command and no Supabase account. Build a native installer with:
 
 ```bash
 pnpm desktop:build
 ```
 
-Artifacts are written below `apps/desktop/src-tauri/target/release/bundle/`. The same codebase builds a macOS `.app`/DMG and Windows installer; Windows uses the system WebView2 runtime (and downloads its bootstrapper when needed).
+Artifacts are written below `apps/desktop/src-tauri/target/release/bundle/`. The current validated target is macOS `.app`/DMG; Windows packaging remains configured but is not part of the current acceptance pass.
 
-Application settings are available from the gear in the lower-left corner. Language (Simplified Chinese/English), appearance (system/light/dark), and the default Claude model are stored in the local SQLite database. The current agent runner remains Claude Code; the UI labels Codex and OpenAI-compatible endpoints as not connected instead of exposing non-functional choices.
+Application settings are available from the gear in the lower-left corner. Language (Simplified Chinese/English), appearance (system/light/dark), default runtime/model, and model connections are managed there. Teammate supports native Claude Code and Codex CLI sessions, plus a Pi-based runtime for ChatGPT OAuth and OpenAI/Anthropic-compatible APIs. API keys and OAuth tokens are encrypted in a machine-bound credential file with mode `0600`; they are not stored in SQLite or returned to the UI.
 
 ## Local quickstart (no Supabase)
 
@@ -69,22 +69,22 @@ Supabase-backed hosting remains available for compatibility, but it is no longer
 └────────────────────────────────────────────┼─────────────────┘
                                              │ spawn
                                              ▼
-                                    ┌────────────────────┐
-                                    │ Claude Code agents │
-                                    └────────────────────┘
+                              ┌──────────────────────────────┐
+                              │ Claude Code · Codex · Pi/API │
+                              └──────────────────────────────┘
 ```
 
 - **Desktop**: Tauri 2 + Vite/React, reusing the existing chat UI without a Next.js server.
 - **Web**: Next.js 16. Channels, DMs, threads, tasks, and agent management; preserved for hosted mode.
 - **Local service**: Node.js + built-in SQLite. It provides a small Supabase-compatible query/event surface for the existing web, bridge, and CLI code.
-- **Settings**: App-level language, appearance, and default-model preferences persist locally and apply across the desktop UI.
-- **Bridge**: Subscribes to local messages, starts an agent runner, and injects the workspace CLI.
-- **Agents**: The current runner is Claude Code. A provider layer for Codex and OpenAI-compatible custom API endpoints is planned next.
+- **Settings**: App-level language, appearance, default runtime/model, encrypted credentials, and per-agent avatar preferences persist locally.
+- **Bridge**: Subscribes to local messages, starts the selected runtime, and injects the workspace CLI.
+- **Agents**: Claude Code and Codex use the installed CLI and existing login state. Pi handles ChatGPT OAuth and custom OpenAI/Anthropic-compatible connections.
 - **Memory**: Each agent maintains a persistent `MEMORY.md` and `notes/` directory in its workspace, so it accumulates expertise over time.
 
 ## Desktop roadmap
 
-The Tauri 2 shell and local runtime packaging are implemented. The next desktop milestone is a runner/provider interface for Claude Code, Codex, and OpenAI-compatible API endpoints, followed by progressively moving the remaining server-oriented pieces behind stable local APIs.
+The Tauri 2 shell, local runtime packaging, encrypted model connections, and multi-runtime agent layer are implemented. The next desktop milestone is release signing/notarization and broader end-to-end provider coverage.
 
 ## Original hosted Zano mode
 
@@ -142,7 +142,7 @@ For database setup, see [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md).
 
 ## Status
 
-Teammate is **early and experimental**. Local Node/SQLite mode and Tauri 2 packaging are implemented; the multi-provider runner is the next architectural milestone.
+Teammate is **early and experimental**. Local Node/SQLite mode, Tauri 2 packaging, Claude Code, Codex, ChatGPT OAuth, and custom model connections are implemented; macOS is the currently validated desktop target.
 
 ## Contributing
 

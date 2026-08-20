@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import {
+  isAgentRuntime,
+  isValidAgentModel,
+  normalizeAgentModel,
+  normalizeAgentRuntime,
+} from "@/lib/agent-runtime";
 
 // GET /api/agents — list user's agents
 export async function GET() {
@@ -37,7 +43,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { display_name, description, system_prompt, model, server_id } = body;
+  const { display_name, description, system_prompt, runtime, model, server_id } = body;
 
   if (!display_name?.trim()) {
     return NextResponse.json(
@@ -55,10 +61,20 @@ export async function POST(request: NextRequest) {
   const randomSuffix = Math.random().toString(36).substring(2, 6);
   const name = `${baseName}-${user.id.substring(0, 8)}-${randomSuffix}`;
 
-  // 1. Create the agent
-  // Validate model if provided
-  const validModels = ["opus", "sonnet", "haiku"];
-  const agentModel = model && validModels.includes(model) ? model : "opus";
+  const agentRuntime = normalizeAgentRuntime(runtime);
+  if (runtime !== undefined && !isAgentRuntime(runtime)) {
+    return NextResponse.json({ error: "Unsupported agent runtime" }, { status: 400 });
+  }
+  if (agentRuntime === "pi") {
+    return NextResponse.json(
+      { error: "Pi model connections are currently available in the local desktop app" },
+      { status: 400 },
+    );
+  }
+  if (model !== undefined && !isValidAgentModel(agentRuntime, model)) {
+    return NextResponse.json({ error: "Unsupported runtime model" }, { status: 400 });
+  }
+  const agentModel = normalizeAgentModel(agentRuntime, model);
 
   if (!server_id) {
     return NextResponse.json(
@@ -74,6 +90,7 @@ export async function POST(request: NextRequest) {
       display_name: display_name.trim(),
       description: description?.trim() || null,
       system_prompt: system_prompt?.trim() || null,
+      runtime: agentRuntime,
       model: agentModel,
       status: "offline",
       owner_id: user.id,

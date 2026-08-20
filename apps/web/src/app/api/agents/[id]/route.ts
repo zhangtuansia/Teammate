@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import {
+  defaultModelForRuntime,
+  isAgentRuntime,
+  isValidAgentModel,
+  normalizeAgentRuntime,
+} from "@/lib/agent-runtime";
+import { isValidAgentAvatarUrl } from "@/lib/agent-avatar";
 
 // GET /api/agents/[id] — get a single agent
 export async function GET(
@@ -48,7 +55,7 @@ export async function PUT(
   // Verify ownership
   const { data: existing } = await supabase
     .from("agents")
-    .select("id")
+    .select("id, runtime")
     .eq("id", id)
     .eq("owner_id", user.id)
     .single();
@@ -75,15 +82,49 @@ export async function PUT(
   if (body.system_prompt !== undefined) {
     updates.system_prompt = body.system_prompt?.trim() || null;
   }
+  if (body.avatar_data !== undefined) {
+    return NextResponse.json(
+      { error: "Custom avatar uploads are currently available in the local desktop app" },
+      { status: 400 },
+    );
+  }
+  if (body.avatar_url !== undefined) {
+    if (!isValidAgentAvatarUrl(body.avatar_url)) {
+      return NextResponse.json({ error: "Unsupported avatar URL" }, { status: 400 });
+    }
+    updates.avatar_url = body.avatar_url;
+  }
+  const currentRuntime = normalizeAgentRuntime(existing.runtime);
+  const nextRuntime = body.runtime === undefined
+    ? currentRuntime
+    : normalizeAgentRuntime(body.runtime);
+  if (body.runtime !== undefined && !isAgentRuntime(body.runtime)) {
+    return NextResponse.json({ error: "Unsupported agent runtime" }, { status: 400 });
+  }
+  if (nextRuntime === "pi") {
+    return NextResponse.json(
+      { error: "Pi model connections are currently available in the local desktop app" },
+      { status: 400 },
+    );
+  }
+  if (body.runtime !== undefined) {
+    updates.runtime = nextRuntime;
+    if (nextRuntime !== currentRuntime) {
+      updates.session_id = null;
+      updates.runtime_session_id = null;
+      updates.runtime_session_runtime = null;
+    }
+  }
   if (body.model !== undefined) {
-    const validModels = ["opus", "sonnet", "haiku"];
-    if (!validModels.includes(body.model)) {
+    if (!isValidAgentModel(nextRuntime, body.model)) {
       return NextResponse.json(
-        { error: "model must be one of: opus, sonnet, haiku" },
+        { error: "Unsupported runtime model" },
         { status: 400 }
       );
     }
     updates.model = body.model;
+  } else if (nextRuntime !== currentRuntime) {
+    updates.model = defaultModelForRuntime(nextRuntime);
   }
 
   const { data: agent, error } = await supabase

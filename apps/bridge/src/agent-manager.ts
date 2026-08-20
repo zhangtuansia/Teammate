@@ -1,14 +1,20 @@
-import { mkdirSync, existsSync, writeFileSync, readFileSync } from "fs";
-import { delimiter, join, resolve, dirname } from "path";
-import { fileURLToPath } from "url";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { spawn, ChildProcess } from "child_process";
-import { SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import {
+  createAgentRuntime,
+  normalizeRuntimeId,
+  type AgentRuntimeHandle,
+  type AgentRuntimeId,
+  type RuntimeActivity,
+  type RuntimeConnectionConfig,
+  type RuntimeEvent,
+} from "./runtimes/index.js";
 
-type AgentActivity = "idle" | "thinking" | "working" | "error";
-
-const ACTIVITY_HEARTBEAT_MS = 60_000; // Re-broadcast active state every 60s
+const ACTIVITY_HEARTBEAT_MS = 60_000;
 
 interface AgentRecord {
   id: string;
@@ -16,7 +22,9 @@ interface AgentRecord {
   display_name: string;
   description: string | null;
   system_prompt: string | null;
+  runtime?: string | null;
   model: string;
+  connection_id?: string | null;
   status: string;
 }
 
@@ -30,32 +38,40 @@ interface AgentSession {
 interface QueuedMessage {
   userMessage: string;
   resolve: () => void;
-  reject: (err: Error) => void;
+  reject: (error: Error) => void;
 }
 
-interface AgentProcess {
-  proc: ChildProcess;
+interface ManagedRuntime {
+  handle: AgentRuntimeHandle;
+  runtimeId: AgentRuntimeId;
+  model: string;
+  connectionId: string | null;
   sessionId: string | null;
   busy: boolean;
-  stdoutBuffer: string;
-  activity: AgentActivity;
+  activity: RuntimeActivity;
   activityLabel: string;
   activityDetail: string;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   messageQueue: QueuedMessage[];
-  /** Accumulated text content from assistant text events */
-  pendingText: string;
+  restartAfterTurn: boolean;
+}
+
+interface StoredSession {
+  runtime_session_id?: string | null;
+  runtime_session_runtime?: string | null;
+  session_id?: string | null;
 }
 
 export class AgentManager {
-  private sessions = new Map<string, AgentSession>();
-  private processes = new Map<string, AgentProcess>();
-  private agentsDir: string;
+  private readonly sessions = new Map<string, AgentSession>();
+  private readonly processes = new Map<string, ManagedRuntime>();
+  private readonly deliveryTails = new Map<string, Promise<void>>();
+  private readonly agentsDir: string;
   private supabase: SupabaseClient;
-  private supabaseUrl: string;
-  private supabaseKey: string;
+  private readonly supabaseUrl: string;
+  private readonly supabaseKey: string;
   private authToken: string;
-  private localServerUrl: string;
+  private readonly localServerUrl: string;
   private activityChannel: RealtimeChannel;
 
   constructor(
@@ -63,8 +79,8 @@ export class AgentManager {
     supabase: SupabaseClient,
     supabaseUrl: string,
     supabaseKey: string,
-    authToken: string = "",
-    localServerUrl: string = ""
+    authToken = "",
+    localServerUrl = "",
   ) {
     this.agentsDir = agentsDir;
     this.supabase = supabase;
@@ -73,172 +89,28 @@ export class AgentManager {
     this.authToken = authToken;
     this.localServerUrl = localServerUrl;
 
-    if (!existsSync(agentsDir)) {
-      mkdirSync(agentsDir, { recursive: true });
-    }
+    if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
 
-    // Set up Realtime Broadcast channel for agent activity
     this.activityChannel = this.supabase.channel("agent-activity", {
       config: { broadcast: { self: false } },
     });
     this.activityChannel.subscribe();
   }
 
-  /** Update the Supabase client and auth token (called on token refresh) */
   updateSupabaseClient(supabase: SupabaseClient, authToken: string) {
-    // Remove old activity channel
     this.supabase.removeChannel(this.activityChannel);
-
     this.supabase = supabase;
     this.authToken = authToken;
-
-    // Re-subscribe activity channel on new client
     this.activityChannel = this.supabase.channel("agent-activity", {
       config: { broadcast: { self: false } },
     });
     this.activityChannel.subscribe();
-  }
-
-  /** Broadcast agent activity to all connected frontend clients */
-  private broadcastActivity(
-    agentId: string,
-    activity: AgentActivity,
-    label: string = "",
-    detail: string = ""
-  ) {
-    const agentProc = this.processes.get(agentId);
-    if (agentProc) {
-      agentProc.activity = activity;
-      agentProc.activityLabel = label;
-      agentProc.activityDetail = detail;
-
-      // Manage heartbeat: only active for thinking/working
-      if (activity === "thinking" || activity === "working") {
-        if (!agentProc.heartbeatTimer) {
-          agentProc.heartbeatTimer = setInterval(() => {
-            this.activityChannel.send({
-              type: "broadcast",
-              event: "activity",
-              payload: {
-                agentId,
-                activity: agentProc.activity,
-                label: agentProc.activityLabel,
-                detail: agentProc.activityDetail,
-              },
-            });
-          }, ACTIVITY_HEARTBEAT_MS);
-        }
-      } else {
-        if (agentProc.heartbeatTimer) {
-          clearInterval(agentProc.heartbeatTimer);
-          agentProc.heartbeatTimer = null;
-        }
-      }
-    }
-
-    this.activityChannel.send({
-      type: "broadcast",
-      event: "activity",
-      payload: { agentId, activity, label, detail },
-    });
-  }
-
-  /**
-   * Map a tool_use event to a human-readable label and detail string.
-   * e.g. Read → ("Reading file", "/path/to/file")
-   */
-  private describeToolUse(contentBlock: any): { label: string; detail: string } {
-    const toolName: string = contentBlock.name || "tool";
-    const input = contentBlock.input || {};
-
-    switch (toolName) {
-      case "Read":
-        return { label: "Reading file", detail: input.file_path || "" };
-
-      case "Write":
-        return { label: "Writing file", detail: input.file_path || "" };
-
-      case "Edit":
-        return { label: "Editing file", detail: input.file_path || "" };
-
-      case "Bash": {
-        const cmd: string = input.command || "";
-        // Detect zano/slock message send
-        const msgMatch = cmd.match(/(?:zano|slock)\s+message\s+send\s+--target\s+"?([^"]+)"?/);
-        if (msgMatch) {
-          return { label: "Sending message", detail: msgMatch[1] };
-        }
-        // Truncate long commands
-        return { label: "Running command", detail: cmd.length > 120 ? cmd.substring(0, 120) + "…" : cmd };
-      }
-
-      case "Grep":
-        return { label: "Searching", detail: input.pattern || "" };
-
-      case "Glob":
-        return { label: "Finding files", detail: input.pattern || "" };
-
-      case "Agent":
-        return { label: "Running agent", detail: input.description || "" };
-
-      case "WebSearch":
-        return { label: "Searching web", detail: input.query || "" };
-
-      case "WebFetch":
-        return { label: "Fetching URL", detail: input.url || "" };
-
-      case "Skill":
-        return { label: "Running skill", detail: input.skill || "" };
-
-      case "TodoWrite":
-        return { label: "Updating tasks", detail: "" };
-
-      default:
-        return { label: `Running ${toolName}`, detail: "" };
-    }
-  }
-
-  /**
-   * Flush accumulated assistant text as an activity broadcast.
-   * Called before switching to a different activity type.
-   */
-  private flushPendingText(agentId: string, agentProc: AgentProcess) {
-    if (!agentProc.pendingText) return;
-
-    const text = agentProc.pendingText.trim();
-    if (text) {
-      this.broadcastActivity(agentId, "thinking", "", text);
-    }
-    agentProc.pendingText = "";
-  }
-
-  /** Save session ID to Supabase so it survives bridge restarts */
-  private async saveSessionId(agentId: string, sessionId: string) {
-    await this.supabase
-      .from("agents")
-      .update({ session_id: sessionId })
-      .eq("id", agentId);
-  }
-
-  /** Load session ID from Supabase */
-  private async loadSessionId(agentId: string): Promise<string | null> {
-    const { data } = await this.supabase
-      .from("agents")
-      .select("session_id")
-      .eq("id", agentId)
-      .single();
-    return data?.session_id || null;
   }
 
   async initAgent(agentId: string, agent: AgentRecord) {
     const workDir = join(this.agentsDir, agentId);
-
-    // Create workspace if it doesn't exist
     if (!existsSync(workDir)) {
-      mkdirSync(workDir, { recursive: true });
       mkdirSync(join(workDir, "notes"), { recursive: true });
-
-      // Write initial MEMORY.md
       const memoryContent = `# ${agent.display_name}
 
 ## Role
@@ -257,186 +129,419 @@ ${agent.description || agent.display_name}
       console.log(`  [${agent.display_name}] Workspace exists: ${workDir}`);
     }
 
-    // Initialize session
     this.sessions.set(agentId, {
       id: agentId,
       name: agent.name,
       displayName: agent.display_name,
       workDir,
     });
-
-    // Update workspace_path in DB
     await this.supabase
       .from("agents")
       .update({ workspace_path: workDir })
       .eq("id", agentId);
   }
 
-  /**
-   * Send a message to an agent. Messages are queued and processed
-   * sequentially — the next message is only sent after the current
-   * turn completes (indicated by a "result" stream-json event).
-   */
   async sendToAgent(agentId: string, userMessage: string): Promise<void> {
-    const session = this.sessions.get(agentId);
-    if (!session) {
-      throw new Error(`Agent ${agentId} not initialized`);
+    const previous = this.deliveryTails.get(agentId) || Promise.resolve();
+    const delivery = previous
+      .catch(() => undefined)
+      .then(() => this.sendToAgentNow(agentId, userMessage));
+    this.deliveryTails.set(agentId, delivery);
+    try {
+      await delivery;
+    } finally {
+      if (this.deliveryTails.get(agentId) === delivery) {
+        this.deliveryTails.delete(agentId);
+      }
     }
+  }
 
-    // Get agent record for system prompt
-    const { data: agent } = await this.supabase
+  private async sendToAgentNow(
+    agentId: string,
+    userMessage: string,
+  ): Promise<void> {
+    const session = this.sessions.get(agentId);
+    if (!session) throw new Error(`Agent ${agentId} not initialized`);
+
+    const { data: rawAgent, error } = await this.supabase
       .from("agents")
       .select("*")
       .eq("id", agentId)
       .single();
-
-    // Get MEMORY.md content
-    let memoryContext = "";
-    const memoryPath = join(session.workDir, "MEMORY.md");
-    if (existsSync(memoryPath)) {
-      memoryContext = readFileSync(memoryPath, "utf-8");
+    if (error || !rawAgent) {
+      throw new Error(error?.message || `Agent ${agentId} not found`);
     }
+    const agent = rawAgent as AgentRecord;
 
-    const systemPrompt = buildSystemPrompt(agent, memoryContext);
-
-    // Ensure a persistent process is running
-    let agentProc = this.processes.get(agentId);
-    if (!agentProc || agentProc.proc.killed || agentProc.proc.exitCode !== null) {
-      agentProc = await this.spawnProcess(agentId, session, systemPrompt, agent?.model || "opus");
-      this.processes.set(agentId, agentProc);
-    }
-
-    // If the agent is busy, queue the message and wait
-    if (agentProc.busy) {
-      const displayName = session.displayName;
+    const current = this.processes.get(agentId);
+    if (current?.busy) {
       console.log(
-        `  [${displayName}] Agent busy, queueing message (${userMessage.length} chars, queue size: ${agentProc.messageQueue.length + 1})...`
+        `  [${session.displayName}] Agent busy, queueing message (${current.messageQueue.length + 1} queued)...`,
       );
       return new Promise<void>((resolve, reject) => {
-        agentProc!.messageQueue.push({ userMessage, resolve, reject });
+        current.messageQueue.push({ userMessage, resolve, reject });
       });
     }
 
-    // Send immediately
-    this.deliverMessage(agentId, agentProc, session, userMessage);
+    const runtimeId = normalizeRuntimeId(agent.runtime);
+    const model = this.resolveModel(runtimeId, agent.model);
+    let managed = current;
+    if (
+      !managed ||
+      !managed.handle.isRunning() ||
+      managed.runtimeId !== runtimeId ||
+      managed.model !== model ||
+      managed.connectionId !== (agent.connection_id || null)
+    ) {
+      const queued = managed?.messageQueue || [];
+      this.stopManagedRuntime(managed);
+      managed = await this.startManagedRuntime(agentId, session, agent, queued);
+      this.processes.set(agentId, managed);
+    }
+
+    await this.deliverMessage(agentId, managed, session, userMessage);
   }
 
-  /** Write a message to the agent's stdin and mark it as busy */
-  private deliverMessage(
+  getWorkspaceDir(agentId: string): string | null {
+    return this.sessions.get(agentId)?.workDir ?? null;
+  }
+
+  stopAll() {
+    for (const [agentId, managed] of this.processes) {
+      for (const queued of managed.messageQueue) {
+        queued.reject(new Error("Agent manager stopped"));
+      }
+      managed.messageQueue = [];
+      console.log(`  Stopping agent runtime: ${agentId}`);
+      this.stopManagedRuntime(managed);
+    }
+    this.processes.clear();
+    this.sessions.clear();
+    this.supabase.removeChannel(this.activityChannel);
+  }
+
+  private resolveModel(runtimeId: AgentRuntimeId, model: string | null | undefined) {
+    if (runtimeId === "codex") {
+      return model && !["opus", "sonnet", "haiku"].includes(model)
+        ? model
+        : "default";
+    }
+    if (runtimeId === "pi") {
+      return model?.trim() || "default";
+    }
+    return ["opus", "sonnet", "haiku"].includes(model || "")
+      ? model!
+      : "sonnet";
+  }
+
+  private readSystemPrompt(session: AgentSession, agent: AgentRecord) {
+    const memoryPath = join(session.workDir, "MEMORY.md");
+    const memoryContext = existsSync(memoryPath)
+      ? readFileSync(memoryPath, "utf-8")
+      : "";
+    return buildSystemPrompt(agent, memoryContext);
+  }
+
+  private async startManagedRuntime(
     agentId: string,
-    agentProc: AgentProcess,
     session: AgentSession,
-    userMessage: string
-  ) {
-    agentProc.busy = true;
-
-    const stdinMsg = JSON.stringify({
-      type: "user",
-      message: {
-        role: "user",
-        content: [{ type: "text", text: userMessage }],
+    agent: AgentRecord,
+    messageQueue: QueuedMessage[] = [],
+  ): Promise<ManagedRuntime> {
+    const runtimeId = normalizeRuntimeId(agent.runtime);
+    const model = this.resolveModel(runtimeId, agent.model);
+    const sessionId = await this.loadSessionId(agentId, runtimeId);
+    const zanoDir = this.prepareCliTransport(agentId, session);
+    const runtime = createAgentRuntime(runtimeId);
+    const connection = runtimeId === "pi"
+      ? await this.loadRuntimeConnection(agent.connection_id)
+      : undefined;
+    let managed: ManagedRuntime | null = null;
+    const pendingEvents: RuntimeEvent[] = [];
+    const handle = await runtime.start(
+      {
+        agentId,
+        displayName: session.displayName,
+        workDir: session.workDir,
+        systemPrompt: this.readSystemPrompt(session, agent),
+        model,
+        sessionId,
+        connection,
+        env: {
+          ...process.env,
+          FORCE_COLOR: "0",
+          NO_COLOR: "1",
+          ZANO_AGENT_ID: agentId,
+          ZANO_SUPABASE_URL: this.supabaseUrl,
+          ZANO_SUPABASE_KEY: this.supabaseKey,
+          ZANO_AUTH_TOKEN: this.authToken,
+          ...(this.localServerUrl
+            ? { ZANO_LOCAL_SERVER_URL: this.localServerUrl }
+            : {}),
+          PATH: `${zanoDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
       },
-      ...(agentProc.sessionId ? { session_id: agentProc.sessionId } : {}),
-    });
+      (event) => {
+        if (managed) void this.handleRuntimeEvent(agentId, managed, event);
+        else pendingEvents.push(event);
+      },
+    );
 
-    const displayName = session.displayName;
+    managed = {
+      handle,
+      runtimeId,
+      model,
+      connectionId: agent.connection_id || null,
+      sessionId,
+      busy: false,
+      activity: "idle",
+      activityLabel: "Idle",
+      activityDetail: "",
+      heartbeatTimer: null,
+      messageQueue,
+      restartAfterTurn: false,
+    };
+    for (const event of pendingEvents) {
+      await this.handleRuntimeEvent(agentId, managed, event);
+    }
+    return managed;
+  }
+
+  private async deliverMessage(
+    agentId: string,
+    managed: ManagedRuntime,
+    session: AgentSession,
+    userMessage: string,
+  ) {
+    managed.busy = true;
     console.log(
-      `  [${displayName}] Forwarding message (${userMessage.length} chars)...`
+      `  [${session.displayName}] Forwarding message to ${managed.runtimeId} (${userMessage.length} chars)...`,
     );
     this.broadcastActivity(agentId, "working", "Working", "Message received");
-    agentProc.proc.stdin?.write(stdinMsg + "\n");
-  }
-
-  /** Process the next queued message, if any */
-  private drainQueue(agentId: string, agentProc: AgentProcess) {
-    const session = this.sessions.get(agentId);
-    if (!session) return;
-
-    const next = agentProc.messageQueue.shift();
-    if (next) {
-      console.log(
-        `  [${session.displayName}] Draining queue (${agentProc.messageQueue.length} remaining)...`
-      );
-      this.deliverMessage(agentId, agentProc, session, next.userMessage);
-      // Resolve the queued promise — message has been delivered
-      next.resolve();
+    try {
+      await managed.handle.send(userMessage);
+    } catch (error) {
+      if (managed.busy) {
+        await this.handleRuntimeEvent(agentId, managed, {
+          type: "turn-failed",
+          message: error instanceof Error ? error.message : "Runtime failed",
+        });
+      }
     }
   }
 
-  /**
-   * Restart the agent process to pick up a fresh system prompt
-   * (with updated MEMORY.md). Uses --resume to continue the session.
-   */
-  private async restartProcess(agentId: string) {
-    const session = this.sessions.get(agentId);
-    if (!session) return;
+  private async handleRuntimeEvent(
+    agentId: string,
+    managed: ManagedRuntime,
+    event: RuntimeEvent,
+  ) {
+    const registered = this.processes.get(agentId);
+    if (registered && registered !== managed && registered.handle.isRunning()) {
+      return;
+    }
+    const displayName = this.sessions.get(agentId)?.displayName || agentId;
 
-    const agentProc = this.processes.get(agentId);
-    if (!agentProc) return;
+    switch (event.type) {
+      case "session":
+        managed.sessionId = event.sessionId;
+        await this.saveSessionId(agentId, managed.runtimeId, event.sessionId);
+        console.log(
+          `  [${displayName}] ${managed.runtimeId} session: ${event.sessionId.substring(0, 8)}...`,
+        );
+        break;
+      case "activity":
+        this.broadcastActivity(
+          agentId,
+          event.activity,
+          event.label,
+          event.detail || "",
+        );
+        break;
+      case "context-compacting":
+        managed.restartAfterTurn = true;
+        this.broadcastActivity(agentId, "working", "Optimizing context", "");
+        break;
+      case "turn-complete":
+        if (event.sessionId) {
+          managed.sessionId = event.sessionId;
+          await this.saveSessionId(agentId, managed.runtimeId, event.sessionId);
+        }
+        managed.busy = false;
+        this.broadcastActivity(agentId, "idle", "Idle", "");
+        console.log(`  [${displayName}] ${managed.runtimeId} turn complete.`);
+        if (managed.restartAfterTurn) {
+          await this.restartRuntime(agentId, managed);
+        }
+        this.drainQueue(agentId);
+        break;
+      case "turn-failed":
+        if (!managed.busy && managed.activity === "error") return;
+        managed.busy = false;
+        this.broadcastActivity(agentId, "error", "Runtime error", event.message);
+        console.error(`  [${displayName}] ${managed.runtimeId}: ${event.message}`);
+        this.drainQueue(agentId);
+        break;
+    }
+  }
 
-    const displayName = session.displayName;
-    const sessionId = agentProc.sessionId;
-
-    console.log(
-      `  [${displayName}] Restarting process for fresh system prompt (session: ${sessionId?.substring(0, 8) || "none"})...`
+  private drainQueue(agentId: string) {
+    const managed = this.processes.get(agentId);
+    const next = managed?.messageQueue.shift();
+    if (!next) return;
+    void this.sendToAgentNow(agentId, next.userMessage).then(
+      next.resolve,
+      next.reject,
     );
+  }
 
-    // Clean up old process
-    if (agentProc.heartbeatTimer) {
-      clearInterval(agentProc.heartbeatTimer);
-    }
-
-    // Save any queued messages before killing the process
-    const pendingQueue = [...agentProc.messageQueue];
-    agentProc.messageQueue = [];
-
-    if (!agentProc.proc.killed) {
-      agentProc.proc.kill();
-    }
-
-    // Build fresh system prompt with current MEMORY.md
-    const { data: agent } = await this.supabase
+  private async restartRuntime(agentId: string, previous: ManagedRuntime) {
+    const session = this.sessions.get(agentId);
+    if (!session) return;
+    const { data } = await this.supabase
       .from("agents")
       .select("*")
       .eq("id", agentId)
       .single();
+    if (!data) return;
 
-    let memoryContext = "";
-    const memoryPath = join(session.workDir, "MEMORY.md");
-    if (existsSync(memoryPath)) {
-      memoryContext = readFileSync(memoryPath, "utf-8");
-    }
-
-    const systemPrompt = buildSystemPrompt(agent, memoryContext);
-
-    // Spawn new process — will resume the session via saved sessionId
-    const newProc = await this.spawnProcess(
+    const queue = previous.messageQueue;
+    previous.messageQueue = [];
+    this.stopManagedRuntime(previous);
+    const replacement = await this.startManagedRuntime(
       agentId,
       session,
-      systemPrompt,
-      agent?.model || "opus"
+      data as AgentRecord,
+      queue,
     );
-
-    // Restore pending queue
-    newProc.messageQueue = pendingQueue;
-
-    this.processes.set(agentId, newProc);
-
-    console.log(
-      `  [${displayName}] Process restarted with fresh MEMORY.md.`
-    );
+    this.processes.set(agentId, replacement);
   }
 
-  /**
-   * Set up CLI transport for the agent — writes a bash wrapper script
-   * and env config into .zano/ directory in agent workspace.
-   * Returns the .zano/ directory path (to prepend to PATH).
-   */
+  private stopManagedRuntime(managed: ManagedRuntime | undefined) {
+    if (!managed) return;
+    if (managed.heartbeatTimer) clearInterval(managed.heartbeatTimer);
+    managed.heartbeatTimer = null;
+    managed.handle.stop();
+  }
+
+  private broadcastActivity(
+    agentId: string,
+    activity: RuntimeActivity,
+    label = "",
+    detail = "",
+  ) {
+    const managed = this.processes.get(agentId);
+    if (managed) {
+      managed.activity = activity;
+      managed.activityLabel = label;
+      managed.activityDetail = detail;
+      if (activity === "thinking" || activity === "working") {
+        if (!managed.heartbeatTimer) {
+          managed.heartbeatTimer = setInterval(() => {
+            this.sendActivity(agentId, managed.activity, managed.activityLabel, managed.activityDetail);
+          }, ACTIVITY_HEARTBEAT_MS);
+        }
+      } else if (managed.heartbeatTimer) {
+        clearInterval(managed.heartbeatTimer);
+        managed.heartbeatTimer = null;
+      }
+    }
+    this.sendActivity(agentId, activity, label, detail);
+  }
+
+  private sendActivity(
+    agentId: string,
+    activity: RuntimeActivity,
+    label: string,
+    detail: string,
+  ) {
+    this.activityChannel.send({
+      type: "broadcast",
+      event: "activity",
+      payload: { agentId, activity, label, detail },
+    });
+  }
+
+  private async saveSessionId(
+    agentId: string,
+    runtimeId: AgentRuntimeId,
+    sessionId: string,
+  ) {
+    await this.supabase
+      .from("agents")
+      .update({
+        runtime_session_id: sessionId,
+        runtime_session_runtime: runtimeId,
+        session_id: sessionId,
+      })
+      .eq("id", agentId);
+  }
+
+  private async loadSessionId(
+    agentId: string,
+    runtimeId: AgentRuntimeId,
+  ): Promise<string | null> {
+    const { data } = await this.supabase
+      .from("agents")
+      .select("runtime_session_id, runtime_session_runtime, session_id")
+      .eq("id", agentId)
+      .single();
+    const stored = (data || {}) as StoredSession;
+    if (stored.runtime_session_runtime === runtimeId) {
+      return stored.runtime_session_id || null;
+    }
+    if (
+      runtimeId === "claude-code" &&
+      !stored.runtime_session_runtime &&
+      stored.session_id
+    ) {
+      return stored.session_id;
+    }
+    return null;
+  }
+
+  private async loadRuntimeConnection(
+    connectionId: string | null | undefined,
+  ): Promise<RuntimeConnectionConfig> {
+    if (!this.localServerUrl || !connectionId) {
+      throw new Error("Pi requires a local model connection");
+    }
+    const response = await fetch(
+      `${this.localServerUrl}/api/connections/${encodeURIComponent(connectionId)}/runtime`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.ZANO_API_KEY || "zk_local"}`,
+        },
+      },
+    );
+    const result = (await response.json()) as {
+      connection?: {
+        id: string;
+        name: string;
+        provider: RuntimeConnectionConfig["provider"];
+        base_url: string | null;
+        api_format: RuntimeConnectionConfig["apiFormat"];
+        default_model: string;
+        credential: RuntimeConnectionConfig["credential"];
+      };
+      error?: string;
+    };
+    if (!response.ok || !result.connection) {
+      throw new Error(result.error || "Could not load Pi model connection");
+    }
+    return {
+      id: result.connection.id,
+      name: result.connection.name,
+      provider: result.connection.provider,
+      baseUrl: result.connection.base_url,
+      apiFormat: result.connection.api_format,
+      defaultModel: result.connection.default_model,
+      credential: result.connection.credential,
+    };
+  }
+
   private prepareCliTransport(agentId: string, session: AgentSession): string {
     const zanoDir = join(session.workDir, ".zano");
-    if (!existsSync(zanoDir)) {
-      mkdirSync(zanoDir, { recursive: true });
-    }
+    if (!existsSync(zanoDir)) mkdirSync(zanoDir, { recursive: true });
 
     const wrapperPath = join(zanoDir, "zano");
     const bashPath = (path: string) =>
@@ -446,264 +551,52 @@ ${agent.description || agent.display_name}
     let windowsCommand: string;
     const packagedCliPath = process.env.ZANO_CLI_PATH;
 
-    // Local mode must use this checkout's CLI because the published package
-    // only knows how to talk to Supabase.
     if (this.localServerUrl && packagedCliPath && existsSync(packagedCliPath)) {
       bashCommand = `${bashPath(packagedCliPath)} "$@"`;
       windowsCommand = `${cmdPath(packagedCliPath)} %*`;
-      console.log(`  [${session.displayName}] CLI resolved from desktop sidecar: ${packagedCliPath}`);
     } else if (this.localServerUrl) {
       const bridgeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-      const cliPath = resolve(bridgeRoot, "..", "..", "packages", "cli", "src", "index.ts");
+      const cliPath = resolve(
+        bridgeRoot,
+        "..",
+        "..",
+        "packages",
+        "cli",
+        "src",
+        "index.ts",
+      );
       const tsxPath = join(bridgeRoot, "node_modules", "tsx", "dist", "cli.mjs");
       bashCommand = `${bashPath(process.execPath)} ${bashPath(tsxPath)} ${bashPath(cliPath)} "$@"`;
       windowsCommand = `${cmdPath(process.execPath)} ${cmdPath(tsxPath)} ${cmdPath(cliPath)} %*`;
-      console.log(`  [${session.displayName}] CLI resolved from local workspace: ${cliPath}`);
     } else {
-      // Try to resolve the compiled CLI from @fehey/zano-cli npm package first
       try {
         const req = createRequire(import.meta.url);
         const cliPath = req.resolve("@fehey/zano-cli/dist/index.js");
-        // Published mode: use node to run compiled JS directly
         bashCommand = `node ${bashPath(cliPath)} "$@"`;
         windowsCommand = `node ${cmdPath(cliPath)} %*`;
-        console.log(`  [${session.displayName}] CLI resolved from npm package: ${cliPath}`);
       } catch {
-        // Fall back to monorepo dev path (TypeScript source via tsx)
         const bridgeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-        const cliPath = resolve(bridgeRoot, "..", "..", "packages", "cli", "src", "index.ts");
+        const cliPath = resolve(
+          bridgeRoot,
+          "..",
+          "..",
+          "packages",
+          "cli",
+          "src",
+          "index.ts",
+        );
         const tsxPath = join(bridgeRoot, "node_modules", "tsx", "dist", "cli.mjs");
         bashCommand = `${bashPath(process.execPath)} ${bashPath(tsxPath)} ${bashPath(cliPath)} "$@"`;
         windowsCommand = `${cmdPath(process.execPath)} ${cmdPath(tsxPath)} ${cmdPath(cliPath)} %*`;
-        console.log(`  [${session.displayName}] CLI resolved from monorepo dev path: ${cliPath}`);
       }
     }
 
-    writeFileSync(wrapperPath, `#!/usr/bin/env bash\nexec ${bashCommand}\n`, { mode: 0o755 });
+    writeFileSync(wrapperPath, `#!/usr/bin/env bash\nexec ${bashCommand}\n`, {
+      mode: 0o755,
+    });
     if (process.platform === "win32") {
       writeFileSync(`${wrapperPath}.cmd`, `@echo off\r\n${windowsCommand}\r\n`);
     }
-    console.log(`  [${session.displayName}] CLI wrapper written: ${wrapperPath}`);
     return zanoDir;
-  }
-
-  private async spawnProcess(
-    agentId: string,
-    session: AgentSession,
-    systemPrompt: string,
-    model: string = "opus"
-  ): Promise<AgentProcess> {
-    // Prepare CLI transport (.zano/ wrapper + env vars)
-    const zanoDir = this.prepareCliTransport(agentId, session);
-
-    const args = [
-      "--output-format",
-      "stream-json",
-      "--input-format",
-      "stream-json",
-      "--verbose",
-      "--append-system-prompt",
-      systemPrompt,
-      "--permission-mode",
-      "bypassPermissions",
-      "--model",
-      model,
-    ];
-
-    // Resume previous session: check in-memory first, then Supabase
-    const prevProc = this.processes.get(agentId);
-    const sessionId =
-      prevProc?.sessionId || (await this.loadSessionId(agentId));
-    if (sessionId) {
-      args.push("--resume", sessionId);
-    }
-
-    console.log(
-      `  [${session.displayName}] Spawning Claude Code (stream-json + CLI, ${sessionId ? `resume: ${sessionId.substring(0, 8)}` : "new session"})...`
-    );
-
-    const proc = spawn("claude", args, {
-      cwd: session.workDir,
-      env: {
-        ...process.env,
-        FORCE_COLOR: "0",
-        NO_COLOR: "1",
-        // CLI injection: agent identity + Supabase credentials
-        ZANO_AGENT_ID: agentId,
-        ZANO_SUPABASE_URL: this.supabaseUrl,
-        ZANO_SUPABASE_KEY: this.supabaseKey,
-        ZANO_AUTH_TOKEN: this.authToken,
-        ...(this.localServerUrl
-          ? { ZANO_LOCAL_SERVER_URL: this.localServerUrl }
-          : {}),
-        // Prepend .zano/ to PATH so `zano` command is available
-        PATH: `${zanoDir}${delimiter}${process.env.PATH ?? ""}`,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const agentProc: AgentProcess = {
-      proc,
-      sessionId: prevProc?.sessionId || null,
-      busy: false,
-      stdoutBuffer: "",
-      activity: "working",
-      activityLabel: "Working",
-      activityDetail: "Starting…",
-      heartbeatTimer: null,
-      messageQueue: [],
-      pendingText: "",
-    };
-
-    // Broadcast initial activity
-    this.broadcastActivity(agentId, "working", "Working", "Starting…");
-
-    // Parse stdout line by line for stream-json events
-    proc.stdout?.on("data", (chunk: Buffer) => {
-      agentProc.stdoutBuffer += chunk.toString();
-      const lines = agentProc.stdoutBuffer.split("\n");
-      agentProc.stdoutBuffer = lines.pop() || "";
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        this.handleStreamEvent(agentId, agentProc, line.trim());
-      }
-    });
-
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString().trim();
-      if (!text) return;
-      // Filter out noisy reconnection messages
-      if (/Reconnecting\.\.\.|Falling back from WebSockets/i.test(text)) return;
-      console.error(`  [${session.displayName}] stderr: ${text.substring(0, 200)}`);
-    });
-
-    proc.on("error", (err: Error) => {
-      console.error(
-        `  [${session.displayName}] Process error: ${err.message}`
-      );
-    });
-
-    proc.on("close", (code: number | null) => {
-      console.log(
-        `  [${session.displayName}] Process exited with code ${code}`
-      );
-      // Reject any remaining queued messages
-      for (const queued of agentProc.messageQueue) {
-        queued.reject(new Error(`Agent process exited with code ${code}`));
-      }
-      agentProc.messageQueue = [];
-    });
-
-    return agentProc;
-  }
-
-  private handleStreamEvent(
-    agentId: string,
-    agentProc: AgentProcess,
-    line: string
-  ) {
-    let event: any;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      return; // Ignore non-JSON lines
-    }
-
-    const session = this.sessions.get(agentId);
-    const displayName = session?.displayName || agentId;
-
-    switch (event.type) {
-      case "system":
-        if (event.subtype === "init" && event.session_id) {
-          agentProc.sessionId = event.session_id;
-          this.saveSessionId(agentId, event.session_id);
-          console.log(
-            `  [${displayName}] Session initialized: ${event.session_id.substring(0, 8)}...`
-          );
-        }
-        if (event.subtype === "compacting") {
-          this.flushPendingText(agentId, agentProc);
-          this.broadcastActivity(agentId, "working", "Optimizing context", "");
-          // Restart the process to pick up fresh MEMORY.md in system prompt
-          console.log(
-            `  [${displayName}] Context compaction detected — scheduling process restart for fresh MEMORY.md...`
-          );
-          this.restartProcess(agentId).catch((err) => {
-            console.error(
-              `  [${displayName}] Failed to restart after compaction: ${err.message}`
-            );
-          });
-        }
-        break;
-
-      case "assistant": {
-        // Claude Code stream-json nests content inside event.message.content[]
-        // Each assistant event contains one content block in the array.
-        const contentBlock = event.message?.content?.[0];
-        if (!contentBlock) break;
-
-        const blockType = contentBlock.type;
-
-        if (blockType === "thinking") {
-          // Flush any accumulated text before switching to thinking
-          this.flushPendingText(agentId, agentProc);
-          this.broadcastActivity(agentId, "thinking", "Thinking", "");
-        } else if (blockType === "text") {
-          // Store latest text output — will be flushed when next non-text event arrives
-          agentProc.pendingText = contentBlock.text || "";
-        } else if (blockType === "tool_use") {
-          // Flush accumulated text first
-          this.flushPendingText(agentId, agentProc);
-          // Map tool to human-readable label + detail
-          const { label, detail } = this.describeToolUse(contentBlock);
-          this.broadcastActivity(agentId, "working", label, detail);
-        }
-        break;
-      }
-
-      case "result": {
-        // Flush any final text
-        this.flushPendingText(agentId, agentProc);
-        // Turn is complete — save session ID
-        if (event.session_id) {
-          agentProc.sessionId = event.session_id;
-          this.saveSessionId(agentId, event.session_id);
-        }
-        agentProc.busy = false;
-        this.broadcastActivity(agentId, "idle", "Idle", "");
-        console.log(`  [${displayName}] Turn complete.`);
-
-        // Process next queued message if any
-        this.drainQueue(agentId, agentProc);
-        break;
-      }
-    }
-  }
-
-  /** Get the workspace directory for an agent */
-  getWorkspaceDir(agentId: string): string | null {
-    return this.sessions.get(agentId)?.workDir ?? null;
-  }
-
-  stopAll() {
-    // Kill all running processes and clean up heartbeats
-    for (const [agentId, agentProc] of this.processes) {
-      if (agentProc.heartbeatTimer) {
-        clearInterval(agentProc.heartbeatTimer);
-      }
-      // Reject any queued messages
-      for (const queued of agentProc.messageQueue) {
-        queued.reject(new Error("Agent manager stopped"));
-      }
-      agentProc.messageQueue = [];
-      if (!agentProc.proc.killed) {
-        console.log(`  Stopping agent process: ${agentId}`);
-        agentProc.proc.kill();
-      }
-    }
-    this.processes.clear();
-    this.sessions.clear();
-    this.supabase.removeChannel(this.activityChannel);
   }
 }

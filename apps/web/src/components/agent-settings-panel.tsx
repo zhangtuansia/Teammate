@@ -16,6 +16,7 @@ import {
   Copy,
   ArrowClockwise,
   Eye,
+  UploadSimple,
 } from '@phosphor-icons/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,12 +31,24 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { apiUrl } from '@/lib/api-url';
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from '@/components/ui/select';
 import { Dialog, DialogPopup, DialogHeader, DialogTitle, DialogPanel } from '@/components/ui/dialog';
+import {
+  CODEX_MODEL_ITEMS,
+  defaultModelForRuntime,
+  type AgentRuntimeId,
+} from '@/lib/agent-runtime';
+import {
+  loadModelConnections,
+  type ModelConnection,
+} from '@/lib/model-connections';
+import { AGENT_AVATAR_PRESETS } from '@/lib/agent-avatar';
+import { GeneratedAvatar } from './generated-avatar';
 
 interface AgentInfo {
   id: string;
   display_name: string;
   status: string;
   description: string | null;
+  avatar_url: string | null;
 }
 
 interface AgentFull {
@@ -44,8 +57,11 @@ interface AgentFull {
   display_name: string;
   description: string | null;
   system_prompt: string | null;
+  runtime: AgentRuntimeId;
   model: string;
+  connection_id: string | null;
   status: string;
+  avatar_url: string | null;
 }
 
 interface Skill {
@@ -179,8 +195,14 @@ function SettingsTab({
   const [loading, setLoading] = useState(true);
   const [displayName, setDisplayName] = useState('');
   const [description, setDescription] = useState('');
+  const [runtime, setRuntime] = useState<AgentRuntimeId>('claude-code');
   const [model, setModel] = useState('opus');
+  const [connectionId, setConnectionId] = useState<string | null>(null);
+  const [connections, setConnections] = useState<ModelConnection[]>([]);
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [avatarData, setAvatarData] = useState<string | null>(null);
+  const [avatarFileName, setAvatarFileName] = useState('');
   const [skills, setSkills] = useState<Skill[]>([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -188,12 +210,9 @@ function SettingsTab({
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState('');
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const supabase = createClient();
-
-  useEffect(() => {
-    loadAgent();
-    loadSkills();
-  }, [agent.id]);
+  const localMode = process.env.NEXT_PUBLIC_ZANO_LOCAL_MODE === 'true';
 
   useEffect(() => {
     if (!confirmDelete) return;
@@ -210,15 +229,20 @@ function SettingsTab({
       const a = data as AgentFull;
       setDisplayName(a.display_name);
       setDescription(a.description || '');
+      setRuntime(a.runtime || 'claude-code');
       setModel(a.model || 'opus');
+      setConnectionId(a.connection_id || null);
       setSystemPrompt(a.system_prompt || '');
+      setAvatarUrl(a.avatar_url || null);
+      setAvatarData(null);
+      setAvatarFileName('');
     }
     setLoading(false);
   }
 
   async function loadSkills() {
     try {
-      const res = await fetch(apiUrl('/api/skills'));
+      const res = await fetch(apiUrl(`/api/skills?runtime=${runtime}`));
       if (res.ok) {
         const data = await res.json();
         if (data.skills && data.skills.length > 0) {
@@ -227,7 +251,7 @@ function SettingsTab({
         }
         // API returned empty — might be remote, try bridge RPC
         if (data.remote) {
-          const rpcData = await bridgeRpc('skills:list');
+          const rpcData = await bridgeRpc('skills:list', { runtime });
           setSkills((rpcData.skills as Skill[]) || []);
           return;
         }
@@ -235,12 +259,45 @@ function SettingsTab({
     } catch {
       // Skills loading is non-critical — try RPC as last resort
       try {
-        const rpcData = await bridgeRpc('skills:list');
+        const rpcData = await bridgeRpc('skills:list', { runtime });
         setSkills((rpcData.skills as Skill[]) || []);
       } catch {
         // Bridge offline or no skills — leave empty
       }
     }
+  }
+
+  useEffect(() => {
+    loadAgent();
+    if (localMode) {
+      void loadModelConnections().then(setConnections).catch(() => setConnections([]));
+    }
+  }, [agent.id]);
+
+  useEffect(() => {
+    loadSkills();
+  }, [runtime]);
+
+  function handleAvatarFile(file: File | undefined) {
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setError('Choose a PNG, JPEG, or WebP image.');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setError('Avatar must be 2 MB or smaller.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') return;
+      setAvatarData(reader.result);
+      setAvatarFileName(file.name);
+      setError('');
+    };
+    reader.onerror = () => setError('Could not read that image.');
+    reader.readAsDataURL(file);
   }
 
   async function handleSave() {
@@ -256,8 +313,13 @@ function SettingsTab({
         body: JSON.stringify({
           display_name: displayName.trim(),
           description: description.trim() || null,
+          runtime,
           model,
+          connection_id: runtime === 'pi' ? connectionId : null,
           system_prompt: systemPrompt.trim() || null,
+          ...(avatarData
+            ? { avatar_data: avatarData }
+            : { avatar_url: avatarUrl }),
         }),
       });
 
@@ -267,11 +329,15 @@ function SettingsTab({
       }
 
       const { agent: updated } = await res.json();
+      setAvatarUrl(updated.avatar_url || null);
+      setAvatarData(null);
+      setAvatarFileName('');
       onUpdated({
         id: updated.id,
         display_name: updated.display_name,
         status: updated.status,
         description: updated.description,
+        avatar_url: updated.avatar_url,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -350,6 +416,91 @@ function SettingsTab({
         <h3 className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Basic Info</h3>
 
         <Field>
+          <FieldLabel>Avatar</FieldLabel>
+          <div className="rounded-lg border p-3 space-y-3">
+            <div className="flex items-center gap-3">
+              <GeneratedAvatar
+                id={agent.id}
+                name={displayName || agent.display_name}
+                size="lg"
+                avatarUrl={avatarData || avatarUrl}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium truncate">
+                  {avatarFileName || (avatarData ? 'Custom image' : 'Choose an avatar')}
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  {localMode ? 'PNG, JPEG or WebP, up to 2 MB' : 'Choose a generated avatar'}
+                </div>
+              </div>
+              {localMode && (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => avatarInputRef.current?.click()}
+                  >
+                    <UploadSimple size={14} />
+                    Upload
+                  </Button>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    className="hidden"
+                    onChange={(event) => {
+                      handleAvatarFile(event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                  />
+                </>
+              )}
+            </div>
+
+            <div className="grid grid-cols-9 gap-1.5">
+              <button
+                type="button"
+                className={`rounded-full p-0.5 ring-offset-background transition ${
+                  !avatarData && !avatarUrl ? 'ring-2 ring-primary ring-offset-1' : 'hover:bg-muted'
+                }`}
+                title="Default avatar"
+                aria-label="Use default avatar"
+                onClick={() => {
+                  setAvatarUrl(null);
+                  setAvatarData(null);
+                  setAvatarFileName('');
+                }}
+              >
+                <GeneratedAvatar id={agent.id} name={displayName} size="sm" />
+              </button>
+              {AGENT_AVATAR_PRESETS.map((seed) => {
+                const value = `generated:${seed}`;
+                const selected = !avatarData && avatarUrl === value;
+                return (
+                  <button
+                    key={seed}
+                    type="button"
+                    className={`rounded-full p-0.5 ring-offset-background transition ${
+                      selected ? 'ring-2 ring-primary ring-offset-1' : 'hover:bg-muted'
+                    }`}
+                    title="Generated avatar"
+                    aria-label="Choose generated avatar"
+                    onClick={() => {
+                      setAvatarUrl(value);
+                      setAvatarData(null);
+                      setAvatarFileName('');
+                    }}
+                  >
+                    <GeneratedAvatar id={seed} name={displayName} size="sm" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </Field>
+
+        <Field>
           <FieldLabel>Display Name</FieldLabel>
           <Input
             type="text"
@@ -376,32 +527,92 @@ function SettingsTab({
         <div className="rounded-lg border p-3 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs text-muted-foreground">Runtime</span>
-            <span className="text-xs font-medium flex items-center gap-1.5">
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500" />
-              Claude Code
-            </span>
+            <select
+              className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none"
+              value={runtime}
+              onChange={(event) => {
+                const nextRuntime = event.target.value as AgentRuntimeId;
+                setRuntime(nextRuntime);
+                setModel(defaultModelForRuntime(nextRuntime));
+                if (nextRuntime === 'pi') {
+                  const connection = connections.find((entry) => entry.hasCredential);
+                  setConnectionId(connection?.id || null);
+                  if (connection) setModel(connection.default_model);
+                } else {
+                  setConnectionId(null);
+                }
+              }}
+            >
+              <option value="claude-code">Claude Code</option>
+              <option value="codex">Codex</option>
+              {localMode && <option value="pi">Pi / Custom API</option>}
+            </select>
           </div>
           <Separator />
           <div className="flex items-center justify-between">
             <span className="text-xs text-muted-foreground">Model</span>
-            <Select
-              value={selectedModel}
-              onValueChange={(val) => {
-                if (val) setModel((val as typeof selectedModel).value);
-              }}
-              items={MODEL_ITEMS}>
-              <SelectTrigger size="sm" className="w-auto min-w-24">
-                <SelectValue placeholder="Select model" />
-              </SelectTrigger>
-              <SelectPopup>
-                {MODEL_ITEMS.map((item) => (
-                  <SelectItem key={item.value} value={item}>
-                    {item.label}
-                  </SelectItem>
+            {runtime === 'claude-code' ? (
+              <Select
+                value={selectedModel}
+                onValueChange={(val) => {
+                  if (val) setModel((val as typeof selectedModel).value);
+                }}
+                items={MODEL_ITEMS}>
+                <SelectTrigger size="sm" className="w-auto min-w-24">
+                  <SelectValue placeholder="Select model" />
+                </SelectTrigger>
+                <SelectPopup>
+                  {MODEL_ITEMS.map((item) => (
+                    <SelectItem key={item.value} value={item}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            ) : runtime === 'codex' ? (
+              <select
+                className="h-8 rounded-md border border-input bg-background px-2 text-xs outline-none"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+              >
+                {!CODEX_MODEL_ITEMS.some((item) => item.value === model) && (
+                  <option value={model}>{model}</option>
+                )}
+                {CODEX_MODEL_ITEMS.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
                 ))}
-              </SelectPopup>
-            </Select>
+              </select>
+            ) : (
+              <Input
+                className="h-8 w-44 text-xs"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                placeholder="default"
+              />
+            )}
           </div>
+          {runtime === 'pi' && (
+            <>
+              <Separator />
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs text-muted-foreground">Connection</span>
+                <select
+                  className="h-8 max-w-52 rounded-md border border-input bg-background px-2 text-xs outline-none"
+                  value={connectionId || ''}
+                  onChange={(event) => {
+                    const connection = connections.find((entry) => entry.id === event.target.value);
+                    setConnectionId(connection?.id || null);
+                    if (connection) setModel(connection.default_model);
+                  }}
+                >
+                  <option value="">Choose…</option>
+                  {connections.filter((connection) => connection.hasCredential).map((connection) => (
+                    <option key={connection.id} value={connection.id}>{connection.name}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
         </div>
       </section>
 
@@ -420,7 +631,7 @@ function SettingsTab({
       </section>
 
       {/* Save button */}
-      <Button onClick={handleSave} loading={saving} disabled={!displayName.trim()} className="w-full">
+      <Button onClick={handleSave} loading={saving} disabled={!displayName.trim() || (runtime === 'pi' && !connectionId)} className="w-full">
         <FloppyDisk size={16} />
         {saved ? 'Saved!' : 'Save Changes'}
       </Button>
@@ -457,7 +668,7 @@ function SettingsTab({
           </div>
         )}
         <p className="text-[11px] text-muted-foreground">
-          Skills are loaded from <code className="text-[10px] px-1 py-0.5 rounded bg-muted">~/.claude/skills/</code> and
+          Skills are loaded from <code className="text-[10px] px-1 py-0.5 rounded bg-muted">{runtime === 'codex' ? '~/.codex/skills/' : runtime === 'pi' ? '~/.pi/agent/skills/' : '~/.claude/skills/'}</code> and
           shared across all agents.
         </p>
       </section>

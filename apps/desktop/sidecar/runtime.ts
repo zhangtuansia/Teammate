@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import piWorkerSource from "virtual:pi-worker";
 
 function readArgument(name: string, fallback: string) {
   const index = process.argv.indexOf(name);
@@ -17,6 +18,7 @@ async function main() {
     ? stem.slice("teammate-runtime".length)
     : "";
   const siblingCli = join(dirname(process.execPath), `teammate-cli${suffix}${extension}`);
+  const siblingPi = join(dirname(process.execPath), `teammate-pi${suffix}${extension}`);
 
   process.env.ZANO_LOCAL_PORT = port;
   process.env.ZANO_LOCAL_DB = join(dataDir, "local.db");
@@ -24,7 +26,17 @@ async function main() {
   process.env.ZANO_API_KEY = "zk_local";
   process.env.ZANO_SERVER_URL = localUrl;
   process.env.ZANO_AGENTS_DIR = join(dataDir, "agents");
+  const piRuntimeDir = join(dataDir, "pi-runtime");
+  mkdirSync(piRuntimeDir, { recursive: true });
+  const piWorkerPath = join(piRuntimeDir, "worker.mjs");
+  writeFileSync(
+    piWorkerPath,
+    piWorkerSource,
+    { mode: 0o600 },
+  );
+  process.env.ZANO_PI_WORKER = piWorkerPath;
   if (existsSync(siblingCli)) process.env.ZANO_CLI_PATH = siblingCli;
+  if (existsSync(siblingPi)) process.env.ZANO_PI_PATH = siblingPi;
 
   await import("../../local-server/src/index.ts");
 

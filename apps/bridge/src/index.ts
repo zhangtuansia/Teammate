@@ -20,6 +20,7 @@ interface ConnectResponse {
     name: string;
     display_name: string;
     description: string | null;
+    runtime?: string;
     model: string;
     status: string;
   }>;

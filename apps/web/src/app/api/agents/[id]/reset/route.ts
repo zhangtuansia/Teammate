@@ -58,5 +58,14 @@ export async function POST(
     }
   }
 
+  await supabase
+    .from("agents")
+    .update({
+      session_id: null,
+      runtime_session_id: null,
+      runtime_session_runtime: null,
+    })
+    .eq("id", id);
+
   return NextResponse.json({ success: true, messagesDeleted });
 }

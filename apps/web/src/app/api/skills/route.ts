@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { readdir, readFile, lstat, access } from "fs/promises";
 import { join, resolve } from "path";
 import { homedir } from "os";
@@ -8,9 +8,14 @@ interface Skill {
   description: string;
 }
 
-// GET /api/skills — read Claude Code skills from ~/.claude/skills/
-export async function GET() {
-  const skillsDir = join(homedir(), ".claude", "skills");
+// GET /api/skills — read skills for the selected local runtime.
+export async function GET(request: NextRequest) {
+  const runtime = request.nextUrl.searchParams.get("runtime");
+  const skillsDir = join(
+    homedir(),
+    runtime === "codex" ? ".codex" : ".claude",
+    "skills",
+  );
   const skills: Skill[] = [];
 
   // Check if skills directory is accessible (won't exist on cloud deployments)

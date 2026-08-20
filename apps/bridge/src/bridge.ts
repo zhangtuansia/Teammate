@@ -35,6 +35,7 @@ interface DbAgent {
   display_name: string;
   description: string | null;
   system_prompt: string | null;
+  runtime?: string | null;
   model: string;
   status: string;
 }
@@ -536,7 +537,7 @@ export class Bridge {
         "broadcast",
         { event: "rpc:request" },
         async ({ payload }) => {
-          const { requestId, agentId, action, filePath } = payload;
+          const { requestId, agentId, action, filePath, runtime } = payload;
           if (!requestId) return;
 
           try {
@@ -544,7 +545,9 @@ export class Bridge {
 
             if (action === "skills:list") {
               // Skills are machine-wide, no agentId needed
-              responsePayload = await this.listSkills();
+              responsePayload = await this.listSkills(
+                runtime === "codex" ? "codex" : "claude-code",
+              );
             } else if (agentId && this.agentRecords.has(agentId)) {
               const workDir = this.agentManager.getWorkspaceDir(agentId);
               if (!workDir) {
@@ -642,8 +645,12 @@ export class Bridge {
     return { file: filePath, content };
   }
 
-  private async listSkills() {
-    const skillsDir = join(homedir(), ".claude", "skills");
+  private async listSkills(runtime: "claude-code" | "codex") {
+    const skillsDir = join(
+      homedir(),
+      runtime === "codex" ? ".codex" : ".claude",
+      "skills",
+    );
     const skills: Array<{ name: string; description: string }> = [];
 
     try {

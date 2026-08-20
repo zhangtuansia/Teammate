@@ -1,16 +1,19 @@
 "use client";
 
 import { createContext, useContext } from "react";
+import type { AgentRuntimeId } from "@/lib/agent-runtime";
 
 export type AppLanguage = "zh-CN" | "en-US";
 export type AppTheme = "system" | "light" | "dark";
-export type AgentModel = "opus" | "sonnet" | "haiku";
+export type AgentModel = string;
+export type AgentRuntime = AgentRuntimeId;
 
 export interface AppSettings {
   language: AppLanguage;
   theme: AppTheme;
+  defaultRuntime: AgentRuntime;
   defaultModel: AgentModel;
-  provider: "claude-code";
+  defaultConnectionId: string | null;
 }
 
 const en = {
@@ -54,14 +57,36 @@ const en = {
   "settings.themeLight": "Light",
   "settings.themeDark": "Dark",
   "settings.agentRuntime": "Agent runtime",
-  "settings.provider": "Provider",
-  "settings.providerClaude": "Claude Code (current runner)",
+  "settings.runtime": "Default runtime",
+  "settings.runtimeClaude": "Claude Code",
+  "settings.runtimeCodex": "Codex",
+  "settings.runtimePi": "Pi / Custom API",
   "settings.defaultModel": "Default model",
   "settings.modelOpus": "Opus — Most capable",
   "settings.modelSonnet": "Sonnet — Balanced",
   "settings.modelHaiku": "Haiku — Fastest",
+  "settings.modelCodexDefault": "Use Codex default",
+  "settings.runtimeInstalled": "Installed",
+  "settings.runtimeMissing": "CLI not found",
+  "settings.codexModelPlaceholder": "default or a Codex model ID",
   "settings.modelHint": "Used when creating new agents. Existing agents keep their own model setting.",
-  "settings.providerHint": "Codex and OpenAI-compatible endpoints are not connected yet; this screen reports the runner actually in use.",
+  "settings.runtimeHint": "Claude Code and Codex use their installed CLI and existing local login.",
+  "settings.connections": "Model connections",
+  "settings.connectionsHint": "Keys and OAuth tokens are encrypted on this computer and never stored in SQLite.",
+  "settings.chatGptOAuth": "ChatGPT Plus / Pro",
+  "settings.chatGptOAuthHint": "Use your Codex subscription through a secure browser sign-in.",
+  "settings.connect": "Connect",
+  "settings.connecting": "Waiting for sign-in…",
+  "settings.connected": "Connected",
+  "settings.addApi": "Add custom API",
+  "settings.connectionName": "Connection name",
+  "settings.provider": "API protocol",
+  "settings.baseUrl": "Base URL",
+  "settings.apiKey": "API key",
+  "settings.connectionModel": "Model ID",
+  "settings.addConnection": "Save connection",
+  "settings.removeConnection": "Remove",
+  "settings.chooseConnection": "Model connection",
   "settings.cancel": "Cancel",
   "settings.save": "Save settings",
   "settings.saving": "Saving…",
@@ -71,6 +96,7 @@ const en = {
   "createAgent.namePlaceholder": "e.g. Design Assistant, Code Reviewer…",
   "createAgent.descriptionField": "Description",
   "createAgent.descriptionPlaceholder": "What does this agent do?",
+  "createAgent.runtime": "Runtime",
   "createAgent.model": "Model",
   "createAgent.instructions": "Instructions",
   "createAgent.instructionsPlaceholder": "Tell the agent how to behave, what it is good at, and what tools to use…",
@@ -89,7 +115,7 @@ const en = {
   "createChannel.submit": "Create Channel",
 } as const;
 
-type TranslationKey = keyof typeof en;
+export type TranslationKey = keyof typeof en;
 
 const zh: Record<TranslationKey, string> = {
   "nav.agents": "智能体",
@@ -132,14 +158,36 @@ const zh: Record<TranslationKey, string> = {
   "settings.themeLight": "浅色",
   "settings.themeDark": "深色",
   "settings.agentRuntime": "智能体运行时",
-  "settings.provider": "提供方",
-  "settings.providerClaude": "Claude Code（当前运行器）",
+  "settings.runtime": "默认运行引擎",
+  "settings.runtimeClaude": "Claude Code",
+  "settings.runtimeCodex": "Codex",
+  "settings.runtimePi": "Pi / 自定义 API",
   "settings.defaultModel": "默认模型",
   "settings.modelOpus": "Opus — 能力最强",
   "settings.modelSonnet": "Sonnet — 均衡",
   "settings.modelHaiku": "Haiku — 最快",
+  "settings.modelCodexDefault": "使用 Codex 默认模型",
+  "settings.runtimeInstalled": "已安装",
+  "settings.runtimeMissing": "未找到 CLI",
+  "settings.codexModelPlaceholder": "default 或 Codex 模型 ID",
   "settings.modelHint": "新建智能体时使用。已有智能体继续保留各自的模型设置。",
-  "settings.providerHint": "Codex 和 OpenAI 兼容接口尚未接入；这里会如实显示当前真正使用的运行器。",
+  "settings.runtimeHint": "Claude Code 和 Codex 使用本机已安装的 CLI 与现有登录状态。",
+  "settings.connections": "模型连接",
+  "settings.connectionsHint": "Key 与 OAuth Token 只会加密保存在这台电脑，不会写入 SQLite。",
+  "settings.chatGptOAuth": "ChatGPT Plus / Pro",
+  "settings.chatGptOAuthHint": "通过浏览器安全登录，使用你的 Codex 订阅。",
+  "settings.connect": "连接",
+  "settings.connecting": "等待登录…",
+  "settings.connected": "已连接",
+  "settings.addApi": "添加自定义 API",
+  "settings.connectionName": "连接名称",
+  "settings.provider": "API 协议",
+  "settings.baseUrl": "Base URL",
+  "settings.apiKey": "API Key",
+  "settings.connectionModel": "模型 ID",
+  "settings.addConnection": "保存连接",
+  "settings.removeConnection": "移除",
+  "settings.chooseConnection": "模型连接",
   "settings.cancel": "取消",
   "settings.save": "保存设置",
   "settings.saving": "保存中…",
@@ -149,6 +197,7 @@ const zh: Record<TranslationKey, string> = {
   "createAgent.namePlaceholder": "例如：设计助手、代码审查员…",
   "createAgent.descriptionField": "描述",
   "createAgent.descriptionPlaceholder": "这个智能体负责什么？",
+  "createAgent.runtime": "运行引擎",
   "createAgent.model": "模型",
   "createAgent.instructions": "指令",
   "createAgent.instructionsPlaceholder": "告诉智能体应该如何工作、擅长什么、使用哪些工具…",
@@ -170,8 +219,9 @@ const zh: Record<TranslationKey, string> = {
 export const defaultAppSettings: AppSettings = {
   language: "en-US",
   theme: "system",
-  defaultModel: "opus",
-  provider: "claude-code",
+  defaultRuntime: "claude-code",
+  defaultModel: "sonnet",
+  defaultConnectionId: null,
 };
 
 export function translate(

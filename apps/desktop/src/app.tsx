@@ -19,6 +19,7 @@ interface AgentInfo {
   display_name: string;
   status: string;
   description: string | null;
+  avatar_url: string | null;
 }
 
 interface ChannelInfo {
@@ -32,14 +33,17 @@ const LOCAL_SERVICE_URL = "http://127.0.0.1:8787";
 
 async function waitForRuntime() {
   let lastError: Error | null = null;
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     try {
       const response = await fetch(`${LOCAL_SERVICE_URL}/health`);
-      if (response.ok) return;
+      const result = response.ok
+        ? (await response.json()) as { ok?: boolean; mode?: string }
+        : null;
+      if (result?.ok && result.mode === "local") return;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error("Runtime unavailable");
     }
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw lastError || new Error("Teammate runtime did not start");
 }
@@ -169,6 +173,7 @@ export function App() {
   const router = useRouter();
   const [server, setServer] = useState<ServerInfo | null>(null);
   const [error, setError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
   const { t } = useAppSettings();
 
   useEffect(() => {
@@ -178,6 +183,7 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      setError("");
       try {
         await waitForRuntime();
         const client = createClient();
@@ -198,7 +204,15 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [params.slug]);
+  }, [params.slug, retryKey]);
+
+  useEffect(() => {
+    if (!error) return;
+    const retryTimer = window.setTimeout(() => {
+      setRetryKey((value) => value + 1);
+    }, 2500);
+    return () => window.clearTimeout(retryTimer);
+  }, [error]);
 
   if (error) {
     return (
@@ -210,7 +224,7 @@ export function App() {
           <p className="mt-2 text-sm text-muted-foreground">{error}</p>
           <button
             className="mt-5 rounded-lg bg-foreground px-4 py-2 text-sm text-background"
-            onClick={() => window.location.reload()}
+            onClick={() => setRetryKey((value) => value + 1)}
           >
             {t("runtime.retry")}
           </button>

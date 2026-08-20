@@ -44,9 +44,17 @@ create table public.agents (
   display_name text not null,
   description text,
   system_prompt text,
+  runtime text default 'claude-code' not null check (runtime in ('claude-code', 'codex', 'pi')),
+  model text default 'sonnet' not null,
   status text default 'offline' check (status in ('online', 'sleeping', 'offline')),
   owner_id uuid references public.profiles(id) on delete cascade not null,
   server_id uuid references public.servers(id) on delete cascade not null,
+  workspace_path text,
+  session_id text,
+  runtime_session_id text,
+  runtime_session_runtime text,
+  connection_id text,
+  avatar_url text,
   created_at timestamptz default now() not null,
   unique(server_id, name)
 );

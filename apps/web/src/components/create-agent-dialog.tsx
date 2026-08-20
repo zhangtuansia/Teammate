@@ -25,6 +25,15 @@ import {
 import { Field, FieldLabel } from "@/components/ui/field";
 import { apiUrl } from "@/lib/api-url";
 import { useAppSettings } from "@/hooks/use-app-settings";
+import {
+  CODEX_MODEL_ITEMS,
+  defaultModelForRuntime,
+  type AgentRuntimeId,
+} from "@/lib/agent-runtime";
+import {
+  loadModelConnections,
+  type ModelConnection,
+} from "@/lib/model-connections";
 
 interface CreateAgentDialogProps {
   open: boolean;
@@ -41,11 +50,15 @@ export function CreateAgentDialog({
 }: CreateAgentDialogProps) {
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
+  const [runtime, setRuntime] = useState<AgentRuntimeId>("claude-code");
   const [model, setModel] = useState("opus");
+  const [connectionId, setConnectionId] = useState<string | null>(null);
+  const [connections, setConnections] = useState<ModelConnection[]>([]);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const { settings, t } = useAppSettings();
+  const localMode = process.env.NEXT_PUBLIC_ZANO_LOCAL_MODE === "true";
   const modelItems = [
     { value: "opus", label: t("settings.modelOpus") },
     { value: "sonnet", label: t("settings.modelSonnet") },
@@ -56,11 +69,16 @@ export function CreateAgentDialog({
     if (open) {
       setDisplayName("");
       setDescription("");
+      setRuntime(settings.defaultRuntime);
       setModel(settings.defaultModel);
+      setConnectionId(settings.defaultConnectionId);
       setSystemPrompt("");
       setError("");
+      if (localMode) {
+        void loadModelConnections().then(setConnections).catch(() => setConnections([]));
+      }
     }
-  }, [open, settings.defaultModel]);
+  }, [open, settings.defaultModel, settings.defaultRuntime]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -82,7 +100,9 @@ export function CreateAgentDialog({
         body: JSON.stringify({
           display_name: displayName,
           description,
+          runtime,
           model,
+          connection_id: runtime === "pi" ? connectionId : null,
           system_prompt: systemPrompt,
           server_id: serverId,
         }),
@@ -139,26 +159,91 @@ export function CreateAgentDialog({
               </Field>
 
               <Field>
-                <FieldLabel>{t("createAgent.model")}</FieldLabel>
-                <Select
-                  value={selectedModel}
-                  onValueChange={(val) => {
-                    if (val) setModel((val as typeof selectedModel).value);
+                <FieldLabel>{t("createAgent.runtime")}</FieldLabel>
+                <select
+                  className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/20"
+                  value={runtime}
+                  onChange={(event) => {
+                    const nextRuntime = event.target.value as AgentRuntimeId;
+                    setRuntime(nextRuntime);
+                    setModel(defaultModelForRuntime(nextRuntime));
+                    if (nextRuntime === "pi") {
+                      const connection = connections.find((entry) => entry.hasCredential);
+                      setConnectionId(connection?.id || null);
+                      if (connection) setModel(connection.default_model);
+                    } else {
+                      setConnectionId(null);
+                    }
                   }}
-                  items={modelItems}
                 >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select a model" />
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {modelItems.map((item) => (
-                      <SelectItem key={item.value} value={item}>
-                        {item.label}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
+                  <option value="claude-code">{t("settings.runtimeClaude")}</option>
+                  <option value="codex">{t("settings.runtimeCodex")}</option>
+                  {localMode && <option value="pi">{t("settings.runtimePi")}</option>}
+                </select>
               </Field>
+
+              <Field>
+                <FieldLabel>{t("createAgent.model")}</FieldLabel>
+                {runtime === "claude-code" ? (
+                  <Select
+                    value={selectedModel}
+                    onValueChange={(val) => {
+                      if (val) setModel((val as typeof selectedModel).value);
+                    }}
+                    items={modelItems}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a model" />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {modelItems.map((item) => (
+                        <SelectItem key={item.value} value={item}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                ) : runtime === "codex" ? (
+                  <select
+                    className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/20"
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                  >
+                    {!CODEX_MODEL_ITEMS.some((item) => item.value === model) && (
+                      <option value={model}>{model}</option>
+                    )}
+                    {CODEX_MODEL_ITEMS.map((item) => (
+                      <option key={item.value} value={item.value}>{item.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <Input
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    placeholder={t("settings.codexModelPlaceholder")}
+                  />
+                )}
+              </Field>
+
+              {runtime === "pi" && (
+                <Field>
+                  <FieldLabel>{t("settings.chooseConnection")}</FieldLabel>
+                  <select
+                    className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none focus:border-ring focus:ring-3 focus:ring-ring/20"
+                    value={connectionId || ""}
+                    onChange={(event) => {
+                      const connection = connections.find((entry) => entry.id === event.target.value);
+                      setConnectionId(connection?.id || null);
+                      if (connection) setModel(connection.default_model);
+                    }}
+                  >
+                    <option value="">—</option>
+                    {connections.filter((connection) => connection.hasCredential).map((connection) => (
+                      <option key={connection.id} value={connection.id}>{connection.name}</option>
+                    ))}
+                  </select>
+                </Field>
+              )}
 
               <Field>
                 <FieldLabel>
@@ -180,7 +265,11 @@ export function CreateAgentDialog({
             <DialogClose render={<Button variant="ghost" type="button" />}>
               {t("createAgent.cancel")}
             </DialogClose>
-            <Button type="submit" loading={saving} disabled={!displayName.trim()}>
+            <Button
+              type="submit"
+              loading={saving}
+              disabled={!displayName.trim() || (runtime === "pi" && !connectionId)}
+            >
               {t("createAgent.submit")}
             </Button>
           </DialogFooter>

@@ -12,7 +12,8 @@ export interface User {
   created_at: string;
 }
 
-export type AgentModel = "opus" | "sonnet" | "haiku";
+export type AgentRuntime = "claude-code" | "codex" | "pi";
+export type AgentModel = string;
 export type AgentStatus = "online" | "sleeping" | "offline";
 export type AgentActivity = "idle" | "thinking" | "working" | "error";
 
@@ -31,10 +32,13 @@ export interface Agent {
   display_name: string;
   description: string | null;
   system_prompt: string | null;
+  runtime: AgentRuntime;
   model: AgentModel;
+  connection_id: string | null;
   status: AgentStatus;
   owner_id: string;
   server_id: string;
+  avatar_url: string | null;
   created_at: string;
 }
 

@@ -1,8 +1,12 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import NotionAvatar from "react-notion-avatar";
 import { getAvatarColor, getNotionAvatarConfig } from "@/lib/avatar";
+import {
+  getAgentAvatarSeed,
+  resolveAgentAvatarImageUrl,
+} from "@/lib/agent-avatar";
 
 import { cn } from "@/lib/utils";
 
@@ -11,6 +15,7 @@ interface GeneratedAvatarProps {
   name?: string;
   size?: "xs" | "sm" | "md" | "lg";
   className?: string;
+  avatarUrl?: string | null;
   /** If true, show initials instead of notion avatar (for workspace icons) */
   initials?: boolean;
 }
@@ -34,17 +39,22 @@ export function GeneratedAvatar({
   name,
   size = "md",
   className,
+  avatarUrl,
   initials,
 }: GeneratedAvatarProps) {
-  const color = useMemo(() => getAvatarColor(id), [id]);
-  const config = useMemo(() => getNotionAvatarConfig(id), [id]);
+  const seed = getAgentAvatarSeed(id, avatarUrl);
+  const color = useMemo(() => getAvatarColor(seed), [seed]);
+  const config = useMemo(() => getNotionAvatarConfig(seed), [seed]);
+  const imageUrl = resolveAgentAvatarImageUrl(avatarUrl);
+  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
+  const imageFailed = Boolean(imageUrl && failedImageUrl === imageUrl);
 
   const showInitials = initials && name;
 
   return (
     <div
       className={cn(
-        "inline-flex shrink-0 select-none items-center justify-center overflow-hidden rounded-full",
+        "relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden rounded-full",
         showInitials ? "" : "border-[0.5px] border-border bg-background",
         SIZE_CLASSES[size],
         className,
@@ -61,6 +71,15 @@ export function GeneratedAvatar({
           className="h-full w-full"
           style={{ width: "100%", height: "100%" }}
           config={config}
+        />
+      )}
+      {imageUrl && !imageFailed && (
+        // eslint-disable-next-line @next/next/no-img-element -- local desktop avatars use runtime URLs.
+        <img
+          src={imageUrl}
+          alt=""
+          className="absolute inset-0 size-full object-cover"
+          onError={() => setFailedImageUrl(imageUrl)}
         />
       )}
     </div>

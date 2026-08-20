@@ -10,6 +10,7 @@ interface AgentInfo {
   display_name: string;
   status: string;
   description: string | null;
+  avatar_url: string | null;
 }
 
 export default function DmPage() {

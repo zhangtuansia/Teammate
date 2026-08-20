@@ -9,7 +9,6 @@ import TiptapMessageInput, { type TiptapMessageInputHandle } from './tiptap-mess
 import { useAgentActivity } from '@/hooks/use-agent-activity';
 import { useAppSettings } from '@/hooks/use-app-settings';
 import { Button } from '@/components/ui/button';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { GeneratedAvatar } from './generated-avatar';
@@ -37,6 +36,7 @@ interface AgentInfo {
   display_name: string;
   status: string;
   description: string | null;
+  avatar_url: string | null;
 }
 
 export function MessageArea({
@@ -98,7 +98,7 @@ export function MessageArea({
         const agentIds = members.map((m: { member_id: string }) => m.member_id);
         const { data: agentsData } = await supabase
           .from('agents')
-          .select('id, display_name, status, description')
+          .select('id, display_name, status, description, avatar_url')
           .in('id', agentIds);
 
         if (agentsData) {
@@ -362,7 +362,12 @@ export function MessageArea({
         {channel.type === 'dm' && agentInfo ? (
           <>
             <div className="pointer-events-none relative size-8">
-              <GeneratedAvatar id={agentInfo.id} name={agentInfo.display_name} size="md" />
+              <GeneratedAvatar
+                id={agentInfo.id}
+                name={agentInfo.display_name}
+                size="md"
+                avatarUrl={agentInfo.avatar_url}
+              />
               {(() => {
                 const act = agentActivities.get(agentInfo.id);
                 const isActive = act?.activity === 'thinking' || act?.activity === 'working';
@@ -424,7 +429,13 @@ export function MessageArea({
             {channelAgents.size > 0 && (
               <div className="pointer-events-none flex items-center gap-1">
                 {Array.from(channelAgents.values()).map((agent) => (
-                  <GeneratedAvatar key={agent.id} id={agent.id} name={agent.display_name} size="xs" />
+                  <GeneratedAvatar
+                    key={agent.id}
+                    id={agent.id}
+                    name={agent.display_name}
+                    size="xs"
+                    avatarUrl={agent.avatar_url}
+                  />
                 ))}
               </div>
             )}
@@ -459,7 +470,18 @@ export function MessageArea({
                 sameSender ? '' : 'mt-5 first:mt-0'
               }`}>
               <div className="w-8 shrink-0 pt-0.5">
-                {!sameSender && <GeneratedAvatar id={msg.sender_id} name={getSenderName(msg)} size="md" />}
+                {!sameSender && (
+                  <GeneratedAvatar
+                    id={msg.sender_id}
+                    name={getSenderName(msg)}
+                    size="md"
+                    avatarUrl={
+                      msg.sender_type === 'agent'
+                        ? channelAgents.get(msg.sender_id)?.avatar_url || agentInfo?.avatar_url
+                        : null
+                    }
+                  />
+                )}
               </div>
 
               <div className="flex-1 min-w-0">
@@ -508,6 +530,7 @@ export function MessageArea({
         {(() => {
           let activeAgentName: string | null = null;
           let activeAgentId: string | null = null;
+          let activeAgentAvatarUrl: string | null = null;
           let activityLabel = '';
           let activityDetail = '';
           let isActive = false;
@@ -518,6 +541,7 @@ export function MessageArea({
               isActive = true;
               activeAgentName = agentInfo.display_name;
               activeAgentId = agentInfo.id;
+              activeAgentAvatarUrl = agentInfo.avatar_url;
               activityLabel = act.label || '';
               activityDetail = act.detail || '';
             }
@@ -528,6 +552,7 @@ export function MessageArea({
                 isActive = true;
                 activeAgentName = agent.display_name;
                 activeAgentId = agentId;
+                activeAgentAvatarUrl = agent.avatar_url;
                 activityLabel = act.label || '';
                 activityDetail = act.detail || '';
                 break;
@@ -540,6 +565,7 @@ export function MessageArea({
             const firstAgent = agentInfo || Array.from(channelAgents.values())[0];
             activeAgentName = firstAgent?.display_name || 'Agent';
             activeAgentId = firstAgent?.id || 'unknown';
+            activeAgentAvatarUrl = firstAgent?.avatar_url || null;
             activityLabel = t('message.thinking');
             activityDetail = '';
           }
@@ -552,7 +578,12 @@ export function MessageArea({
           return (
             <div className="flex gap-3 px-2 py-1 mt-4">
               <div className="w-8 flex-shrink-0 pt-0.5">
-                <GeneratedAvatar id={activeAgentId || 'unknown'} name={activeAgentName || 'A'} size="md" />
+                <GeneratedAvatar
+                  id={activeAgentId || 'unknown'}
+                  name={activeAgentName || 'A'}
+                  size="md"
+                  avatarUrl={activeAgentAvatarUrl}
+                />
               </div>
               <div className="flex-1 min-w-0 py-1.5">
                 {isTextOutput ? (
@@ -606,7 +637,12 @@ export function MessageArea({
                         ? 'bg-accent text-accent-foreground'
                         : 'text-muted-foreground hover:bg-accent/50'
                     }`}>
-                    <GeneratedAvatar id={agent.id} name={agent.display_name} size="xs" />
+                    <GeneratedAvatar
+                      id={agent.id}
+                      name={agent.display_name}
+                      size="xs"
+                      avatarUrl={agent.avatar_url}
+                    />
                     <div className="flex-1 min-w-0 text-left">
                       <div>{agent.display_name}</div>
                       {agent.description && (

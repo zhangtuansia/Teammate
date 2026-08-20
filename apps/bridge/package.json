@@ -25,9 +25,12 @@
   "license": "MIT",
   "dependencies": {
     "@fehey/zano-cli": "^0.1.0",
-    "@zano/local-client": "workspace:*",
+    "@mariozechner/pi-agent-core": "0.66.1",
+    "@mariozechner/pi-ai": "0.66.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@sinclair/typebox": "^0.34.52",
     "@supabase/supabase-js": "^2.104.1",
+    "@zano/local-client": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
