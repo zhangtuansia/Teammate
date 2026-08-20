@@ -23,6 +23,11 @@ pnpm install
 pnpm desktop:dev
 ```
 
+`pnpm desktop:dev` is the normal UI development loop: it opens the native Tauri
+window and keeps Vite hot reload enabled, so React and CSS changes appear without
+building an app or DMG. If a Teammate local runtime is already running, the dev
+window reuses it instead of starting a second SQLite service.
+
 The desktop app starts its own local runtime. Node, the SQLite service, bridge, and workspace CLI are bundled as sidecars; there is no separate server command and no Supabase account. Build a native installer with:
 
 ```bash

@@ -358,7 +358,7 @@ export function MessageArea({
       {/* Channel header */}
       <div
         className="flex items-center gap-3 border-b-[0.5px] py-2 px-3 select-none"
-        data-tauri-drag-region>
+        data-tauri-drag-region="deep">
         {channel.type === 'dm' && agentInfo ? (
           <>
             <div className="pointer-events-none relative size-8">

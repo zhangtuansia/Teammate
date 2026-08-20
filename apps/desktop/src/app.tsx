@@ -5,7 +5,6 @@ import { MessageArea } from "@/components/message-area";
 import { AgentSettingsPanel } from "@/components/agent-settings-panel";
 import { AgentActivityProvider } from "@/hooks/use-agent-activity";
 import { useAppSettings } from "@/hooks/use-app-settings";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
 interface ServerInfo {
@@ -30,44 +29,6 @@ interface ChannelInfo {
 }
 
 const LOCAL_SERVICE_URL = "http://127.0.0.1:8787";
-
-function MacWindowControls() {
-  useEffect(() => {
-    if (!navigator.userAgent.includes("Macintosh")) return;
-
-    const handleDoubleClick = (event: MouseEvent) => {
-      const target = event.target;
-      if (target instanceof HTMLElement && target.closest("[data-tauri-drag-region]")) {
-        void getCurrentWindow().toggleMaximize();
-      }
-    };
-
-    document.addEventListener("dblclick", handleDoubleClick);
-    return () => document.removeEventListener("dblclick", handleDoubleClick);
-  }, []);
-
-  const desktopWindow = getCurrentWindow();
-
-  return (
-    <div className="mac-window-controls" aria-label="Window controls">
-      <button
-        className="mac-window-control mac-window-control-close"
-        aria-label="Close window"
-        onClick={() => void desktopWindow.close()}
-      />
-      <button
-        className="mac-window-control mac-window-control-minimize"
-        aria-label="Minimize window"
-        onClick={() => void desktopWindow.minimize()}
-      />
-      <button
-        className="mac-window-control mac-window-control-zoom"
-        aria-label="Zoom window"
-        onClick={() => void desktopWindow.toggleMaximize()}
-      />
-    </div>
-  );
-}
 
 async function waitForRuntime() {
   let lastError: Error | null = null;
@@ -241,43 +202,36 @@ export function App() {
 
   if (error) {
     return (
-      <>
-        <MacWindowControls />
-        <main
-          className="flex h-full items-center justify-center bg-background p-8"
-          data-tauri-drag-region>
-          <div className="max-w-md rounded-xl border bg-card p-6 text-center shadow-sm">
-            <h1 className="text-lg font-semibold">{t("runtime.error")}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-            <button
-              className="mt-5 rounded-lg bg-foreground px-4 py-2 text-sm text-background"
-              onClick={() => window.location.reload()}
-            >
-              {t("runtime.retry")}
-            </button>
-          </div>
-        </main>
-      </>
+      <main
+        className="flex h-full items-center justify-center bg-background p-8"
+        data-tauri-drag-region="deep">
+        <div className="max-w-md rounded-xl border bg-card p-6 text-center shadow-sm">
+          <h1 className="text-lg font-semibold">{t("runtime.error")}</h1>
+          <p className="mt-2 text-sm text-muted-foreground">{error}</p>
+          <button
+            className="mt-5 rounded-lg bg-foreground px-4 py-2 text-sm text-background"
+            onClick={() => window.location.reload()}
+          >
+            {t("runtime.retry")}
+          </button>
+        </div>
+      </main>
     );
   }
 
   if (!server) {
     return (
-      <>
-        <MacWindowControls />
-        <main
-          className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground"
-          data-tauri-drag-region>
-          {t("runtime.starting")}
-        </main>
-      </>
+      <main
+        className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground"
+        data-tauri-drag-region="deep">
+        {t("runtime.starting")}
+      </main>
     );
   }
 
   return (
     <AgentActivityProvider>
       <div className="desktop-shell relative flex h-full overflow-hidden bg-background">
-        <MacWindowControls />
         <Sidebar serverSlug={server.slug} serverId={server.id} serverName={server.name} />
         <main className="flex flex-1 overflow-hidden border-l border-border/70 bg-card">
           <Conversation server={server} />
