@@ -348,11 +348,11 @@ export function Sidebar({
     <aside className="desktop-sidebar flex h-full w-[var(--sidebar-width)] flex-col">
       {/* Header — Server switcher */}
       <div
-        className="desktop-sidebar-header relative px-2 pt-2 pb-1"
+        className="desktop-sidebar-header relative flex h-9 items-center"
         data-tauri-drag-region="deep">
         <button
           onClick={() => setShowServerMenu((v) => !v)}
-          className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 transition-all hover:bg-accent"
+          className="flex h-8 w-full items-center gap-2.5 rounded-lg px-2 transition-all hover:bg-accent"
         >
           <span className="text-[13px] font-semibold text-foreground truncate flex-1 text-left">
             {serverName}

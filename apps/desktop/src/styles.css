@@ -33,6 +33,10 @@ body {
   user-select: none;
 }
 
+.desktop-sidebar-header {
+  padding-inline: 8px;
+}
+
 html[data-platform="macos"] .desktop-sidebar-header {
-  padding-left: 76px;
+  padding-inline-start: 68px;
 }
