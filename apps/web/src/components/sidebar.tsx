@@ -343,7 +343,7 @@ export function Sidebar({
   }
 
   return (
-    <aside className="flex h-full w-[var(--sidebar-width)] flex-col">
+    <aside className="desktop-sidebar flex h-full w-[var(--sidebar-width)] flex-col">
       {/* Header — Server switcher */}
       <div className="relative px-2 pt-2 pb-1">
         <button
@@ -387,20 +387,24 @@ export function Sidebar({
                   )}
                 </button>
               ))}
-              <Separator className="my-1" />
-              <button
-                onClick={() => {
-                  setShowServerMenu(false);
-                  setShowCreateServer(true);
-                }}
-                className="flex w-full items-center gap-2.5 px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-md mx-1"
-                style={{ width: "calc(100% - 8px)" }}
-              >
-                <div className="flex size-6 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground flex-shrink-0">
-                  <PlusIcon className="size-3" />
-                </div>
-                <span>Create Workspace</span>
-              </button>
+              {!localMode && (
+                <>
+                  <Separator className="my-1" />
+                  <button
+                    onClick={() => {
+                      setShowServerMenu(false);
+                      setShowCreateServer(true);
+                    }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground rounded-md mx-1"
+                    style={{ width: "calc(100% - 8px)" }}
+                  >
+                    <div className="flex size-6 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground flex-shrink-0">
+                      <PlusIcon className="size-3" />
+                    </div>
+                    <span>Create Workspace</span>
+                  </button>
+                </>
+              )}
             </div>
           </>
         )}
@@ -534,13 +538,15 @@ export function Sidebar({
             {userName}
           </div>
         </div>
-        <button
-          onClick={handleLogout}
-          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-          title="Sign out"
-        >
-          <LogOutIcon className="size-3.5" />
-        </button>
+        {!localMode && (
+          <button
+            onClick={handleLogout}
+            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            title="Sign out"
+          >
+            <LogOutIcon className="size-3.5" />
+          </button>
+        )}
       </div>
       <CreateAgentDialog
         open={showCreateAgent}

@@ -1,0 +1,46 @@
+@import "../../web/src/app/globals.css";
+@source "../../web/src";
+
+@font-face {
+  font-family: "SN Pro";
+  src: url("../../web/src/fonts/SNPro-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "SN Pro";
+  src: url("../../web/src/fonts/SNPro-Medium.woff2") format("woff2");
+  font-weight: 500 700;
+  font-style: normal;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  font-family: "SN Pro", system-ui, sans-serif;
+}
+
+.desktop-drag-region {
+  display: none;
+}
+
+html[data-platform="macos"] .desktop-sidebar {
+  padding-top: 38px;
+}
+
+html[data-platform="macos"] .desktop-drag-region {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  left: 0;
+  display: block;
+  width: var(--sidebar-width);
+  height: 38px;
+}

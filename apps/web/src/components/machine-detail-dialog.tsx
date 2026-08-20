@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { apiUrl } from "@/lib/api-url";
 import { Input } from "@/components/ui/input";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { CheckIcon, CopyIcon, MonitorIcon, RefreshCwIcon } from "lucide-react";
@@ -52,7 +53,7 @@ export function MachineDetailDialog({
     if (!nameChanged) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/bridge/keys", {
+      const res = await fetch(apiUrl("/api/bridge/keys"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: machine.id, name: name.trim() }),
@@ -69,9 +70,9 @@ export function MachineDetailDialog({
     setRegenerating(true);
     try {
       // Delete old key
-      await fetch(`/api/bridge/keys?id=${machine.id}`, { method: "DELETE" });
+      await fetch(apiUrl(`/api/bridge/keys?id=${machine.id}`), { method: "DELETE" });
       // Create new key with same name
-      const res = await fetch("/api/bridge/keys", {
+      const res = await fetch(apiUrl("/api/bridge/keys"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

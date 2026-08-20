@@ -12,7 +12,24 @@
 
 ---
 
-Teammate is based on [Zano](https://github.com/EryouHao/zano) and is being refactored into a local-first, cross-platform AI team workspace. The current branch adds a Node/SQLite message service so the main chat flow can run without Supabase. Each agent has its own working directory and `MEMORY.md`, and communicates over chat, DMs, threads, and a built-in task board (`todo` → `in_progress` → `in_review` → `done`).
+Teammate is based on [Zano](https://github.com/EryouHao/zano) and is being refactored into a local-first, cross-platform AI team workspace. It now includes a Tauri 2 desktop app with an embedded Node/SQLite message service, so the main chat flow runs without Supabase or a login. Each agent has its own working directory and `MEMORY.md`, and communicates over chat, DMs, threads, and a built-in task board (`todo` → `in_progress` → `in_review` → `done`).
+
+## Desktop quickstart (Tauri 2)
+
+Requirements for development: Node >= 22.5, pnpm 10, the Rust stable toolchain, and an installed/authenticated Claude Code CLI if you want the current AI runner to reply.
+
+```bash
+pnpm install
+pnpm desktop:dev
+```
+
+The desktop app starts its own local runtime. Node, the SQLite service, bridge, and workspace CLI are bundled as sidecars; there is no separate server command and no Supabase account. Build a native installer with:
+
+```bash
+pnpm desktop:build
+```
+
+Artifacts are written below `apps/desktop/src-tauri/target/release/bundle/`. The same codebase builds a macOS `.app`/DMG and Windows installer; Windows uses the system WebView2 runtime (and downloads its bootstrapper when needed).
 
 ## Local quickstart (no Supabase)
 
@@ -36,39 +53,30 @@ Supabase-backed hosting remains available for compatibility, but it is no longer
 ## How it works
 
 ```
-┌──────────────────┐     Realtime      ┌──────────────────┐
-│ Teammate Web UI  │ ◄──────────────►  │ Local Node API + │
-│ Next.js          │     polling/events│ SQLite           │
-└──────────────────┘                   └──────────────────┘
-                                                ▲
-                                                │ Realtime
-                                                ▼
-                                       ┌──────────────────┐
-                                       │ Teammate Bridge  │
-                                       │  (runs locally)  │
-                                       └────────┬─────────┘
-                                                │ spawn
-                                                ▼
-                                       ┌──────────────────┐
-                                       │  Claude Code     │
-                                       │  agents          │
-                                       │  (one per agent) │
-                                       └──────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                     Tauri 2 desktop app                      │
+│  ┌──────────────────┐       ┌─────────────────────────────┐  │
+│  │ Static React UI  │ ◄───► │ Packaged Node runtime       │  │
+│  │ shared with web  │ events│ SQLite API + local Bridge   │  │
+│  └──────────────────┘       └──────────────┬──────────────┘  │
+└────────────────────────────────────────────┼─────────────────┘
+                                             │ spawn
+                                             ▼
+                                    ┌────────────────────┐
+                                    │ Claude Code agents │
+                                    └────────────────────┘
 ```
 
-- **Web**: Next.js 16. Channels, DMs, threads, tasks, and agent management.
+- **Desktop**: Tauri 2 + Vite/React, reusing the existing chat UI without a Next.js server.
+- **Web**: Next.js 16. Channels, DMs, threads, tasks, and agent management; preserved for hosted mode.
 - **Local service**: Node.js + built-in SQLite. It provides a small Supabase-compatible query/event surface for the existing web, bridge, and CLI code.
 - **Bridge**: Subscribes to local messages, starts an agent runner, and injects the workspace CLI.
 - **Agents**: The current runner is Claude Code. A provider layer for Codex and OpenAI-compatible custom API endpoints is planned next.
 - **Memory**: Each agent maintains a persistent `MEMORY.md` and `notes/` directory in its workspace, so it accumulates expertise over time.
 
-## Desktop and Windows direction
+## Desktop roadmap
 
-Teammate is intended to use Tauri 2 as its desktop shell. Tauri supports Windows through WebView2 and supports bundling external binaries such as a Node sidecar. The practical migration path is:
-
-1. package the current Next.js UI and Node/SQLite service as a Tauri desktop app;
-2. introduce a runner/provider interface for Claude Code, Codex, and OpenAI-compatible APIs;
-3. progressively replace server-only Next.js and Node pieces with a static frontend and Rust/Tauri commands where that reduces packaging complexity.
+The Tauri 2 shell and local runtime packaging are implemented. The next desktop milestone is a runner/provider interface for Claude Code, Codex, and OpenAI-compatible API endpoints, followed by progressively moving the remaining server-oriented pieces behind stable local APIs.
 
 ## Original hosted Zano mode
 
@@ -99,7 +107,8 @@ teammate/
 ├── apps/
 │   ├── web/           Next.js web app (chat UI, agent management, auth)
 │   ├── bridge/        Local Node bridge and agent process manager
-│   └── local-server/  Local Node/SQLite message service
+│   ├── local-server/  Local Node/SQLite message service
+│   └── desktop/       Tauri 2 shell, static React entry, and packaged sidecars
 ├── packages/
 │   ├── cli/           The `zano` CLI agents use to chat & manage tasks
 │   ├── db/            SQL schema, RLS policies, triggers, TS types
@@ -125,7 +134,7 @@ For database setup, see [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md).
 
 ## Status
 
-Teammate is **early and experimental**. Local Node/SQLite mode is implemented; Tauri packaging and the multi-provider runner are the next architectural milestones.
+Teammate is **early and experimental**. Local Node/SQLite mode and Tauri 2 packaging are implemented; the multi-provider runner is the next architectural milestone.
 
 ## Contributing
 

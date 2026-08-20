@@ -1,5 +1,5 @@
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from "fs";
-import { join, resolve, dirname } from "path";
+import { delimiter, join, resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "node:module";
 import { spawn, ChildProcess } from "child_process";
@@ -7,9 +7,6 @@ import { SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
 import { buildSystemPrompt } from "./system-prompt.js";
 
 type AgentActivity = "idle" | "thinking" | "working" | "error";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 const ACTIVITY_HEARTBEAT_MS = 60_000; // Re-broadcast active state every 60s
 
@@ -442,15 +439,25 @@ ${agent.description || agent.display_name}
     }
 
     const wrapperPath = join(zanoDir, "zano");
-    let wrapperBody: string;
+    const bashPath = (path: string) =>
+      `'${path.replace(/\\/g, "/").replace(/'/g, "'\\''")}'`;
+    const cmdPath = (path: string) => `"${path.replace(/"/g, '""')}"`;
+    let bashCommand: string;
+    let windowsCommand: string;
+    const packagedCliPath = process.env.ZANO_CLI_PATH;
 
     // Local mode must use this checkout's CLI because the published package
     // only knows how to talk to Supabase.
-    if (this.localServerUrl) {
-      const bridgeRoot = resolve(__dirname, "..");
+    if (this.localServerUrl && packagedCliPath && existsSync(packagedCliPath)) {
+      bashCommand = `${bashPath(packagedCliPath)} "$@"`;
+      windowsCommand = `${cmdPath(packagedCliPath)} %*`;
+      console.log(`  [${session.displayName}] CLI resolved from desktop sidecar: ${packagedCliPath}`);
+    } else if (this.localServerUrl) {
+      const bridgeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
       const cliPath = resolve(bridgeRoot, "..", "..", "packages", "cli", "src", "index.ts");
       const tsxPath = join(bridgeRoot, "node_modules", "tsx", "dist", "cli.mjs");
-      wrapperBody = `#!/usr/bin/env bash\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${tsxPath.replace(/'/g, "'\\''")}' '${cliPath.replace(/'/g, "'\\''")}' "$@"\n`;
+      bashCommand = `${bashPath(process.execPath)} ${bashPath(tsxPath)} ${bashPath(cliPath)} "$@"`;
+      windowsCommand = `${cmdPath(process.execPath)} ${cmdPath(tsxPath)} ${cmdPath(cliPath)} %*`;
       console.log(`  [${session.displayName}] CLI resolved from local workspace: ${cliPath}`);
     } else {
       // Try to resolve the compiled CLI from @fehey/zano-cli npm package first
@@ -458,19 +465,24 @@ ${agent.description || agent.display_name}
         const req = createRequire(import.meta.url);
         const cliPath = req.resolve("@fehey/zano-cli/dist/index.js");
         // Published mode: use node to run compiled JS directly
-        wrapperBody = `#!/usr/bin/env bash\nexec node '${cliPath.replace(/'/g, "'\\''")}' "$@"\n`;
+        bashCommand = `node ${bashPath(cliPath)} "$@"`;
+        windowsCommand = `node ${cmdPath(cliPath)} %*`;
         console.log(`  [${session.displayName}] CLI resolved from npm package: ${cliPath}`);
       } catch {
         // Fall back to monorepo dev path (TypeScript source via tsx)
-        const bridgeRoot = resolve(__dirname, "..");
+        const bridgeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
         const cliPath = resolve(bridgeRoot, "..", "..", "packages", "cli", "src", "index.ts");
         const tsxPath = join(bridgeRoot, "node_modules", "tsx", "dist", "cli.mjs");
-        wrapperBody = `#!/usr/bin/env bash\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${tsxPath.replace(/'/g, "'\\''")}' '${cliPath.replace(/'/g, "'\\''")}' "$@"\n`;
+        bashCommand = `${bashPath(process.execPath)} ${bashPath(tsxPath)} ${bashPath(cliPath)} "$@"`;
+        windowsCommand = `${cmdPath(process.execPath)} ${cmdPath(tsxPath)} ${cmdPath(cliPath)} %*`;
         console.log(`  [${session.displayName}] CLI resolved from monorepo dev path: ${cliPath}`);
       }
     }
 
-    writeFileSync(wrapperPath, wrapperBody, { mode: 0o755 });
+    writeFileSync(wrapperPath, `#!/usr/bin/env bash\nexec ${bashCommand}\n`, { mode: 0o755 });
+    if (process.platform === "win32") {
+      writeFileSync(`${wrapperPath}.cmd`, `@echo off\r\n${windowsCommand}\r\n`);
+    }
     console.log(`  [${session.displayName}] CLI wrapper written: ${wrapperPath}`);
     return zanoDir;
   }
@@ -525,7 +537,7 @@ ${agent.description || agent.display_name}
           ? { ZANO_LOCAL_SERVER_URL: this.localServerUrl }
           : {}),
         // Prepend .zano/ to PATH so `zano` command is available
-        PATH: `${zanoDir}:${process.env.PATH ?? ""}`,
+        PATH: `${zanoDir}${delimiter}${process.env.PATH ?? ""}`,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { apiUrl } from "@/lib/api-url";
 import { KeyIcon, CopyIcon, CheckIcon, TrashIcon, PlusIcon } from "lucide-react";
 
 interface ApiKey {
@@ -23,7 +24,7 @@ export function ApiKeysSection({ serverId }: { serverId: string }) {
   const [showForm, setShowForm] = useState(false);
 
   async function loadKeys() {
-    const res = await fetch(`/api/bridge/keys?server_id=${serverId}`);
+    const res = await fetch(apiUrl(`/api/bridge/keys?server_id=${serverId}`));
     if (res.ok) {
       const data = await res.json();
       setKeys(data.keys);
@@ -37,7 +38,7 @@ export function ApiKeysSection({ serverId }: { serverId: string }) {
 
   async function handleCreate() {
     setCreating(true);
-    const res = await fetch("/api/bridge/keys", {
+    const res = await fetch(apiUrl("/api/bridge/keys"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -57,7 +58,7 @@ export function ApiKeysSection({ serverId }: { serverId: string }) {
   }
 
   async function handleDelete(id: string) {
-    const res = await fetch(`/api/bridge/keys?id=${id}`, { method: "DELETE" });
+    const res = await fetch(apiUrl(`/api/bridge/keys?id=${id}`), { method: "DELETE" });
     if (res.ok) {
       setKeys((prev) => prev.filter((k) => k.id !== id));
       if (revealedKey) setRevealedKey(null);

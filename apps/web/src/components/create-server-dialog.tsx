@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { apiUrl } from "@/lib/api-url";
 import {
   Dialog,
   DialogPopup,
@@ -48,7 +49,7 @@ export function CreateServerDialog({ open, onClose }: CreateServerDialogProps) {
     setError("");
 
     try {
-      const res = await fetch("/api/servers", {
+      const res = await fetch(apiUrl("/api/servers"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -3,7 +3,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { lstat, readdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
 const LOCAL_USER_ID = "00000000-0000-4000-8000-000000000001";
@@ -234,6 +236,19 @@ const server = createServer(async (request, response) => {
       });
     }
 
+    if (url.pathname === "/api/agents") {
+      return handleAgentsRequest(request, response);
+    }
+
+    const agentRoute = url.pathname.match(/^\/api\/agents\/([^/]+)(?:\/(reset|workspace))?$/);
+    if (agentRoute) {
+      return handleAgentRequest(request, response, url, agentRoute[1], agentRoute[2]);
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/skills") {
+      return sendJson(response, 200, await listLocalSkills());
+    }
+
     if (request.method === "POST" && url.pathname === "/api/query") {
       const query = (await readJson(request)) as QueryRequest;
       return sendJson(response, 200, executeQuery(query));
@@ -432,6 +447,281 @@ function seedDatabase() {
       now
     );
   }
+}
+
+async function handleAgentsRequest(request: IncomingMessage, response: ServerResponse) {
+  if (request.method === "GET") {
+    const agents = db
+      .prepare("SELECT * FROM agents WHERE owner_id = ? ORDER BY created_at")
+      .all(LOCAL_USER_ID);
+    return sendJson(response, 200, { agents });
+  }
+
+  if (request.method !== "POST") {
+    return sendJson(response, 405, { error: "Method not allowed" });
+  }
+
+  const body = (await readJson(request)) as {
+    display_name?: string;
+    description?: string;
+    system_prompt?: string;
+    model?: string;
+    server_id?: string;
+  };
+  const displayName = body.display_name?.trim();
+  if (!displayName || !body.server_id) {
+    return sendJson(response, 400, { error: "display_name and server_id are required" });
+  }
+
+  const baseName =
+    displayName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "agent";
+  const model = ["opus", "sonnet", "haiku"].includes(body.model || "")
+    ? body.model
+    : "sonnet";
+  const agent = queryData({
+    table: "agents",
+    action: "insert",
+    single: true,
+    values: {
+      name: `${baseName}-${randomUUID().slice(0, 8)}`,
+      display_name: displayName,
+      description: body.description?.trim() || null,
+      system_prompt: body.system_prompt?.trim() || null,
+      model,
+      status: "offline",
+      owner_id: LOCAL_USER_ID,
+      server_id: body.server_id,
+    },
+  }) as DbRow;
+
+  try {
+    const channel = queryData({
+      table: "channels",
+      action: "insert",
+      single: true,
+      values: {
+        name: displayName,
+        description: `Direct chat with ${displayName}`,
+        type: "dm",
+        created_by: LOCAL_USER_ID,
+        server_id: body.server_id,
+      },
+    }) as DbRow;
+    queryData({
+      table: "channel_members",
+      action: "insert",
+      values: [
+        { channel_id: channel.id, member_id: LOCAL_USER_ID, member_type: "human" },
+        { channel_id: channel.id, member_id: agent.id, member_type: "agent" },
+      ],
+    });
+    queryData({
+      table: "server_members",
+      action: "insert",
+      values: {
+        server_id: body.server_id,
+        member_id: agent.id,
+        member_type: "agent",
+        role: "member",
+      },
+    });
+    return sendJson(response, 200, { agent, channel });
+  } catch (error) {
+    queryData({
+      table: "agents",
+      action: "delete",
+      filters: [{ column: "id", operator: "eq", value: agent.id }],
+    });
+    throw error;
+  }
+}
+
+async function handleAgentRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  agentId: string,
+  action?: string,
+) {
+  const agent = db
+    .prepare("SELECT * FROM agents WHERE id = ? AND owner_id = ?")
+    .get(agentId, LOCAL_USER_ID) as DbRow | undefined;
+  if (!agent) return sendJson(response, 404, { error: "Agent not found" });
+
+  if (action === "reset" && request.method === "POST") {
+    const memberships = db
+      .prepare(
+        `SELECT cm.channel_id FROM channel_members cm
+         JOIN channels c ON c.id = cm.channel_id
+         WHERE cm.member_id = ? AND cm.member_type = 'agent' AND c.type = 'dm'`,
+      )
+      .all(agentId) as Array<{ channel_id: string }>;
+    let messagesDeleted = 0;
+    for (const membership of memberships) {
+      const result = executeQuery({
+        table: "messages",
+        action: "delete",
+        filters: [{ column: "channel_id", operator: "eq", value: membership.channel_id }],
+      });
+      messagesDeleted += result.count || 0;
+    }
+    executeQuery({
+      table: "agents",
+      action: "update",
+      values: { session_id: null },
+      filters: [{ column: "id", operator: "eq", value: agentId }],
+    });
+    return sendJson(response, 200, { success: true, messagesDeleted });
+  }
+
+  if (action === "workspace" && request.method === "GET") {
+    return sendJson(response, 200, await readAgentWorkspace(agent, url.searchParams.get("file")));
+  }
+
+  if (action) return sendJson(response, 405, { error: "Method not allowed" });
+
+  if (request.method === "GET") return sendJson(response, 200, { agent });
+
+  if (request.method === "PUT") {
+    const body = (await readJson(request)) as Record<string, unknown>;
+    const updates: DbRow = {};
+    if (body.display_name !== undefined) {
+      const displayName = String(body.display_name).trim();
+      if (!displayName) return sendJson(response, 400, { error: "display_name cannot be empty" });
+      updates.display_name = displayName;
+    }
+    if (body.description !== undefined) {
+      updates.description = String(body.description || "").trim() || null;
+    }
+    if (body.system_prompt !== undefined) {
+      updates.system_prompt = String(body.system_prompt || "").trim() || null;
+    }
+    if (body.model !== undefined) {
+      const model = String(body.model);
+      if (!["opus", "sonnet", "haiku"].includes(model)) {
+        return sendJson(response, 400, { error: "Unsupported Claude model" });
+      }
+      updates.model = model;
+    }
+    const updated = queryData({
+      table: "agents",
+      action: "update",
+      values: updates,
+      single: true,
+      filters: [{ column: "id", operator: "eq", value: agentId }],
+    });
+    return sendJson(response, 200, { agent: updated });
+  }
+
+  if (request.method === "DELETE") {
+    const dmChannels = db
+      .prepare(
+        `SELECT c.id FROM channels c
+         JOIN channel_members cm ON cm.channel_id = c.id
+         WHERE cm.member_id = ? AND cm.member_type = 'agent' AND c.type = 'dm'`,
+      )
+      .all(agentId) as Array<{ id: string }>;
+    for (const channel of dmChannels) {
+      for (const table of ["messages", "channel_members"] as const) {
+        executeQuery({
+          table,
+          action: "delete",
+          filters: [{ column: "channel_id", operator: "eq", value: channel.id }],
+        });
+      }
+      executeQuery({
+        table: "channels",
+        action: "delete",
+        filters: [{ column: "id", operator: "eq", value: channel.id }],
+      });
+    }
+    executeQuery({
+      table: "channel_members",
+      action: "delete",
+      filters: [{ column: "member_id", operator: "eq", value: agentId }],
+    });
+    executeQuery({
+      table: "server_members",
+      action: "delete",
+      filters: [{ column: "member_id", operator: "eq", value: agentId }],
+    });
+    executeQuery({
+      table: "agents",
+      action: "delete",
+      filters: [{ column: "id", operator: "eq", value: agentId }],
+    });
+    return sendJson(response, 200, { success: true });
+  }
+
+  return sendJson(response, 405, { error: "Method not allowed" });
+}
+
+async function readAgentWorkspace(agent: DbRow, requestedFile: string | null) {
+  const configuredRoot =
+    typeof agent.workspace_path === "string" && agent.workspace_path
+      ? agent.workspace_path
+      : join(process.env.ZANO_AGENTS_DIR || ".zano/agents", String(agent.id));
+  const workspaceRoot = resolve(configuredRoot);
+
+  if (requestedFile) {
+    const requestedPath = resolve(workspaceRoot, requestedFile);
+    if (requestedPath !== workspaceRoot && !requestedPath.startsWith(`${workspaceRoot}${sep}`)) {
+      throw new Error("Invalid file path");
+    }
+    return { file: requestedFile, content: await readFile(requestedPath, "utf8") };
+  }
+
+  const files: Array<{ name: string; type: "file" | "directory"; size: number; modified: string }> = [];
+  try {
+    for (const name of await readdir(workspaceRoot)) {
+      if (name.startsWith(".")) continue;
+      const entry = await stat(join(workspaceRoot, name));
+      files.push({
+        name,
+        type: entry.isDirectory() ? "directory" : "file",
+        size: entry.size,
+        modified: entry.mtime.toISOString(),
+      });
+    }
+  } catch {
+    // Workspace is created by the bridge and may not exist yet.
+  }
+  return { workspace_path: workspaceRoot, files, notes_files: files.filter((file) => file.name.startsWith("notes/")) };
+}
+
+async function listLocalSkills() {
+  const skills: Array<{ name: string; description: string }> = [];
+  const skillsRoot = join(homedir(), ".claude", "skills");
+  try {
+    for (const name of await readdir(skillsRoot)) {
+      if (name.startsWith(".")) continue;
+      const entryPath = join(skillsRoot, name);
+      const entry = await lstat(entryPath);
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      let description = name;
+      for (const filename of ["SKILL.md", "skill.md"]) {
+        try {
+          const content = await readFile(join(entryPath, filename), "utf8");
+          const match = content.match(/^description:\s*(.+)$/m);
+          if (match) description = match[1].trim().replace(/^['"]|['"]$/g, "");
+          break;
+        } catch {
+          // Try the next conventional filename.
+        }
+      }
+      skills.push({ name, description });
+    }
+  } catch {
+    // Claude skills are optional.
+  }
+  return { skills };
+}
+
+function queryData(query: QueryRequest) {
+  return executeQuery(query).data;
 }
 
 function executeQuery(query: QueryRequest) {
@@ -746,7 +1036,7 @@ async function readJson(request: IncomingMessage) {
 function setCors(response: ServerResponse) {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown) {

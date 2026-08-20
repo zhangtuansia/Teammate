@@ -27,6 +27,7 @@ import { Field, FieldLabel } from '@/components/ui/field';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { apiUrl } from '@/lib/api-url';
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from '@/components/ui/select';
 import { Dialog, DialogPopup, DialogHeader, DialogTitle, DialogPanel } from '@/components/ui/dialog';
 
@@ -217,7 +218,7 @@ function SettingsTab({
 
   async function loadSkills() {
     try {
-      const res = await fetch('/api/skills');
+      const res = await fetch(apiUrl('/api/skills'));
       if (res.ok) {
         const data = await res.json();
         if (data.skills && data.skills.length > 0) {
@@ -249,7 +250,7 @@ function SettingsTab({
     setSaved(false);
 
     try {
-      const res = await fetch(`/api/agents/${agent.id}`, {
+      const res = await fetch(apiUrl(`/api/agents/${agent.id}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -288,7 +289,7 @@ function SettingsTab({
     setError('');
 
     try {
-      const res = await fetch(`/api/agents/${agent.id}/reset`, {
+      const res = await fetch(apiUrl(`/api/agents/${agent.id}/reset`), {
         method: 'POST',
       });
 
@@ -315,7 +316,7 @@ function SettingsTab({
     setError('');
 
     try {
-      const res = await fetch(`/api/agents/${agent.id}`, {
+      const res = await fetch(apiUrl(`/api/agents/${agent.id}`), {
         method: 'DELETE',
       });
 
@@ -525,7 +526,7 @@ function WorkspaceTab({ agentId, bridgeRpc }: { agentId: string; bridgeRpc: Brid
     setIsRemote(false);
     setBridgeOnline(true);
     try {
-      const res = await fetch(`/api/agents/${agentId}/workspace`);
+      const res = await fetch(apiUrl(`/api/agents/${agentId}/workspace`));
       const data = await res.json();
 
       if (res.ok) {
@@ -570,7 +571,7 @@ function WorkspaceTab({ agentId, bridgeRpc }: { agentId: string; bridgeRpc: Brid
         const data = await bridgeRpc('read', { agentId, filePath });
         setFileContent(data.content as string);
       } else {
-        const res = await fetch(`/api/agents/${agentId}/workspace?file=${encodeURIComponent(filePath)}`);
+        const res = await fetch(apiUrl(`/api/agents/${agentId}/workspace?file=${encodeURIComponent(filePath)}`));
         if (!res.ok) throw new Error('Failed to read file');
         const data = await res.json();
         setFileContent(data.content);

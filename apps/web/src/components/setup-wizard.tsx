@@ -22,6 +22,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Field, FieldLabel } from "@/components/ui/field";
+import { apiUrl } from "@/lib/api-url";
 import { CheckIcon, CopyIcon, LoaderIcon, MonitorIcon, TerminalIcon } from "lucide-react";
 
 interface SetupWizardProps {
@@ -72,7 +73,7 @@ export function SetupWizard({ serverId, serverSlug, onComplete }: SetupWizardPro
 
     async function checkConnection() {
       try {
-        const res = await fetch(`/api/bridge/keys?server_id=${serverId}`);
+        const res = await fetch(apiUrl(`/api/bridge/keys?server_id=${serverId}`));
         if (!res.ok) return;
         const { keys } = await res.json();
         const matchedKey = keys.find(
@@ -115,7 +116,7 @@ export function SetupWizard({ serverId, serverSlug, onComplete }: SetupWizardPro
     setAgentError("");
 
     try {
-      const res = await fetch("/api/agents", {
+      const res = await fetch(apiUrl("/api/agents"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -12,6 +12,7 @@ Teammate is a local-first derivative of Zano where humans and AI agents share ch
 apps/web/        Next.js 16 web UI + auth + bridge bootstrap API
 apps/bridge/     Local Node daemon (@fehey/zano-bridge on npm)
 apps/local-server/ Local Node/SQLite message service
+apps/desktop/    Tauri 2 + Vite/React desktop shell and Node sidecar packaging
 packages/cli/    The `zano` CLI agents use to chat (@fehey/zano-cli on npm)
 packages/db/     SQL schema, RLS, triggers, generated TS types
 packages/local-client/ Supabase-compatible local query/event adapter
@@ -26,6 +27,7 @@ Tooling: pnpm 10 workspaces + Turborepo. Node >= 22.5 for local SQLite mode.
 - **Database schema**: `packages/db/src/schema.sql` is the source of truth. Apply via Supabase SQL editor. RLS lives in the same file plus `fix-rls.sql`.
 - **Auto-onboarding trigger**: `packages/db/src/onboarding-trigger.sql` — runs on every new profile to create a default agent + channel.
 - **Bridge entry point**: `apps/bridge/src/index.ts` → `bridge.ts`. Subscribes to channels via Supabase Realtime, spawns Claude Code subprocesses through `agent-manager.ts`.
+- **Desktop entry points**: `apps/desktop/src/main.tsx` → `app.tsx`; Tauri lifecycle is in `apps/desktop/src-tauri/src/lib.rs`, and packaged Node entry is `apps/desktop/sidecar/runtime.ts`.
 - **Agent system prompt**: `apps/bridge/src/system-prompt.ts` — read this to understand how agents are expected to behave inside Zano.
 - **CLI commands**: `packages/cli/src/index.ts` — single file, all `zano message …` and `zano task …` subcommands.
 - **Web routes**: `apps/web/src/app/(chat)` is the chat UI. `apps/web/src/app/api/bridge/connect/route.ts` is the bootstrap endpoint local bridges hit on startup.
@@ -51,6 +53,8 @@ Tooling: pnpm 10 workspaces + Turborepo. Node >= 22.5 for local SQLite mode.
 ```bash
 pnpm install
 pnpm dev:local      # local Node/SQLite + web + bridge, no Supabase required
+pnpm desktop:dev    # Tauri 2 desktop app with bundled local runtime
+pnpm desktop:build  # native app/installer for the current OS
 pnpm dev:web        # Next.js dev server :3000
 pnpm dev:bridge     # Bridge in watch mode
 pnpm build          # Build everything via turbo

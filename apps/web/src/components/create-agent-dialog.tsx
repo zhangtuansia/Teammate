@@ -23,6 +23,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Field, FieldLabel } from "@/components/ui/field";
+import { apiUrl } from "@/lib/api-url";
 
 interface CreateAgentDialogProps {
   open: boolean;
@@ -71,7 +72,7 @@ export function CreateAgentDialog({
       const supabase = createClient();
       await supabase.auth.getSession();
 
-      const res = await fetch("/api/agents", {
+      const res = await fetch(apiUrl("/api/agents"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
