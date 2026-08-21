@@ -320,8 +320,10 @@ function highlightMentions(children: React.ReactNode): React.ReactNode {
     if (parts.length === 1) return child;
     return parts.map((part, index) =>
       part.startsWith("@") ? (
+        // Slack's mention chip: a tint and a 3px radius, at the same weight as
+        // the surrounding text. Bolding it makes every mention shout.
         <span
-          className="rounded bg-primary/10 px-0.5 font-medium text-primary"
+          className="rounded-[3px] bg-primary/10 px-[2px] py-px font-normal text-primary"
           key={index}
         >
           {part}

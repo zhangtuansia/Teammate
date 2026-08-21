@@ -10,6 +10,20 @@ export const BUILTIN_MODEL_PROVIDERS: readonly ModelProviderDescriptor[] = [
     modelCatalog: "sdk",
   },
   {
+    id: "anthropic-claude",
+    name: "Claude Pro / Max",
+    kind: "managed-oauth",
+    authTypes: ["oauth"],
+    modelCatalog: "sdk",
+  },
+  {
+    id: "github-copilot",
+    name: "GitHub Copilot",
+    kind: "managed-oauth",
+    authTypes: ["oauth"],
+    modelCatalog: "sdk",
+  },
+  {
     id: "openai-compatible",
     name: "OpenAI compatible",
     kind: "compatible-api",

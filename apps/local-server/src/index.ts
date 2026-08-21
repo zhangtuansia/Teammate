@@ -24,6 +24,18 @@ import {
 } from "./credential-store.js";
 import { deleteConnectionSafely } from "./connection-deletion.js";
 import { CHATGPT_MODEL_CATALOG } from "./chatgpt-model-catalog.js";
+import { SUBSCRIPTION_MODEL_CATALOG } from "./subscription-model-catalog.js";
+import {
+  SUBSCRIPTION_PROVIDERS,
+  type OAuthCredentials,
+  type SubscriptionProviderId,
+  isSubscriptionProvider,
+  refreshSubscriptionToken,
+  startSubscriptionLogin,
+  subscriptionApiKey,
+  subscriptionBaseUrl,
+  subscriptionProviderDescriptor,
+} from "./oauth-providers.js";
 import {
   enforcePrivateFileCreationMask,
   ensurePrivateDirectory,
@@ -683,6 +695,8 @@ type AgentRuntime = "claude-code" | "codex" | "pi";
 type ThinkingLevel = "low" | "medium" | "high";
 type ConnectionProvider =
   | "openai-codex"
+  | "anthropic-claude"
+  | "github-copilot"
   | "openai-compatible"
   | "anthropic-compatible";
 
@@ -1638,6 +1652,19 @@ async function dispatchLocalRequest(
       return handleChatGptOAuthRequest(request, response, oauthRoute[1]);
     }
 
+    const subscriptionOauthRoute = url.pathname.match(
+      /^\/api\/oauth\/([a-z-]+)\/(start|status|cancel)$/,
+    );
+    if (subscriptionOauthRoute && isSubscriptionProvider(subscriptionOauthRoute[1])) {
+      requireHumanPrincipal(principal);
+      return handleSubscriptionOAuthRequest(
+        request,
+        response,
+        subscriptionOauthRoute[1],
+        subscriptionOauthRoute[2],
+      );
+    }
+
     if (url.pathname === "/api/agents") {
       requireHumanPrincipal(principal);
       return handleAgentsRequest(request, response);
@@ -1992,6 +2019,20 @@ const MODEL_PROVIDER_DESCRIPTORS = [
     modelCatalog: "sdk",
   },
   {
+    id: "anthropic-claude",
+    name: "Claude Pro / Max",
+    kind: "managed-oauth",
+    authTypes: ["oauth"],
+    modelCatalog: "sdk",
+  },
+  {
+    id: "github-copilot",
+    name: "GitHub Copilot",
+    kind: "managed-oauth",
+    authTypes: ["oauth"],
+    modelCatalog: "sdk",
+  },
+  {
     id: "openai-compatible",
     name: "OpenAI compatible",
     kind: "compatible-api",
@@ -2082,6 +2123,10 @@ function storedConnectionModels(connection: ConnectionRow) {
 }
 
 function sdkModelsForConnection(connection: ConnectionRow) {
+  if (isSubscriptionProvider(connection.provider)) {
+    const descriptor = subscriptionProviderDescriptor(connection.provider);
+    return SUBSCRIPTION_MODEL_CATALOG[descriptor.catalogProvider].map((model) => ({ ...model }));
+  }
   if (connection.provider !== "openai-codex") return storedConnectionModels(connection);
   return CHATGPT_MODEL_CATALOG
     .filter((model) => !CHATGPT_OAUTH_UNAVAILABLE_MODELS.has(model.id))
@@ -2095,6 +2140,105 @@ function sdkModelsForConnection(connection: ConnectionRow) {
       supportsImages: model.input.includes("image"),
       cost: { ...model.cost },
     }));
+}
+
+const MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+const MAX_DISCOVERED_MODELS = 500;
+
+/**
+ * Ask a custom endpoint what it can run. Both the OpenAI and Anthropic wire
+ * formats expose `GET /models` returning `{ data: [{ id }] }`, which is what
+ * proxies and gateways implement too, so one request covers the whole
+ * "compatible endpoint" family instead of asking people to type model ids.
+ */
+async function discoverEndpointModels(
+  connection: ConnectionRow,
+  credential: StoredCredential,
+): Promise<Array<{ id: string; name: string }>> {
+  const baseUrl = (connection.base_url || "").replace(/\/+$/, "");
+  if (!baseUrl) throw new LocalRequestError(400, "This connection has no base URL to query");
+  const token = credential.type === "oauth" ? credential.access : credential.key;
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (connection.api_format === "anthropic-messages") {
+    headers["x-api-key"] = token;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/models`, {
+      headers,
+      signal: AbortSignal.timeout(MODEL_DISCOVERY_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new LocalRequestError(
+      502,
+      `Could not reach ${baseUrl}/models: ${error instanceof Error ? error.message : "request failed"}`,
+    );
+  }
+  if (!response.ok) {
+    throw new LocalRequestError(
+      502,
+      response.status === 401 || response.status === 403
+        ? "The endpoint rejected this credential when listing models"
+        : `The endpoint does not list models (HTTP ${response.status}). Add model ids manually.`,
+    );
+  }
+
+  const payload = (await response.json().catch(() => null)) as
+    | { data?: unknown; models?: unknown }
+    | null;
+  const rows = Array.isArray(payload?.data)
+    ? payload.data
+    : Array.isArray(payload?.models)
+      ? payload.models
+      : null;
+  if (!rows) {
+    throw new LocalRequestError(502, "The endpoint returned an unexpected model list");
+  }
+
+  const seen = new Set<string>();
+  const models: Array<{ id: string; name: string }> = [];
+  for (const row of rows) {
+    const id = typeof row === "string"
+      ? row
+      : row && typeof row === "object" && typeof (row as { id?: unknown }).id === "string"
+        ? (row as { id: string }).id
+        : "";
+    const normalized = normalizeConnectionModel(id);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    models.push({ id: normalized, name: normalized });
+    if (models.length >= MAX_DISCOVERED_MODELS) break;
+  }
+  if (models.length === 0) {
+    throw new LocalRequestError(502, "The endpoint listed no usable models");
+  }
+  models.sort((left, right) => left.id.localeCompare(right.id));
+  return models;
+}
+
+/** Persist a discovered catalog, keeping the current default when it survived. */
+function storeDiscoveredModels(
+  connection: ConnectionRow,
+  models: Array<{ id: string; name: string }>,
+) {
+  const modelIds = models.map((model) => model.id);
+  const defaultModel = modelIds.includes(connection.default_model)
+    ? connection.default_model
+    : modelIds[0];
+  const updatedAt = new Date().toISOString();
+  db.prepare(
+    `UPDATE llm_connections
+        SET default_model = ?, models_json = ?, models_refreshed_at = ?,
+            status = 'connected', auth_error = NULL, updated_at = ?
+      WHERE id = ?`,
+  ).run(defaultModel, JSON.stringify(models), updatedAt, updatedAt, connection.id);
+  return db
+    .prepare("SELECT * FROM llm_connections WHERE id = ?")
+    .get(connection.id) as unknown as ConnectionRow;
 }
 
 function refreshConnectionModels(connection: ConnectionRow, forceTimestamp = false) {
@@ -2422,7 +2566,42 @@ async function handleConnectionsRequest(
   });
 }
 
+const SUBSCRIPTION_REFRESH_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Subscription tokens are short-lived. Refresh just before they lapse and
+ * persist the result, so a turn never starts with a credential the provider
+ * is about to reject.
+ */
+async function subscriptionCredential(
+  connection: ConnectionRow,
+  provider: SubscriptionProviderId,
+) {
+  const result = await credentialStore.getResult(connection.id);
+  if (result.issue) throw new Error(result.issue.message);
+  const stored = result.credential;
+  if (stored?.type !== "oauth") return stored;
+  if (stored.expires > Date.now() + SUBSCRIPTION_REFRESH_WINDOW_MS) return stored;
+
+  const refreshed = await refreshSubscriptionToken(provider, {
+    access: stored.access,
+    refresh: stored.refresh,
+    expires: stored.expires,
+  });
+  const next = {
+    type: "oauth" as const,
+    access: refreshed.access,
+    refresh: refreshed.refresh,
+    expires: refreshed.expires,
+  };
+  await credentialStore.set(connection.id, next);
+  return next;
+}
+
 async function runtimeCredential(connection: ConnectionRow) {
+  if (isSubscriptionProvider(connection.provider)) {
+    return subscriptionCredential(connection, connection.provider);
+  }
   if (connection.provider !== "openai-codex") {
     return credentialStore.get(connection.id);
   }
@@ -2486,16 +2665,30 @@ async function handleConnectionRequest(
         },
       });
     }
+    // A custom endpoint knows its own catalog; ask it rather than making
+    // someone type model ids they have to look up elsewhere.
+    let discovered: ConnectionRow | null = null;
+    if (!automaticallySynced) {
+      if (!hasCredential || !credentialResult.credential) {
+        return sendJson(response, 409, {
+          error: credentialError || "Add this connection's API key before refreshing its models",
+          connection: publicConnection(connection, false, credentialError),
+        });
+      }
+      const models = await discoverEndpointModels(connection, credentialResult.credential);
+      discovered = storeDiscoveredModels(connection, models);
+    }
+
     const refreshed = publicConnection(
-      automaticallySynced ? refreshConnectionModels(connection, true) : connection,
+      automaticallySynced ? refreshConnectionModels(connection, true) : (discovered || connection),
       hasCredential,
     );
     return sendJson(response, 200, {
       connection: refreshed,
       refresh: {
-        source: automaticallySynced ? "sdk" : "user-defined",
+        source: automaticallySynced ? "sdk" : "endpoint",
         refreshedAt: refreshed.models_refreshed_at,
-        changed: automaticallySynced,
+        changed: true,
       },
       settings: readAppSettings(),
     });
@@ -2562,11 +2755,24 @@ async function handleConnectionRequest(
     if (!credential) {
       return sendJson(response, 409, { error: "Connection is not authenticated" });
     }
+    // Subscription tokens are not bearer keys as-is — each provider derives the
+    // value its API expects — so hand the runtime the derived key rather than
+    // teaching every runtime the provider's token shape.
+    const runtimeReady = isSubscriptionProvider(connection.provider) && credential.type === "oauth"
+      ? {
+          type: "api_key" as const,
+          key: subscriptionApiKey(connection.provider, {
+            access: credential.access,
+            refresh: credential.refresh,
+            expires: credential.expires,
+          }),
+        }
+      : credential;
     const latestConnection = db
       .prepare("SELECT * FROM llm_connections WHERE id = ?")
       .get(connection.id) as unknown as ConnectionRow;
     const refreshed = publicConnection(latestConnection, true);
-    return sendJson(response, 200, { connection: { ...refreshed, credential } });
+    return sendJson(response, 200, { connection: { ...refreshed, credential: runtimeReady } });
   }
 
   if (request.method === "GET") {
@@ -2781,6 +2987,169 @@ async function startChatGptOAuth() {
     }),
   ]);
   return { ...pendingOAuthFlow, authUrl };
+}
+
+/** Deterministic id per provider so re-signing in updates one row. */
+function subscriptionConnectionId(provider: SubscriptionProviderId) {
+  return createHash("sha256")
+    .update(`teammate:subscription:${provider}`)
+    .digest("hex")
+    .replace(
+      /^(.{8})(.{4})(.{3})(.{3})(.{12}).*$/,
+      (_match, a, b, c, d, e) => `${a}-${b}-4${c}-8${d}-${e}`,
+    );
+}
+
+async function saveSubscriptionConnection(
+  provider: SubscriptionProviderId,
+  credentials: OAuthCredentials,
+) {
+  const descriptor = subscriptionProviderDescriptor(provider);
+  const catalog = SUBSCRIPTION_MODEL_CATALOG[descriptor.catalogProvider].map((model) => ({
+    id: model.id,
+    name: model.name || model.id,
+    reasoning: model.reasoning,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    input: [...model.input],
+    supportsImages: model.input.includes("image"),
+    cost: { ...model.cost },
+  }));
+  if (catalog.length === 0) {
+    throw new Error(`No models are available for ${descriptor.name}`);
+  }
+  // Prefer a reasoning-capable model, then the largest context — a fresh
+  // sign-in should land on something people actually want to work with.
+  const preferred = [...catalog].sort((left, right) =>
+    Number(right.reasoning) - Number(left.reasoning) ||
+    right.contextWindow - left.contextWindow,
+  );
+  const id = subscriptionConnectionId(provider);
+  const now = new Date().toISOString();
+  const baseUrl = subscriptionBaseUrl(provider, credentials);
+
+  db.prepare(
+    `INSERT INTO llm_connections
+      (id, name, provider, auth_type, base_url, api_format, default_model, models_json,
+       model_selection_mode, models_refreshed_at, status, auth_error, created_at, updated_at)
+     VALUES (?, ?, ?, 'oauth', ?, ?, ?, ?, 'automatically-synced', ?, 'connected', NULL, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       base_url = excluded.base_url,
+       models_json = excluded.models_json,
+       models_refreshed_at = excluded.models_refreshed_at,
+       status = 'connected',
+       auth_error = NULL,
+       updated_at = excluded.updated_at`,
+  ).run(
+    id,
+    descriptor.name,
+    provider,
+    baseUrl,
+    descriptor.apiFormat,
+    preferred[0].id,
+    JSON.stringify(catalog),
+    now,
+    now,
+    now,
+  );
+  try {
+    await credentialStore.set(id, {
+      type: "oauth",
+      access: credentials.access,
+      refresh: credentials.refresh,
+      expires: credentials.expires,
+    });
+  } catch (error) {
+    // A connection row without its credential is worse than none: mark it so
+    // the UI shows the failure instead of a connection that cannot be used.
+    db.prepare(
+      "UPDATE llm_connections SET status = 'error', auth_error = ?, updated_at = ? WHERE id = ?",
+    ).run("Could not securely save the sign-in", new Date().toISOString(), id);
+    throw error;
+  }
+  return id;
+}
+
+const pendingSubscriptionFlows = new Map<SubscriptionProviderId, {
+  status: "starting" | "waiting" | "complete" | "error";
+  authUrl?: string;
+  deviceCode?: string;
+  error?: string;
+  cancel?: () => void;
+}>();
+
+async function startSubscriptionOAuth(provider: SubscriptionProviderId) {
+  const existing = pendingSubscriptionFlows.get(provider);
+  if (existing?.status === "starting" || existing?.status === "waiting") return existing;
+
+  const controller = new AbortController();
+  const flow: NonNullable<ReturnType<typeof pendingSubscriptionFlows.get>> = {
+    status: "starting",
+    cancel: () => controller.abort(),
+  };
+  pendingSubscriptionFlows.set(provider, flow);
+  const timeout = setTimeout(() => controller.abort(), 5 * 60_000);
+
+  const handle = startSubscriptionLogin(provider, controller.signal);
+  void handle.completed
+    .then(async (credentials) => {
+      clearTimeout(timeout);
+      await saveSubscriptionConnection(provider, credentials);
+      pendingSubscriptionFlows.set(provider, { status: "complete" });
+    })
+    .catch((error: unknown) => {
+      clearTimeout(timeout);
+      pendingSubscriptionFlows.set(provider, {
+        status: "error",
+        error: error instanceof Error ? error.message : "Sign-in failed",
+      });
+    });
+
+  try {
+    const prompt = await handle.prompt;
+    flow.status = "waiting";
+    flow.authUrl = prompt.url;
+    if (prompt.deviceCode) flow.deviceCode = prompt.deviceCode;
+  } catch {
+    // The rejection is recorded by the completion handler above.
+  }
+  return pendingSubscriptionFlows.get(provider) || flow;
+}
+
+async function handleSubscriptionOAuthRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  provider: SubscriptionProviderId,
+  action: string,
+) {
+  if (action === "start" && request.method === "POST") {
+    const flow = await startSubscriptionOAuth(provider);
+    return sendJson(response, 200, {
+      status: flow.status,
+      authUrl: flow.authUrl,
+      deviceCode: flow.deviceCode,
+      error: flow.error,
+    });
+  }
+  if (action === "status" && request.method === "GET") {
+    const id = subscriptionConnectionId(provider);
+    const connected = Boolean(await credentialStore.get(id));
+    const flow = pendingSubscriptionFlows.get(provider);
+    return sendJson(response, 200, {
+      status: flow?.status || (connected ? "complete" : "idle"),
+      authUrl: flow?.authUrl,
+      deviceCode: flow?.deviceCode,
+      error: flow?.error,
+      connected,
+      connectionId: connected ? id : null,
+    });
+  }
+  if (action === "cancel" && request.method === "POST") {
+    pendingSubscriptionFlows.get(provider)?.cancel?.();
+    pendingSubscriptionFlows.delete(provider);
+    return sendJson(response, 200, { success: true });
+  }
+  return sendJson(response, 405, { error: "Method not allowed" });
 }
 
 async function handleChatGptOAuthRequest(
@@ -6174,9 +6543,9 @@ function enforceAgentMessageGates(row: DbRow) {
     .join("\n");
   throw new LocalRequestError(
     409,
-    `HELD: ${newer.length} newer message(s) landed while you were composing. Read them first.\n${held}\n` +
-      "If a teammate already covered this, drop your draft and stay quiet. " +
-      "If something is still missing, send only that part — resending as-is now goes through, so make sure it still adds something.",
+    `HELD: ${newer.length} newer message(s) landed while you were composing. Read them, then decide — resending as-is now goes through.\n${held}\n` +
+      "Drop your draft only if a teammate already gave the same answer you were about to give. " +
+      "Greetings and acknowledgements are not duplicates: if you were saying hello, still say it.",
   );
 }
 

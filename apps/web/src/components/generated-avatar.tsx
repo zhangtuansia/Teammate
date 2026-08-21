@@ -15,7 +15,10 @@ import { cn } from "@/lib/utils";
 interface GeneratedAvatarProps {
   id: string;
   name?: string;
-  size?: "xs" | "sm" | "md" | "lg";
+  size?: "xs" | "sm" | "md" | "message" | "lg";
+  /** Rounded-square reads as a person in a dense transcript; the circle stays
+   * the default everywhere else. */
+  shape?: "circle" | "rounded";
   className?: string;
   avatarUrl?: string | null;
   /** If true, show initials instead of notion avatar (for workspace icons) */
@@ -26,11 +29,14 @@ const SIZE_CLASSES = {
   xs: "size-6",
   sm: "size-7",
   md: "size-8",
+  /** Message-list avatar. Matches the 36px Slack uses for a conversation row. */
+  message: "size-9",
   lg: "size-10",
 };
 
 const INITIALS_TEXT_SIZES = {
   xs: "text-[10px]",
+  message: "text-xs",
   sm: "text-[11px]",
   md: "text-xs",
   lg: "text-sm",
@@ -40,6 +46,7 @@ export const GeneratedAvatar = memo(function GeneratedAvatar({
   id,
   name,
   size = "md",
+  shape = "circle",
   className,
   avatarUrl,
   initials,
@@ -98,7 +105,8 @@ export const GeneratedAvatar = memo(function GeneratedAvatar({
   return (
     <div
       className={cn(
-        "relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden rounded-full",
+        "relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden",
+        shape === "rounded" ? "rounded-[10px]" : "rounded-full",
         showInitials ? "" : "border-[0.5px] border-border bg-background",
         SIZE_CLASSES[size],
         className,

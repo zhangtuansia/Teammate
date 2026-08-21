@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +40,8 @@ type IncomingMessage =
 interface StoredSession {
   id: string;
   messages: AgentMessage[];
+  /** Identifies the instructions this transcript was produced under. */
+  promptFingerprint?: string;
 }
 
 let agent: Agent | null = null;
@@ -49,6 +51,9 @@ let sessionId = "";
 let turnFailureSent = false;
 let turnActive = false;
 let continuationPending = false;
+/** Stamped into the transcript so a later start can tell whether it was
+ * produced under the instructions now in force. */
+let activePromptFingerprint = "";
 
 // Model output arrives as token-level deltas — often in sub-second bursts — and
 // every activity event is persisted to the local event log. Deltas only feed a
@@ -210,7 +215,7 @@ function persistSession() {
   const temporary = `${sessionFile}.${process.pid}.tmp`;
   writeFileSync(
     temporary,
-    JSON.stringify({ id: sessionId, messages: agent.state.messages }),
+    JSON.stringify({ id: sessionId, messages: agent.state.messages, promptFingerprint: activePromptFingerprint }),
     { mode: 0o600 },
   );
   renameSync(temporary, sessionFile);
@@ -349,7 +354,19 @@ async function initialize(nextConfig: WorkerConfig) {
   mkdirSync(sessionDir, { recursive: true });
   sessionFile = join(sessionDir, "session.json");
   const stored = readStoredSession(sessionFile);
-  sessionId = stored?.id || randomUUID();
+  // A transcript is a record of decisions made under the instructions that
+  // were live at the time, and the model imitates it far more readily than it
+  // re-reads the system prompt. Carrying one across a prompt change means the
+  // old rules keep being applied by example, so a changed prompt starts fresh.
+  activePromptFingerprint = createHash("sha256")
+    .update(config.systemPrompt)
+    .digest("hex")
+    .slice(0, 16);
+  const carriedOver = stored?.promptFingerprint === activePromptFingerprint ? stored : null;
+  if (stored && !carriedOver) {
+    console.error("  [pi] System prompt changed — starting a fresh session.");
+  }
+  sessionId = carriedOver?.id || randomUUID();
   const selectedModel = modelForConnection(config.connection, config.model);
   agent = new Agent({
     sessionId,
@@ -358,7 +375,7 @@ async function initialize(nextConfig: WorkerConfig) {
       model: selectedModel,
       thinkingLevel: selectedModel.reasoning ? config.thinkingLevel : "off",
       tools: [createBashTool(config.workDir)],
-      messages: stored?.messages || [],
+      messages: carriedOver?.messages || [],
     },
     streamFn: streamForConnection(config.connection),
     toolExecution: "sequential",

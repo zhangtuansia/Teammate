@@ -8,6 +8,7 @@ import {
   AtSignIcon,
   CheckIcon,
   LoaderCircleIcon,
+  MessageSquareIcon,
   PlusIcon,
   RotateCcwIcon,
   SettingsIcon,
@@ -19,7 +20,7 @@ import TiptapMessageInput, {
   type TiptapMessageInputHandle,
 } from './tiptap-message-input';
 import { useAgentActivity } from '@/hooks/use-agent-activity';
-import { useAppSettings } from '@/hooks/use-app-settings';
+import { useAppSettings, type TranslationKey } from '@/hooks/use-app-settings';
 import { useMessageSounds } from '@/hooks/use-message-sounds';
 import { useWorkspaceNavigation } from '@/hooks/use-navigation-guard';
 import { useWorkspaceServer } from '@/components/workspace-server-context';
@@ -36,6 +37,7 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/u
 import { SafeMarkdown } from '@/components/ui/safe-markdown';
 import { ThinkingIndicator } from '@/components/ui/thinking-indicator';
 import { GeneratedAvatar } from './generated-avatar';
+import { ThreadPanel } from './thread-panel';
 import { createTrailingRefreshScheduler } from '@/lib/trailing-refresh';
 import { parseRuntimeError } from '@/lib/runtime-error';
 
@@ -128,10 +130,133 @@ interface MessageTargets {
   offlineTargetNames: string[];
 }
 
+/** Today and yesterday read better as words; anything older needs the date. */
+function formatDayLabel(iso: string, t: (key: TranslationKey) => string) {
+  const date = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return t('message.today');
+  if (date.toDateString() === yesterday.toDateString()) return t('message.yesterday');
+  return date.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'long',
+    weekday: 'long',
+    ...(date.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+  });
+}
+
+/**
+ * The day marker, built the way Slack builds it: no rule across the transcript,
+ * just a pill that pins to the top while that day is on screen. It deliberately
+ * overflows its own row so it costs almost no vertical space — which only reads
+ * correctly because the pill is opaque and ringed, and text passes behind it.
+ */
+const DayDivider = memo(function DayDivider({
+  date,
+  label,
+}: {
+  date: string;
+  label: string;
+}) {
+  return (
+    <div className="sticky top-0 z-20 mt-4 mb-6 flex h-[9px] justify-center first:mt-1">
+      <time
+        className="h-7 rounded-full bg-card px-4 text-[13px] font-bold leading-7 text-foreground shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]"
+        dateTime={date}
+      >
+        {label}
+      </time>
+    </div>
+  );
+});
+
+/** "3 hours ago" for the thread indicator, matching what Slack puts there. */
+function formatRelativeTime(iso: string, language: string) {
+  const elapsed = Date.now() - new Date(iso).getTime();
+  const formatter = new Intl.RelativeTimeFormat(language, { numeric: 'always' });
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ['day', 86_400_000],
+    ['hour', 3_600_000],
+    ['minute', 60_000],
+  ];
+  for (const [unit, ms] of units) {
+    if (elapsed >= ms) return formatter.format(-Math.floor(elapsed / ms), unit);
+  }
+  return formatter.format(-Math.max(1, Math.floor(elapsed / 1000)), 'second');
+}
+
+export interface ThreadSummary {
+  replyCount: number;
+  lastReplyAt: string;
+  senderIds: string[];
+}
+
+/**
+ * Slack's thread affordance: replies live under their parent rather than in
+ * the main flow, and the parent carries a link into them. Without this a
+ * teammate's threaded reply is written to the channel and never seen.
+ */
+const ThreadIndicator = memo(function ThreadIndicator({
+  avatarFor,
+  countLabel,
+  lastReplyLabel,
+  onOpen,
+  summary,
+  viewLabel,
+}: {
+  avatarFor: (senderId: string) => { name: string; url: string | null };
+  countLabel: string;
+  lastReplyLabel: string;
+  onOpen: () => void;
+  summary: ThreadSummary;
+  viewLabel: string;
+}) {
+  return (
+    <button
+      className="group/thread -ml-1 mt-0.5 mb-1 flex max-w-full items-center gap-1 rounded-md p-1 text-left transition-colors hover:bg-background hover:shadow-[0_0_0_1px_var(--border)]"
+      onClick={onOpen}
+      type="button"
+    >
+      <span className="flex items-center gap-0.5">
+        {summary.senderIds.slice(0, 5).map((senderId) => {
+          const who = avatarFor(senderId);
+          return (
+            <GeneratedAvatar
+              avatarUrl={who.url}
+              id={senderId}
+              key={senderId}
+              name={who.name}
+              shape="rounded"
+              size="xs"
+            />
+          );
+        })}
+      </span>
+      <span className="text-[13px] font-bold text-primary group-hover/thread:underline">
+        {countLabel}
+      </span>
+      <span className="truncate text-[13px] text-muted-foreground group-hover/thread:hidden">
+        {lastReplyLabel}
+      </span>
+      <span className="hidden text-[13px] text-muted-foreground group-hover/thread:inline">
+        {viewLabel}
+      </span>
+    </button>
+  );
+});
+
 interface MessageRowProps {
   message: Message;
   sameSender: boolean;
   senderName: string;
+  thread?: ThreadSummary;
+  threadLabel?: string;
+  threadLastReplyLabel?: string;
+  threadViewLabel?: string;
+  replyInThreadLabel?: string;
+  threadAvatarFor?: (senderId: string) => { name: string; url: string | null };
+  onOpenThread?: () => void;
   avatarUrl: string | null | undefined;
   agentBadgeLabel: string;
   runtimeErrorLabel: string;
@@ -156,47 +281,85 @@ const MessageRow = memo(function MessageRow({
   deliveryFailedLabel,
   retryDeliveryLabel,
   onRetryDelivery,
+  thread,
+  threadLabel,
+  threadLastReplyLabel,
+  threadViewLabel,
+  replyInThreadLabel,
+  threadAvatarFor,
+  onOpenThread,
 }: MessageRowProps) {
   const runtimeErrorDetail = message.content.startsWith(RUNTIME_ERROR_MESSAGE_PREFIX)
     ? message.content.slice(RUNTIME_ERROR_MESSAGE_PREFIX.length).trim()
     : null;
   const formattedTime = new Date(message.created_at).toLocaleTimeString([], {
-    hour: '2-digit',
+    hour: 'numeric',
     minute: '2-digit',
   });
 
   return (
     <div
-      className={`group flex gap-3 rounded-lg px-2 py-1.5 transition-colors [content-visibility:auto] [contain-intrinsic-size:auto_56px] ${
+      // The containment hint lives on the content column, not here: it implies
+      // paint containment, which would clip the hover toolbar straddling the
+      // row's top edge.
+      className={`group relative flex gap-2 rounded-lg px-2 py-0.5 transition-colors hover:bg-accent/40 ${
         message.motion === 'send'
           ? 'animate-message-send'
           : message.motion === 'receive'
             ? 'animate-message-receive'
             : ''
-      } ${sameSender ? '' : 'mt-5 first:mt-0'}`}
+      } ${sameSender ? '' : 'mt-4 first:mt-0'}`}
     >
-      <div className="w-8 shrink-0 pt-0.5">
-        {!sameSender && (
+      <div className="w-9 shrink-0 pt-0.5">
+        {sameSender ? (
+          <time
+            className="hidden pt-px text-right text-[11px] leading-[22px] text-muted-foreground tabular-nums group-hover:block"
+            dateTime={message.created_at}
+          >
+            {formattedTime}
+          </time>
+        ) : (
           <GeneratedAvatar
             id={message.sender_id}
             name={senderName}
-            size="md"
+            size="message"
+            shape="rounded"
             avatarUrl={avatarUrl}
           />
         )}
       </div>
 
-      <div className="min-w-0 flex-1">
+      {onOpenThread && (
+        // Slack's hover affordance, and the only way to open a thread on a
+        // message that has no replies yet. It straddles the row's top edge so
+        // it never covers the first line of text.
+        <div className="absolute -top-3.5 right-3 z-10 hidden group-focus-within:flex group-hover:flex">
+          <div className="flex gap-0.5 rounded-xl bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
+            <Button
+              aria-label={replyInThreadLabel}
+              className="size-8 text-muted-foreground"
+              onClick={onOpenThread}
+              size="icon-sm"
+              title={replyInThreadLabel}
+              variant="ghost"
+            >
+              <MessageSquareIcon className="size-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <div className="min-w-0 flex-1 [contain-intrinsic-size:auto_56px] [content-visibility:auto]">
         {!sameSender && (
           <div className="mb-0.5 flex items-baseline gap-2">
-            <span className="text-[13px] font-semibold">{senderName}</span>
+            <span className="text-[15px] font-bold leading-[22px]">{senderName}</span>
             {message.sender_type === 'agent' && (
               <Badge variant="secondary" className="py-0 text-[10px]">
                 {agentBadgeLabel}
               </Badge>
             )}
             <time
-              className="text-[11px] text-muted-foreground"
+              className="text-xs text-muted-foreground"
               dateTime={message.created_at}
             >
               {formattedTime}
@@ -205,7 +368,7 @@ const MessageRow = memo(function MessageRow({
         )}
         <div
           className="prose-message wrap-break-word text-[15px] subpixel-antialiased prose-headings:antialiased"
-          style={{ lineHeight: '1.54' }}
+          style={{ lineHeight: '22px' }}
         >
           {runtimeErrorDetail !== null ? (
             <Alert className="my-1" variant="error">
@@ -221,6 +384,16 @@ const MessageRow = memo(function MessageRow({
             <SafeMarkdown mentions>{message.content}</SafeMarkdown>
           )}
         </div>
+        {thread && threadLabel && threadAvatarFor && onOpenThread && (
+          <ThreadIndicator
+            countLabel={threadLabel}
+            lastReplyLabel={threadLastReplyLabel ?? ''}
+            viewLabel={threadViewLabel ?? ''}
+            avatarFor={threadAvatarFor}
+            onOpen={onOpenThread}
+            summary={thread}
+          />
+        )}
         {message.delivery && (
           <div
             aria-atomic="true"
@@ -270,7 +443,7 @@ const MessageRow = memo(function MessageRow({
           </time>
           <time
             aria-hidden="true"
-            className="hidden shrink-0 self-center text-[11px] text-muted-foreground group-hover:block"
+            className="hidden shrink-0 self-center text-xs text-muted-foreground group-hover:block"
             dateTime={message.created_at}
           >
             {formattedTime}
@@ -311,6 +484,36 @@ function MessageAreaContent({
   showSettings,
 }: MessageAreaProps) {
   const [messages, setMessages] = useState<Message[]>([]);
+  // Replies keyed by the message they hang off. Kept beside the transcript
+  // rather than inside it: they are not part of the main flow, and the parent
+  // only needs a count and who took part.
+  const [threads, setThreads] = useState<Map<string, ThreadSummary>>(new Map());
+  const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const openThreadIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    openThreadIdRef.current = openThreadId;
+  }, [openThreadId]);
+
+  const handleThreadRepliesChanged = useCallback(
+    (parentId: string, replies: Array<{ created_at: string; sender_id: string }>) => {
+      setThreads((current) => {
+        const next = new Map(current);
+        if (replies.length === 0) {
+          next.delete(parentId);
+          return next;
+        }
+        next.set(parentId, {
+          lastReplyAt: replies[replies.length - 1].created_at,
+          replyCount: replies.length,
+          senderIds: Array.from(new Set(replies.map((reply) => reply.sender_id))),
+        });
+        return next;
+      });
+    },
+    [],
+  );
+
   const [hasContent, setHasContent] = useState(false);
   const [formattingVisible, setFormattingVisible] = useState(false);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
@@ -901,6 +1104,44 @@ function MessageAreaContent({
       void agentDirectoryRefresh.runNow();
     };
 
+    async function loadThreadSummaries(
+      targetChannelId: string,
+      controller: AbortController,
+    ) {
+      // The local adapter has no `not` operator, so read the channel's rows
+      // and keep the threaded ones.
+      const { data, error } = await supabase
+        .from('messages')
+        .select('thread_parent_id, sender_id, created_at')
+        .eq('channel_id', targetChannelId)
+        .order('seq', { ascending: true })
+        .limit(500)
+        .abortSignal(controller.signal);
+      if (error || !data || !isCurrent()) return;
+      const summaries = new Map<string, ThreadSummary>();
+      for (const row of (data as Array<{
+        thread_parent_id: string | null;
+        sender_id: string;
+        created_at: string;
+      }>).filter((candidate) => candidate.thread_parent_id)) {
+        const existing = summaries.get(row.thread_parent_id!);
+        if (!existing) {
+          summaries.set(row.thread_parent_id!, {
+            lastReplyAt: row.created_at,
+            replyCount: 1,
+            senderIds: [row.sender_id],
+          });
+          continue;
+        }
+        existing.replyCount += 1;
+        existing.lastReplyAt = row.created_at;
+        if (!existing.senderIds.includes(row.sender_id)) {
+          existing.senderIds.push(row.sender_id);
+        }
+      }
+      setThreads(summaries);
+    }
+
     async function loadMessages() {
       const controller = beginMessageRequest();
       try {
@@ -940,6 +1181,7 @@ function MessageAreaContent({
             });
           });
           setHasMore(data.length === 50);
+          void loadThreadSummaries(channelId, controller);
           requestAnimationFrame(() => {
             if (!isCurrent()) return;
             const scrollElement = scrollContainerRef.current;
@@ -1052,6 +1294,28 @@ function MessageAreaContent({
               newMsg.sender_id !== currentUserId
             ) {
               playMessageCue('receive');
+            }
+            if (newMsg.sender_type === 'agent') {
+              markAgentsResponded([newMsg.sender_id]);
+            }
+          } else {
+            // A threaded reply stays out of the main flow; it only bumps the
+            // indicator on its parent. An open panel reports the authoritative
+            // count for its own thread, so leave that one alone.
+            const parentId = newMsg.thread_parent_id;
+            if (openThreadIdRef.current !== parentId) {
+              setThreads((current) => {
+                const existing = current.get(parentId);
+                const next = new Map(current);
+                next.set(parentId, {
+                  lastReplyAt: newMsg.created_at,
+                  replyCount: (existing?.replyCount ?? 0) + 1,
+                  senderIds: existing?.senderIds.includes(newMsg.sender_id)
+                    ? existing.senderIds
+                    : [...(existing?.senderIds ?? []), newMsg.sender_id],
+                });
+                return next;
+              });
             }
             if (newMsg.sender_type === 'agent') {
               markAgentsResponded([newMsg.sender_id]);
@@ -1661,6 +1925,21 @@ function MessageAreaContent({
     return t('message.you');
   }
 
+  function threadAvatarFor(senderId: string) {
+    const agent = channelAgents.get(senderId) ?? (agentInfo?.id === senderId ? agentInfo : null);
+    if (agent) {
+      return { name: agent.display_name || t('message.agent'), url: agent.avatar_url ?? null };
+    }
+    if (senderId === currentProfile?.id) {
+      return {
+        name: currentProfile.display_name || t('message.you'),
+        url: currentProfile.avatar_url ?? null,
+      };
+    }
+    const authored = messages.find((msg) => msg.sender_id === senderId);
+    return { name: authored?.profiles?.display_name || t('message.you'), url: null };
+  }
+
   const visibleFailedAgentIds = Array.from(new Set([
     ...failedAgentIds,
     ...pendingAgentIds.filter(
@@ -1689,8 +1968,13 @@ function MessageAreaContent({
         })
       : t('message.channelPlaceholder', { name: channel.name });
 
+  const openThreadParent = openThreadId
+    ? messages.find((message) => message.id === openThreadId)
+    : undefined;
+
   return (
-    <div className="flex flex-1 flex-col bg-card max-w-full text-pretty">
+    <div className="flex min-w-0 flex-1">
+    <div className="flex min-w-0 flex-1 flex-col bg-card max-w-full text-pretty">
       {/* Channel header */}
       <div
         className="flex items-center gap-3 border-b-[0.5px] py-2 px-3 select-none"
@@ -1880,11 +2164,17 @@ function MessageAreaContent({
         )}
         {messages.map((msg, i) => {
           const prevMsg = messages[i - 1];
+          const startsNewDay =
+            !prevMsg ||
+            new Date(msg.created_at).toDateString() !==
+              new Date(prevMsg.created_at).toDateString();
           const sameSender =
             prevMsg &&
+            !startsNewDay &&
             prevMsg.sender_id === msg.sender_id &&
             new Date(msg.created_at).getTime() - new Date(prevMsg.created_at).getTime() < 5 * 60 * 1000;
-          return (
+          const thread = threads.get(msg.id);
+          const row = (
             <MessageRow
               agentBadgeLabel={t('message.agentBadge')}
               avatarUrl={
@@ -1905,7 +2195,35 @@ function MessageAreaContent({
               runtimeErrorDescription={describeRuntimeError}
               sameSender={Boolean(sameSender)}
               senderName={getSenderName(msg)}
+              thread={thread}
+              threadAvatarFor={threadAvatarFor}
+              threadLabel={
+                thread
+                  ? thread.replyCount === 1
+                    ? t('message.thread.oneReply')
+                    : t('message.thread.replyCount', { count: String(thread.replyCount) })
+                  : undefined
+              }
+              threadLastReplyLabel={
+                thread
+                  ? t('message.thread.lastReply', {
+                      time: formatRelativeTime(thread.lastReplyAt, settings.language),
+                    })
+                  : undefined
+              }
+              threadViewLabel={t('message.thread.view')}
+              replyInThreadLabel={t('message.thread.replyInThread')}
+              onOpenThread={
+                msg.sender_type === 'system' ? undefined : () => setOpenThreadId(msg.id)
+              }
             />
+          );
+          if (!startsNewDay) return row;
+          return (
+            <div className="contents" key={`day-${msg.id}`}>
+              <DayDivider date={msg.created_at} label={formatDayLabel(msg.created_at, t)} />
+              {row}
+            </div>
           );
         })}
 
@@ -2254,6 +2572,29 @@ function MessageAreaContent({
           </div>
         </div>
       </div>
+    </div>
+      {openThreadParent && (
+        <ThreadPanel
+          channelId={channel.id}
+          channelLabel={channel.type === 'dm' && agentInfo
+            ? agentInfo.display_name
+            : `#${channel.name}`}
+          identityFor={(senderId, message) => {
+            if (message?.sender_type === 'system') {
+              return { name: t('message.system'), url: null };
+            }
+            const who = threadAvatarFor(senderId);
+            if (message?.sender_type === 'human' && message.profiles?.display_name) {
+              return { name: message.profiles.display_name, url: who.url };
+            }
+            return who;
+          }}
+          onClose={() => setOpenThreadId(null)}
+          onRepliesChanged={handleThreadRepliesChanged}
+          parent={openThreadParent}
+          userId={userId}
+        />
+      )}
     </div>
   );
 }

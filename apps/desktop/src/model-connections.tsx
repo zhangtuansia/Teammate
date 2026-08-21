@@ -68,6 +68,34 @@ const PROVIDER_ITEMS = BUILTIN_MODEL_PROVIDERS
     label: string;
   }>;
 
+/**
+ * Subscriptions people sign into rather than paste a key for. `id` is the
+ * OAuth route segment; `connectionProvider` is what the stored connection
+ * reports once the sign-in lands.
+ */
+const SUBSCRIPTION_OPTIONS = [
+  {
+    id: "chatgpt",
+    connectionProvider: "openai-codex",
+    labelKey: "settings.chatGptOAuth",
+    hintKey: "settings.chatGptOAuthHint",
+  },
+  {
+    id: "anthropic-claude",
+    connectionProvider: "anthropic-claude",
+    labelKey: "settings.claudeOAuth",
+    hintKey: "settings.claudeOAuthHint",
+  },
+  {
+    id: "github-copilot",
+    connectionProvider: "github-copilot",
+    labelKey: "settings.copilotOAuth",
+    hintKey: "settings.copilotOAuthHint",
+  },
+] as const;
+
+type OAuthProviderId = (typeof SUBSCRIPTION_OPTIONS)[number]["id"];
+
 type JsonObject = Record<string, unknown>;
 
 function isAbortError(error: unknown) {
@@ -80,9 +108,13 @@ function isModelConnection(value: unknown): value is ModelConnection {
   return (
     typeof connection.id === "string" &&
     typeof connection.name === "string" &&
-    ["openai-codex", "openai-compatible", "anthropic-compatible"].includes(
-      String(connection.provider),
-    ) &&
+    [
+      "openai-codex",
+      "anthropic-claude",
+      "github-copilot",
+      "openai-compatible",
+      "anthropic-compatible",
+    ].includes(String(connection.provider)) &&
     ["oauth", "api-key"].includes(String(connection.auth_type)) &&
     (connection.base_url === null || typeof connection.base_url === "string") &&
     ["openai-codex-responses", "openai-completions", "anthropic-messages"].includes(
@@ -134,6 +166,11 @@ export function ConnectionsSection({
   >("idle");
   const [oauthRefreshing, setOauthRefreshing] = useState(false);
   const [oauthError, setOauthError] = useState("");
+  // Which subscription is signing in, so the poller talks to the right
+  // endpoint and the dialog can name it.
+  const [oauthProvider, setOauthProvider] = useState<OAuthProviderId>("chatgpt");
+  // Device-code providers show a code to type on the opened page.
+  const [oauthInstructions, setOauthInstructions] = useState("");
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<"openai-compatible" | "anthropic-compatible">(
     "openai-compatible",
@@ -165,6 +202,13 @@ export function ConnectionsSection({
   const tRef = useRef(t);
   const chatGptConnected = connections.some(
     (connection) => connection.provider === "openai-codex" && connection.hasCredential,
+  );
+  // Only offer a subscription that is not already signed in.
+  const availableSubscriptions = SUBSCRIPTION_OPTIONS.filter(
+    (subscription) => !connections.some(
+      (connection) =>
+        connection.provider === subscription.connectionProvider && connection.hasCredential,
+    ),
   );
   const selectedProvider = PROVIDER_ITEMS.find((item) => item.value === provider) || PROVIDER_ITEMS[0];
   const connectionDraftDirty =
@@ -273,6 +317,7 @@ export function ConnectionsSection({
     const fail = (message: string) => {
       if (cancelled || !mountedRef.current) return;
       oauthFlowRef.current = false;
+      setOauthInstructions("");
       setOauthState("error");
       setOauthError(message);
     };
@@ -287,7 +332,7 @@ export function ConnectionsSection({
       pollController = new AbortController();
       try {
         const { response, result } = await requestJson(
-          apiUrl("/api/oauth/chatgpt/status"),
+          apiUrl(`/api/oauth/${oauthProvider}/status`),
           undefined,
           Math.min(5_000, remainingMs),
           pollController,
@@ -332,11 +377,18 @@ export function ConnectionsSection({
           if (cancelled || !mountedRef.current) return;
           oauthFlowRef.current = false;
           setOauthError("");
+          setOauthInstructions("");
           setOauthState("idle");
           setAddDialogOpen(false);
           return;
         } else if (result.status === "error") {
-          fail(tRef.current("settings.oauthFailed"));
+          // The service knows why — an expired device code, a refused
+          // consent — and saying so beats a generic sign-in failure.
+          fail(
+            typeof result.error === "string" && result.error
+              ? result.error
+              : tRef.current("settings.oauthFailed"),
+          );
           return;
         }
       } catch (pollError) {
@@ -361,9 +413,9 @@ export function ConnectionsSection({
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       pollController?.abort();
     };
-  }, [oauthState, reload, requestJson]);
+  }, [oauthProvider, oauthState, reload, requestJson]);
 
-  async function connectChatGpt() {
+  async function connectSubscription(providerId: OAuthProviderId) {
     if (
       oauthFlowRef.current ||
       mutationLockRef.current !== null ||
@@ -374,18 +426,29 @@ export function ConnectionsSection({
     }
     oauthFlowRef.current = true;
     mutationLockRef.current = "oauth-start";
+    setOauthProvider(providerId);
+    setOauthInstructions("");
     setOauthState("starting");
     setOauthError("");
     let waitingForCallback = false;
     try {
       const { response, result } = await requestJson(
-        apiUrl("/api/oauth/chatgpt/start"),
+        apiUrl(`/api/oauth/${providerId}/start`),
         { method: "POST" },
       );
       if (!response.ok || typeof result.authUrl !== "string") {
-        throw new Error("OAuth start failed");
+        throw new Error(
+          typeof result.error === "string" && result.error
+            ? result.error
+            : "OAuth start failed",
+        );
       }
       if (!mountedRef.current) return;
+      // A device-code provider needs its code on screen before the browser
+      // opens, or the page asks for something the person cannot see.
+      if (typeof result.deviceCode === "string" && result.deviceCode) {
+        setOauthInstructions(result.deviceCode);
+      }
       await openExternal(result.authUrl);
       if (mountedRef.current) {
         waitingForCallback = true;
@@ -529,7 +592,14 @@ export function ConnectionsSection({
         { method: "POST" },
       );
       if (!response.ok || !isModelConnection(result.connection)) {
-        throw new Error("Model catalog refresh failed");
+        // The service explains exactly what went wrong — an endpoint that
+        // cannot list models, a rejected key — and that is far more useful
+        // than a generic failure line.
+        throw new Error(
+          typeof result.error === "string" && result.error
+            ? result.error
+            : "Model catalog refresh failed",
+        );
       }
       const refreshed = result.connection;
       if (mountedRef.current) {
@@ -549,7 +619,9 @@ export function ConnectionsSection({
         setModelRefreshError(
           isAbortError(refreshError)
             ? tRef.current("settings.requestTimedOut")
-            : tRef.current("settings.connectionRefreshFailed"),
+            : refreshError instanceof Error && refreshError.message
+              ? refreshError.message
+              : tRef.current("settings.connectionRefreshFailed"),
         );
       }
     } finally {
@@ -689,12 +761,12 @@ export function ConnectionsSection({
                         <Check /> {t("settings.setDefault")}
                       </MenuItem>
                     )}
-                    {connection.model_selection_mode === "automatically-synced" && (
-                      <MenuItem onClick={() => void refreshModels(connection)}>
-                        <RefreshCw className={refreshingConnectionId === connection.id ? "animate-spin motion-reduce:animate-none" : ""} />
-                        {t("settings.refreshModels")}
-                      </MenuItem>
-                    )}
+                    {/* Custom endpoints can be asked what they run, so the
+                        refresh is not limited to provider-synced catalogs. */}
+                    <MenuItem onClick={() => void refreshModels(connection)}>
+                      <RefreshCw className={refreshingConnectionId === connection.id ? "animate-spin motion-reduce:animate-none" : ""} />
+                      {t("settings.refreshModels")}
+                    </MenuItem>
                     <MenuItem onClick={() => void checkConfiguration(connection)}>
                       <Check />
                       {checkingConnectionId === connection.id
@@ -754,27 +826,41 @@ export function ConnectionsSection({
               <DialogDescription>{t("settings.addConnectionDescription")}</DialogDescription>
             </DialogHeader>
             <DialogPanel className="space-y-4">
-              {!chatGptConnected && (
-                <div className="flex items-center justify-between gap-4 rounded-xl border p-3">
+              {availableSubscriptions.map((subscription) => (
+                <div
+                  className="flex items-center justify-between gap-4 rounded-xl border p-3"
+                  key={subscription.id}
+                >
                   <div className="min-w-0">
-                    <p className="text-sm font-medium">{t("settings.chatGptOAuth")}</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.chatGptOAuthHint")}</p>
+                    <p className="text-sm font-medium">{t(subscription.labelKey)}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{t(subscription.hintKey)}</p>
                   </div>
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
-                    onClick={connectChatGpt}
+                    onClick={() => void connectSubscription(subscription.id)}
                     disabled={mutationInProgress}
                   >
-                    {oauthState === "starting" || oauthState === "waiting"
+                    {(oauthState === "starting" || oauthState === "waiting") &&
+                      oauthProvider === subscription.id
                       ? t("settings.connecting")
                       : t("settings.connect")}
                   </Button>
                 </div>
+              ))}
+              {oauthInstructions && oauthState === "waiting" && (
+                <div className="rounded-xl border border-dashed p-3" role="status">
+                  <p className="text-xs text-muted-foreground">
+                    {t("settings.deviceCodeHint")}
+                  </p>
+                  <p className="mt-1 font-mono text-base font-semibold tracking-widest">
+                    {oauthInstructions.replace(/^Enter code:\s*/i, "")}
+                  </p>
+                </div>
               )}
               {oauthError && <p className="text-xs text-destructive" role="alert">{oauthError}</p>}
-              {!chatGptConnected && <Separator />}
+              {availableSubscriptions.length > 0 && <Separator />}
               <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 {t("settings.addApi")}
               </p>

@@ -187,7 +187,12 @@ async function localApi<T>(
   return payload;
 }
 
-async function insertHumanMessage(client: LocalClient, channelId = LOCAL_DM_ID, content = "hello") {
+async function insertHumanMessage(
+  client: LocalClient,
+  channelId = LOCAL_DM_ID,
+  content = "hello",
+  threadParentId: string | null = null,
+) {
   const result = await client
     .from("messages")
     .insert({
@@ -195,6 +200,7 @@ async function insertHumanMessage(client: LocalClient, channelId = LOCAL_DM_ID, 
       sender_id: LOCAL_USER_ID,
       sender_type: "human",
       content,
+      thread_parent_id: threadParentId,
     })
     .select("*")
     .single();
@@ -210,6 +216,7 @@ async function insertAgentMessage(
   channelId: string,
   senderId: string,
   content: string,
+  threadParentId: string | null = null,
 ) {
   const insert = () => client
     .from("messages")
@@ -218,6 +225,7 @@ async function insertAgentMessage(
       sender_id: senderId,
       sender_type: "agent",
       content,
+      thread_parent_id: threadParentId,
     })
     .select("id")
     .single();
@@ -226,6 +234,25 @@ async function insertAgentMessage(
   assertQuery(result);
   assert.ok(result.data);
   return result.data as { id: string };
+}
+
+async function setChannelAgents(client: LocalClient, agentIds: string[]) {
+  const channelRow = await client
+    .from("channels")
+    .select("name, description")
+    .eq("id", LOCAL_CHANNEL_ID)
+    .single();
+  assertQuery(channelRow);
+  const info = channelRow.data as { name: string; description: string | null };
+  await localRpc(client, "set_channel_agent_members", {
+    channel_uuid: LOCAL_CHANNEL_ID,
+    agent_ids: agentIds,
+    channel_name: info.name,
+    channel_description: info.description,
+    expected_agent_ids: [LOCAL_AGENT_ID],
+    expected_channel_name: info.name,
+    expected_channel_description: info.description,
+  });
 }
 
 async function loadDelivery(client: LocalClient, messageId: string) {
@@ -241,7 +268,12 @@ async function loadDelivery(client: LocalClient, messageId: string) {
 
 function deliveryBridge(
   client: LocalClient,
-  sendToAgent: (agentId: string, prompt: string, channelId: string | null) => Promise<void>,
+  sendToAgent: (
+    agentId: string,
+    prompt: string,
+    channelId: string | null,
+    options?: { ambient?: boolean; body?: string },
+  ) => Promise<void>,
 ) {
   const bridge = Object.create(Bridge.prototype) as Bridge;
   Reflect.set(bridge, "config", {
@@ -287,6 +319,48 @@ async function drain(bridge: Bridge) {
   const method = Reflect.get(bridge, "drainDeliveryQueue") as () => Promise<void>;
   await method.call(bridge);
 }
+
+test("a teammate's plain greeting does not wake the rest of the room", async () => {
+  // Greetings are for the room, not a request anyone owes an answer to. The
+  // classifier has to stay narrow: anything carrying real content, a question,
+  // or a request must still reach the teammate it concerns.
+  const source = await readFile(
+    new URL("../src/bridge.ts", import.meta.url),
+    "utf8",
+  );
+  const declaration = source.match(
+    /function isSocialAcknowledgement\(content: string\) \{[\s\S]*?\n\}/,
+  );
+  assert.ok(declaration, "isSocialAcknowledgement should exist in bridge.ts");
+  const isSocialAcknowledgement = new Function(
+    `${declaration[0].replace(": string", "")}; return isSocialAcknowledgement;`,
+  )() as (content: string) => boolean;
+
+  for (const greeting of [
+    "你好呀～",
+    "哈喽~",
+    "中午好呀 @Wyatt",
+    "早上好",
+    "晚安啦",
+    "辛苦了",
+    "收到",
+    "Thanks!",
+    "hello",
+  ]) {
+    assert.equal(isSocialAcknowledgement(greeting), true, greeting);
+  }
+
+  for (const substantive of [
+    "中午好呀 @Wyatt！我是Test，一直在，随时可以帮忙看东西，有需要尽管说～",
+    "还没呢，忙着回消息呢～你吃了吗",
+    "@Local Assistant 帮我看下日志",
+    "好的，我去查一下数据库连接问题",
+    "嗨，报告写完了吗？",
+    "任务已完成，报告在文档里",
+  ]) {
+    assert.equal(isSocialAcknowledgement(substantive), false, substantive);
+  }
+});
 
 test("agent mention routing prefers a unique stable handle and fails closed on collisions", () => {
   const bridge = Object.create(Bridge.prototype) as Bridge;
@@ -538,6 +612,96 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     );
     await drain(bridge);
     assert.equal((await loadDelivery(client, agentChatter.id))?.status, "skipped");
+  });
+});
+
+test("a teammate citing your handle never publishes your decision to stay quiet", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    await setChannelAgents(client, [LOCAL_AGENT_ID, created.agent.id]);
+
+    const sends: Array<{ agentId: string; ambient: boolean }> = [];
+    const bridge = deliveryBridge(client, async (agentId, _prompt, _channelId, options) => {
+      sends.push({ agentId, ambient: options?.ambient === true });
+    });
+
+    // A person asking by name owes an answer: an empty turn means the runtime
+    // dropped it, so the trailing-text fallback stays armed.
+    const fromHuman = await insertHumanMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      "@Local Assistant can you check the report?",
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, fromHuman.id))?.status, "completed");
+    assert.equal(sends.at(-1)?.ambient, false);
+
+    // A teammate naming you mid-sentence is citing you, not asking you. The
+    // delivery still arrives — answering is the agent's call — but a decision
+    // to stay quiet must never be posted to the channel as trailing text.
+    const citation = await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "That last round was @Local Assistant answering, not me.",
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, citation.id))?.status, "completed");
+    assert.equal(sends.at(-1)?.agentId, LOCAL_AGENT_ID);
+    assert.equal(sends.at(-1)?.ambient, true);
+  });
+});
+
+test("an unclaimed thread reaches the room; a teammate's thread stays theirs", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    await setChannelAgents(client, [LOCAL_AGENT_ID, created.agent.id]);
+    const bridge = deliveryBridge(client, async () => undefined);
+
+    // A person opens a thread on their own message. Nobody owns it yet, so it
+    // is still just the room talking — silence here is the worst outcome.
+    const root = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "notes from the sync");
+    await drain(bridge);
+    const opened = await insertHumanMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      "one more thing I forgot",
+      root.id,
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, opened.id))?.status, "completed");
+
+    // Once a teammate answers in the thread it is their conversation, and the
+    // next unmentioned reply goes to them alone.
+    await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "Got it — adding that.",
+      root.id,
+    );
+    const followUp = await insertHumanMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      "thanks, when can you get to it?",
+      root.id,
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "skipped");
+    assert.match(
+      (await loadDelivery(client, followUp.id))?.last_error || "",
+      /mid-conversation/,
+    );
   });
 });
 

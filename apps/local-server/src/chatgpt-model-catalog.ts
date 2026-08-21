@@ -2,7 +2,7 @@
 // @mariozechner/pi-ai dependency. Keeping this data-only module out of the
 // packaged Node sidecar avoids the SDK's lazy dynamic-import registry; the Bun
 // worker still uses the SDK's public streamSimple dispatcher at runtime.
-interface ChatGptCatalogModel {
+export interface ChatGptCatalogModel {
   id: string;
   name: string;
   reasoning: boolean;

@@ -16,10 +16,20 @@ export interface ConnectionModelDefinition {
   };
 }
 
+/** Every provider the local service can hold a connection for. Declared once:
+ * the same union is checked in several places, and a provider added to only
+ * some of them is rejected at runtime with no clue why. */
+export type ModelProviderId =
+  | "openai-codex"
+  | "anthropic-claude"
+  | "github-copilot"
+  | "openai-compatible"
+  | "anthropic-compatible";
+
 export interface ModelConnection {
   id: string;
   name: string;
-  provider: "openai-codex" | "openai-compatible" | "anthropic-compatible";
+  provider: ModelProviderId;
   auth_type: "oauth" | "api-key";
   base_url: string | null;
   api_format: "openai-codex-responses" | "openai-completions" | "anthropic-messages";

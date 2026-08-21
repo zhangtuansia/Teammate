@@ -21,6 +21,24 @@ const AGENT_LOOP_HARD_CAP = 20;
 // How long a teammate's last message keeps an exchange "theirs". Past this the
 // channel is quiet again and a new message belongs to the whole room.
 const EXCHANGE_ACTIVE_MS = 10 * 60_000;
+/**
+ * A short pleasantry with no question in it — "morning", "你好呀～", "thanks".
+ * Deliberately narrow: it only has to catch the greeting a teammate posts back
+ * to the room, and anything longer or containing a question is treated as real
+ * content that a teammate may need to see.
+ */
+function isSocialAcknowledgement(content: string) {
+  const text = content.trim();
+  if (text.length > 40 || /[?？]/.test(text)) return false;
+  const stripped = text
+    .replace(/@[^\s,.:!?，。！？、；]+/g, "")
+    .replace(/[\s~～!！.。,，、;；:：\-—()（）]/g, "")
+    // Chinese greetings routinely carry a trailing particle ("你好呀", "早啊").
+    .replace(/[呀啊哈呐哦嗯的了吧么呢啦咯喽噢欸]+$/g, "");
+  if (!stripped) return true;
+  return /^(你好|您好|哈喽|嗨|早|早安|早上好|中午好|下午好|晚上好|晚安|辛苦|收到|好|谢谢|多谢|不客气|hi|hey|hello|morning|thanks?|thankyou|welcome|ok|okay|yo|sup)+$/i
+    .test(stripped);
+}
 // A message to the room reaches everyone, but not all at once: the teammates
 // most recently present answer first, and the rest are only pulled in if the
 // room stays silent. Two agents behave exactly as before; twenty do not each
@@ -567,6 +585,34 @@ export class Bridge {
     });
     const position = ordered.indexOf(delivery.agent_id);
     return position < 0 ? 0 : Math.floor(position / ROOM_FANOUT_WIDTH);
+  }
+
+  /**
+   * True when a thread already belongs to some teammate — its root is theirs,
+   * or one of them has spoken in it. Those threads are private conversations
+   * and stay that way. A thread nobody has joined is still just a room.
+   */
+  private async threadHasTeammate(msg: DbMessage) {
+    if (!msg.thread_parent_id) return false;
+    const [parentResult, replyResult] = await Promise.all([
+      this.supabase
+        .from("messages")
+        .select("sender_type")
+        .eq("id", msg.thread_parent_id)
+        .maybeSingle(),
+      this.supabase
+        .from("messages")
+        .select("id")
+        .eq("channel_id", msg.channel_id)
+        .eq("thread_parent_id", msg.thread_parent_id)
+        .eq("sender_type", "agent")
+        .limit(1),
+    ]);
+    if (parentResult.error) throw new Error(parentResult.error.message);
+    if (replyResult.error) throw new Error(replyResult.error.message);
+    const parent = parentResult.data as { sender_type: string } | null;
+    if (parent?.sender_type === "agent") return true;
+    return ((replyResult.data || []) as unknown[]).length > 0;
   }
 
   /** True once any agent has spoken after this message. */
@@ -1149,6 +1195,17 @@ export class Bridge {
         // Agent-authored messages stay narrower: they reach a teammate whose
         // conversation they continue, and the loop guard bounds the run.
         if (isAgentAssignment) {
+          // A teammate greeting the room back is not addressed to the other
+          // agents and needs no answer from them. Waking everyone for it costs
+          // a full turn per agent and produces nothing.
+          if (isSocialAcknowledgement(msg.content)) {
+            await this.finishDelivery(
+              delivery,
+              "skipped",
+              "Teammate's social message needs no reply",
+            );
+            return;
+          }
           ambientReason = await this.implicitConversationReason(delivery, msg, channelAgents);
           if (!ambientReason) {
             await this.finishDelivery(
@@ -1162,10 +1219,15 @@ export class Bridge {
           const mine = await this.implicitConversationReason(delivery, msg, channelAgents);
           if (mine) {
             ambientReason = mine;
-          } else if (msg.thread_parent_id || (await this.exchangeIsUnderway(msg))) {
+          } else if (
+            msg.thread_parent_id
+              ? await this.threadHasTeammate(msg)
+              : await this.exchangeIsUnderway(msg)
+          ) {
             // Someone else is already mid-conversation here (or this belongs to
             // a thread that is not yours). Interrupting is what a person would
-            // not do; the room case below is what they would.
+            // not do; the room case below is what they would. A thread with no
+            // teammate in it yet is nobody's, so it falls through to the room.
             await this.finishDelivery(
               delivery,
               "skipped",
@@ -1243,7 +1305,13 @@ export class Bridge {
     }
 
     await this.agentManager.sendToAgent(delivery.agent_id, prompt, msg.channel_id, {
-      ambient: ambientReason !== null,
+      // A person naming you is asking you something, so an empty turn means the
+      // runtime dropped the reply and the trailing text is worth publishing. A
+      // teammate naming you is often just a citation — "@test answered that" —
+      // and publishing the trailing text there posts the agent's decision not
+      // to answer as a channel message. Their explicit `message send` still
+      // works; only the fallback is off.
+      ambient: ambientReason !== null || msg.sender_type === "agent",
       body,
     });
     // Record this before the completion update. If that update fails, this

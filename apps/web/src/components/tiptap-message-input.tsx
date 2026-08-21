@@ -499,7 +499,9 @@ const TiptapMessageInput = forwardRef<
           labels={formattingLabels}
         />
       )}
-      <div className="px-4 pt-3 pb-1 text-[15px] leading-[1.54]">
+      {/* Matches the transcript's metrics so a draft looks like the message
+          it becomes. */}
+      <div className="px-4 pt-3 pb-1 text-[15px] leading-[22px]">
         <EditorContent editor={editor} />
       </div>
     </div>

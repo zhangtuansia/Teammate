@@ -205,6 +205,30 @@ const piWorkerPlugin = {
   },
 };
 
+/**
+ * Some dependencies lazily `import("node:…")` so they can also load in a
+ * browser. The packaged binary has no dynamic-import callback, so those calls
+ * fail at runtime with ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING. Rewrite them to
+ * a static require, which is what the bundle needs and what the module would
+ * have used had it not been written for both environments.
+ */
+const staticNodeImportPlugin = {
+  name: "teammate-static-node-imports",
+  setup(buildContext) {
+    buildContext.onLoad({ filter: /@mariozechner[\\/]pi-ai[\\/].*\.js$/ }, (args) => {
+      const source = readFileSync(args.path, "utf8");
+      if (!/import\("node:/.test(source)) return null;
+      return {
+        contents: source.replace(
+          /import\("(node:[a-z/]+)"\)/g,
+          (_match, specifier) => `Promise.resolve(require("${specifier}"))`,
+        ),
+        loader: "js",
+      };
+    });
+  },
+};
+
 const entries = [
   {
     name: "teammate-runtime",
@@ -239,7 +263,7 @@ for (const entry of entries) {
       js: "const __teammateImportMetaUrl = require('node:url').pathToFileURL(__filename).href;",
     },
     external: ["node:sqlite"],
-    plugins: [piWorkerPlugin],
+    plugins: [piWorkerPlugin, staticNodeImportPlugin],
   });
 
   execFileSync(

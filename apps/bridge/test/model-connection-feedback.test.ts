@@ -84,6 +84,11 @@ test("local connection contract preserves capability metadata and safe destructi
   assert.match(server, /input: \[\.\.\.model\.input\]/);
   assert.match(catalog, /input: ReadonlyArray<"text" \| "image">/);
   assert.match(catalog, /input: \["text", "image"\]/);
+  // A custom endpoint is asked for its own catalog rather than making someone
+  // type model ids, and the discovered list keeps the selected default.
+  assert.match(server, /fetch\(`\$\{baseUrl\}\/models`/);
+  assert.match(server, /modelIds\.includes\(connection\.default_model\)\s*\n\s*\? connection\.default_model/);
+  assert.match(server, /source: automaticallySynced \? "sdk" : "endpoint"/);
   assert.match(server, /probe: "configuration"/);
   assert.match(server, /if \(!isInstalledAgentRuntime\(runtime\)\)/);
   assert.match(server, /listAgentRuntimes\(\)\.some/);
@@ -100,8 +105,6 @@ test("local connection contract preserves capability metadata and safe destructi
   assert.match(server, /model_selection_mode !== "automatically-synced"/);
   assert.match(server, /connectionCredentialIsUsable\(connection, credentialResult\.credential\)/);
   assert.match(server, /session_id: null,[\s\S]*runtime_session_id: null/);
-  assert.match(server, /source: automaticallySynced \? "sdk" : "user-defined"/);
-  assert.match(server, /changed: automaticallySynced/);
   assert.doesNotMatch(
     server.match(/function publicConnection[\s\S]*?\n}\n/)?.[0] || "",
     /refreshConnectionModels/,
@@ -148,7 +151,9 @@ test("AI settings follows the connection-first IA and disables missing local run
   assert.match(connections, /<Dialog/);
   assert.match(connections, /settings\.addConnectionTitle/);
   assert.match(connections, /settings\.configurationCheck/);
-  assert.match(connections, /connection\.model_selection_mode === "automatically-synced"/);
+  // Refreshing the model catalog is offered for every connection: a custom
+  // endpoint can be asked what it runs, not only provider-synced ones.
+  assert.match(connections, /settings\.refreshModels/);
   assert.match(settings, /disabled=\{item\.disabled\}/);
   assert.match(settings, /installedAgentRuntimeIds\(runtimes\)/);
   assert.match(createAgent, /loadAgentRuntimes\(controller\.signal\)/);

@@ -1,3 +1,5 @@
+import type { ModelProviderId } from "./model-connections";
+
 export type AgentRuntimeId = "claude-code" | "codex" | "pi";
 
 export const AGENT_RUNTIME_IDS: AgentRuntimeId[] = ["claude-code", "codex", "pi"];
@@ -12,7 +14,7 @@ export const CODEX_MODEL_ITEMS = [
 
 export interface RuntimeModelConnection {
   id: string;
-  provider: "openai-codex" | "openai-compatible" | "anthropic-compatible";
+  provider: ModelProviderId;
   default_model: string;
   models: readonly { id: string }[];
   hasCredential: boolean;
