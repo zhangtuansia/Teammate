@@ -783,7 +783,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
           )}
         />
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto w-full max-w-4xl space-y-5 p-6 sm:p-8">
+          <div className="mx-auto w-full max-w-3xl space-y-5 px-5 py-6">
             {selectedDocument.generatorName && selectedDocument.generated_by_agent_id && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <GeneratedAvatar
@@ -822,8 +822,11 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 </Field>
               </>
             ) : content ? (
-              <article className="prose-message text-[15px] leading-relaxed">
-                <SafeMarkdown>{content}</SafeMarkdown>
+              <article
+                className="prose-message wrap-break-word text-[15px] subpixel-antialiased"
+                style={{ lineHeight: "22px" }}
+              >
+                <SafeMarkdown mentions>{content}</SafeMarkdown>
               </article>
             ) : (
               <p className="text-sm text-muted-foreground">{t("documents.noContent")}</p>
