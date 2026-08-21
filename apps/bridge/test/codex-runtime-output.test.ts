@@ -6,7 +6,7 @@ import test from "node:test";
 import { CodexRuntime } from "../src/runtimes/codex-runtime.js";
 import type { RuntimeEvent } from "../src/runtimes/types.js";
 
-test("Codex emits one visible output and never exposes reasoning detail", async () => {
+test("Codex surfaces reasoning as live activity but never as a chat message", async () => {
   const fixture = join(
     dirname(fileURLToPath(import.meta.url)),
     "fixtures",
@@ -41,11 +41,16 @@ test("Codex emits one visible output and never exposes reasoning detail", async 
     events.filter((event) => event.type === "output"),
     [{ type: "output", text: "Visible final answer" }],
   );
+  // Reasoning drives the thinking indicator so a long turn shows progress. The
+  // assertion above is the guard that matters: it stays out of `output`, which
+  // is the only event that becomes a persisted channel message.
   assert.equal(
     events.some(
-      (event) => event.type === "activity" && event.detail?.includes("private"),
+      (event) => event.type === "activity" &&
+        event.label === "Thinking" &&
+        event.detail === "private chain of thought",
     ),
-    false,
+    true,
   );
   assert.equal(events.at(-1)?.type, "turn-complete");
 });

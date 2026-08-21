@@ -404,9 +404,10 @@ test("same process replay after completion-state loss does not hand the prompt t
   });
 });
 
-test("public channel rows are skipped without a mention and task mentions are delivered", async () => {
-  await withLocalHarness(async ({ client }) => {
-    const unmentioned = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "status update only");
+test("channel policy: sole agent and mentions deliver, cold multi-agent rows skip, conversations continue", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    // A channel with one agent behaves like a shared DM: no @ required.
+    const soleAgent = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "status update only");
     const assigned = await insertHumanMessage(
       client,
       LOCAL_CHANNEL_ID,
@@ -418,10 +419,112 @@ test("public channel rows are skipped without a mention and task mentions are de
     });
     await drain(bridge);
 
-    assert.equal((await loadDelivery(client, unmentioned.id))?.status, "skipped");
+    assert.equal((await loadDelivery(client, soleAgent.id))?.status, "completed");
     assert.equal((await loadDelivery(client, assigned.id))?.status, "completed");
-    assert.equal(prompts.length, 1);
-    assert.match(prompts[0], /Task #7 assigned to you/);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[0], /delivery=unmentioned/);
+    assert.match(prompts[0], /status update only/);
+    assert.doesNotMatch(prompts[1], /delivery=unmentioned/);
+    assert.match(prompts[1], /Task #7 assigned to you/);
+
+    // A second agent joins the channel: cold unmentioned rows now skip.
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      {
+        display_name: "Helper",
+        server_id: LOCAL_SERVER_ID,
+        runtime: "codex",
+        model: "default",
+      },
+    );
+    const channelRow = await client
+      .from("channels")
+      .select("name, description")
+      .eq("id", LOCAL_CHANNEL_ID)
+      .single();
+    assertQuery(channelRow);
+    const channelInfo = channelRow.data as { name: string; description: string | null };
+    await localRpc(client, "set_channel_agent_members", {
+      channel_uuid: LOCAL_CHANNEL_ID,
+      agent_ids: [LOCAL_AGENT_ID, created.agent.id],
+      channel_name: channelInfo.name,
+      channel_description: channelInfo.description,
+      expected_agent_ids: [LOCAL_AGENT_ID],
+      expected_channel_name: channelInfo.name,
+      expected_channel_description: channelInfo.description,
+    });
+
+    const cold = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "anyone seen the report?");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, cold.id))?.status, "skipped");
+
+    // After the agent speaks in the flow, the human's follow-up continues
+    // their conversation without a new mention.
+    assertQuery(await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: LOCAL_AGENT_ID,
+      sender_type: "agent",
+      content: "On it — checking the report now.",
+    }));
+    const followUp = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "great, ping me when done");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "completed");
+    assert.match(prompts.at(-1) || "", /delivery=unmentioned/);
+    assert.match(prompts.at(-1) || "", /ping me when done/);
+
+    // Redirecting to the other agent keeps this one out of the exchange.
+    const redirected = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "@Helper can you take this?");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, redirected.id))?.status, "skipped");
+
+    // When another agent spoke more recently, they own the exchange.
+    assertQuery(await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: created.agent.id,
+      sender_type: "agent",
+      content: "Sure, taking it.",
+    }));
+    const towardHelper = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "thanks, how long will it take?");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, towardHelper.id))?.status, "skipped");
+
+    // Agents can @mention each other: the mentioned agent gets the delivery,
+    // and the sender never receives its own message.
+    const agentMention = await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: created.agent.id,
+      sender_type: "agent",
+      content: "@Local Assistant please review the report draft",
+    }).select("id").single();
+    assertQuery(agentMention);
+    const agentMentionId = (agentMention.data as { id: string }).id;
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, agentMentionId))?.status, "completed");
+    assert.match(prompts.at(-1) || "", /please review the report draft/);
+    const senderRow = await client
+      .from("message_deliveries")
+      .select("agent_id")
+      .eq("message_id", agentMentionId)
+      .eq("agent_id", created.agent.id)
+      .maybeSingle();
+    assertQuery(senderRow);
+    assert.equal(senderRow.data, null);
+
+    // An unmentioned agent message never triggers other agents.
+    const agentChatter = await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: created.agent.id,
+      sender_type: "agent",
+      content: "Draft is coming along nicely.",
+    }).select("id").single();
+    assertQuery(agentChatter);
+    await drain(bridge);
+    assert.equal(
+      (await loadDelivery(client, (agentChatter.data as { id: string }).id))?.status,
+      "skipped",
+    );
   });
 });
 

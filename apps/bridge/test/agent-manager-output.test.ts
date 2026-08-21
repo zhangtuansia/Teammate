@@ -114,7 +114,7 @@ test("runtime final is persisted once when the CLI sent no visible message", asy
   ]);
 });
 
-test("equivalent explicit CLI final suppresses the runtime duplicate", async () => {
+test("any trailing runtime text is suppressed once the CLI replied this turn", async () => {
   const fake = fakeMessageClient({
     existing: [{ id: "message-1", content: "最终答复：\r\nFinal answer  \n" }],
   });
@@ -123,12 +123,80 @@ test("equivalent explicit CLI final suppresses the runtime duplicate", async () 
   await persistOutput(manager).call(manager, "agent-a", "channel-a", "Final answer", 10);
 
   assert.equal(fake.inserted.length, 0);
-  assert.equal(fake.lookups[0]?.columns, "id, content");
-  assert.deepEqual(fake.lookups[0]?.order, { column: "seq", ascending: false });
-  assert.equal(fake.lookups[0]?.limit, 50);
+  assert.equal(fake.lookups[0]?.columns, "id");
+  assert.equal(fake.lookups[0]?.limit, 1);
 });
 
-test("an early CLI acknowledgement does not swallow the runtime final", async () => {
+test("a reply-sent marker suppresses the closing summary the agent already sent", async () => {
+  const fake = fakeMessageClient({
+    existing: [{ id: "message-1", content: "北京今天 30°C，白天基本无雨。" }],
+  });
+  const manager = bareManager(fake.client);
+
+  await persistOutput(manager).call(
+    manager,
+    "agent-a",
+    "channel-a",
+    "已经查好并发给用户了：今天北京最高 35°C。[teammate:reply-sent]",
+    10,
+  );
+
+  assert.equal(fake.inserted.length, 0);
+});
+
+test("a reply-sent marker is ignored when the CLI never reached the channel", async () => {
+  const fake = fakeMessageClient();
+  const manager = bareManager(fake.client);
+
+  await persistOutput(manager).call(
+    manager,
+    "agent-a",
+    "channel-a",
+    "[teammate:reply-sent] 北京今天 30°C。",
+    10,
+  );
+
+  assert.equal(fake.inserted.length, 1);
+  assert.equal(fake.inserted[0]?.content, "北京今天 30°C。");
+});
+
+test("marker-less closing narration is suppressed once the CLI replied", async () => {
+  const narrations = [
+    "已经把能力范围发给用户了。",
+    "已经查好并发给用户了：今天北京最高35°C/最低24°C，整体偏热。",
+    "Replied and saved a note about the user's observation on my reply length for future reference.",
+  ];
+  for (const narration of narrations) {
+    const fake = fakeMessageClient({
+      existing: [{ id: "message-1", content: "这是我通过 CLI 发出的正式回复。" }],
+    });
+    const manager = bareManager(fake.client);
+
+    await persistOutput(manager).call(manager, "agent-a", "channel-a", narration, 10);
+
+    assert.equal(fake.inserted.length, 0, `should suppress: ${narration}`);
+  }
+});
+
+test("narration-shaped text is still persisted when the CLI never replied", async () => {
+  const fake = fakeMessageClient();
+  const manager = bareManager(fake.client);
+
+  await persistOutput(manager).call(
+    manager,
+    "agent-a",
+    "channel-a",
+    "已经查好并发给用户了：今天北京最高35°C。",
+    10,
+  );
+
+  assert.equal(fake.inserted.length, 1);
+});
+
+test("trailing text after an early CLI acknowledgement is also suppressed", async () => {
+  // The prompt requires results to be reported through the CLI. Once the agent
+  // has spoken in the channel this turn, trailing text is harness-facing and
+  // posting it produced the double-reply bug (observed four times in a row).
   const fake = fakeMessageClient({
     existing: [{ id: "message-1", content: "收到，我先检查一下。" }],
   });
@@ -142,8 +210,7 @@ test("an early CLI acknowledgement does not swallow the runtime final", async ()
     10,
   );
 
-  assert.equal(fake.inserted.length, 1);
-  assert.equal(fake.inserted[0]?.content, "检查完成：问题已经修复。");
+  assert.equal(fake.inserted.length, 0);
 });
 
 test("lookup failure still attempts the agent-bound visible fallback", async () => {
@@ -167,6 +234,62 @@ test("lookup failure still attempts the agent-bound visible fallback", async () 
     content: "Visible fallback",
   });
   assert.match(String(errors[0]?.[0]), /Could not check visible runtime output/);
+});
+
+test("an ambient turn never posts trailing runtime text", async () => {
+  const fake = fakeMessageClient();
+  const manager = bareManager(fake.client);
+  const execution = new ExecutionSession<never>();
+  const started = execution.submit(undefined as never);
+  assert.equal(started.kind, "started");
+  if (started.kind !== "started") return;
+  const managed = {
+    handle: { isRunning: () => true, send: async () => undefined, stop: () => undefined },
+    runtimeId: "codex",
+    model: "default",
+    connectionId: null,
+    sessionId: null,
+    busy: true,
+    activity: "working",
+    activityLabel: "Working",
+    activityDetail: "",
+    heartbeatTimer: null,
+    execution,
+    executionAdapter: new ExecutionRuntimeAdapter(1),
+    activeChannelId: "channel-a",
+    pendingOutput: "",
+    turnStartSeq: 10,
+    turnAmbient: true,
+    eventTail: Promise.resolve(),
+    restartAfterTurn: false,
+  };
+  Reflect.set(manager, "removedAgentIds", new Set<string>());
+  Reflect.set(manager, "processes", new Map([["agent-a", managed]]));
+  Reflect.set(manager, "sessions", new Map([["agent-a", { displayName: "Agent A" }]]));
+  Reflect.set(manager, "activityChannel", { send: async () => "ok" });
+  const handleEvent = Reflect.get(manager, "handleRuntimeEvent") as (
+    agentId: string,
+    target: typeof managed,
+    event: NormalizedExecutionEvent<RuntimeActivity>,
+  ) => Promise<void>;
+
+  const turn = { generation: started.turn.generation, turnId: started.turn.turnId };
+  await handleEvent.call(manager, "agent-a", managed, {
+    type: "output",
+    generation: 1,
+    turn,
+    text: "Decided this message was not for me.",
+    final: false,
+  });
+  await handleEvent.call(manager, "agent-a", managed, {
+    type: "terminal",
+    generation: 1,
+    turn,
+    terminal: { status: "completed" },
+  });
+
+  assert.equal(fake.inserted.length, 0);
+  assert.equal(fake.lookups.length, 0);
 });
 
 test("multiple runtime output and completion events persist only the final event once", async () => {

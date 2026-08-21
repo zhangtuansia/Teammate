@@ -1023,9 +1023,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_local_message_deliveries_agent
     ON message_deliveries(agent_id, status, created_at);
 
-  CREATE TRIGGER IF NOT EXISTS trg_local_enqueue_human_message_deliveries
+  DROP TRIGGER IF EXISTS trg_local_enqueue_human_message_deliveries;
+  CREATE TRIGGER IF NOT EXISTS trg_local_enqueue_message_deliveries
   AFTER INSERT ON messages
-  WHEN NEW.sender_type = 'human'
+  WHEN NEW.sender_type IN ('human', 'agent')
   BEGIN
     INSERT OR IGNORE INTO message_deliveries (
       message_id,
@@ -1055,7 +1056,8 @@ db.exec(`
     JOIN channels channel
       ON channel.id = NEW.channel_id
      AND channel.server_id = agent.server_id
-    WHERE member.channel_id = NEW.channel_id;
+    WHERE member.channel_id = NEW.channel_id
+      AND agent.id <> NEW.sender_id;
   END;
 
   CREATE TABLE IF NOT EXISTS tasks (

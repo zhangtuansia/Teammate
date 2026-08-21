@@ -16,6 +16,7 @@ interface ClaudeStreamEvent {
     content?: Array<{
       type?: string;
       text?: string;
+      thinking?: string;
       name?: string;
       input?: Record<string, unknown>;
     }>;
@@ -27,28 +28,32 @@ function describeToolUse(contentBlock: {
   input?: Record<string, unknown>;
 }): { label: string; detail: string } {
   const toolName = contentBlock.name || "tool";
+  const from = (key: string) => {
+    const value = contentBlock.input?.[key];
+    return typeof value === "string" ? value : "";
+  };
 
   switch (toolName) {
     case "Read":
-      return { label: "Reading file", detail: "" };
+      return { label: "Reading file", detail: from("file_path") };
     case "Write":
-      return { label: "Writing file", detail: "" };
+      return { label: "Writing file", detail: from("file_path") };
     case "Edit":
-      return { label: "Editing file", detail: "" };
+      return { label: "Editing file", detail: from("file_path") };
     case "Bash":
-      return { label: "Running command", detail: "" };
+      return { label: "Running command", detail: from("description") || from("command") };
     case "Grep":
-      return { label: "Searching", detail: "" };
+      return { label: "Searching", detail: from("pattern") };
     case "Glob":
-      return { label: "Finding files", detail: "" };
+      return { label: "Finding files", detail: from("pattern") };
     case "Agent":
-      return { label: "Running agent", detail: "" };
+      return { label: "Running agent", detail: from("description") };
     case "WebSearch":
-      return { label: "Searching web", detail: "" };
+      return { label: "Searching web", detail: from("query") };
     case "WebFetch":
-      return { label: "Fetching URL", detail: "" };
+      return { label: "Fetching URL", detail: from("url") };
     case "Skill":
-      return { label: "Running skill", detail: "" };
+      return { label: "Running skill", detail: from("skill") };
     case "TodoWrite":
       return { label: "Updating tasks", detail: "" };
     default:
@@ -179,9 +184,14 @@ class ClaudeCodeHandle implements AgentRuntimeHandle {
             type: "activity",
             activity: "thinking",
             label: "Thinking",
+            detail: block.thinking || "",
           });
         } else if (block.type === "text") {
-          this.pendingText = block.text || "";
+          if (block.text) {
+            this.pendingText = this.pendingText
+              ? `${this.pendingText}\n\n${block.text}`
+              : block.text;
+          }
         } else if (block.type === "tool_use") {
           this.flushText();
           const { label, detail } = describeToolUse(block);

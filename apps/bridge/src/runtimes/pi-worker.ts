@@ -34,6 +34,7 @@ interface WorkerConfig {
 type IncomingMessage =
   | { type: "init"; config: WorkerConfig }
   | { type: "prompt"; id: string; message: string }
+  | { type: "steer"; id: string; message: string }
   | { type: "shutdown" };
 
 interface StoredSession {
@@ -46,6 +47,60 @@ let config: WorkerConfig | null = null;
 let sessionFile = "";
 let sessionId = "";
 let turnFailureSent = false;
+let turnActive = false;
+let continuationPending = false;
+
+// Model output arrives as token-level deltas — often in sub-second bursts — and
+// every activity event is persisted to the local event log. Deltas only feed a
+// buffer; a per-turn ticker rebroadcasts the accumulated tail once per second,
+// so bursts and steady streams alike surface without flooding the log.
+const STREAM_ACTIVITY_INTERVAL_MS = 1_000;
+let streamActivity: "thinking" | "working" = "thinking";
+let streamLabel = "";
+let streamBuffer = "";
+let streamDirty = false;
+let streamTimer: ReturnType<typeof setInterval> | null = null;
+
+function flushStreamActivity() {
+  if (!streamDirty) return;
+  streamDirty = false;
+  const detail = streamBuffer.replace(/\s+/g, " ").trim().slice(-200);
+  if (!detail) return;
+  sendEvent({ type: "activity", activity: streamActivity, label: streamLabel, detail });
+}
+
+function resetStreamActivity() {
+  streamLabel = "";
+  streamBuffer = "";
+  streamDirty = false;
+}
+
+function startStreamActivity() {
+  resetStreamActivity();
+  if (streamTimer) clearInterval(streamTimer);
+  streamTimer = setInterval(flushStreamActivity, STREAM_ACTIVITY_INTERVAL_MS);
+  streamTimer.unref?.();
+}
+
+function stopStreamActivity() {
+  if (streamTimer) clearInterval(streamTimer);
+  streamTimer = null;
+  resetStreamActivity();
+}
+
+function pushStreamDelta(
+  activity: "thinking" | "working",
+  label: string,
+  delta: string,
+) {
+  if (label !== streamLabel) {
+    streamActivity = activity;
+    streamLabel = label;
+    streamBuffer = "";
+  }
+  streamBuffer += delta;
+  streamDirty = true;
+}
 
 function send(value: unknown) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -53,6 +108,13 @@ function send(value: unknown) {
 
 function sendEvent(event: RuntimeEvent) {
   send({ type: "event", event });
+}
+
+// Custom connections are added with a bare model id and no reasoning flag, which
+// silently disables thinking. Recognize the widely used reasoning families so
+// their thinking stream is requested by default; an explicit flag still wins.
+function inferReasoningModel(id: string) {
+  return /(?:claude-(?:[a-z]+-)?[45]|gpt-5|o[134](?:-mini|-pro)?$|deepseek-r|qwq|grok-[34]|gemini-[23][.-]|-thinking)/i.test(id);
 }
 
 function modelForConnection(
@@ -79,7 +141,7 @@ function modelForConnection(
     baseUrl: connection.provider === "openai-codex"
       ? "https://chatgpt.com/backend-api"
       : connection.baseUrl || "",
-    reasoning: definition.reasoning === true,
+    reasoning: definition.reasoning ?? inferReasoningModel(id),
     input: [...input],
     cost: {
       input: definition.cost?.input ?? 0,
@@ -184,9 +246,29 @@ function latestAssistantText(messages: AgentMessage[]) {
 function handleAgentEvent(event: AgentEvent) {
   switch (event.type) {
     case "agent_start":
+      startStreamActivity();
       sendEvent({ type: "activity", activity: "thinking", label: "Thinking" });
       break;
+    case "message_update":
+      if (event.assistantMessageEvent.type === "thinking_delta") {
+        pushStreamDelta("thinking", "Thinking", event.assistantMessageEvent.delta);
+      } else if (event.assistantMessageEvent.type === "text_delta") {
+        pushStreamDelta("thinking", "Preparing response", event.assistantMessageEvent.delta);
+      } else if (event.assistantMessageEvent.type === "toolcall_delta") {
+        // Replies travel as CLI tool calls, so the streaming reply text lives in
+        // the accumulating command arguments. Lightly unescape for display.
+        pushStreamDelta(
+          "working",
+          "Working",
+          event.assistantMessageEvent.delta.replace(/\\n/g, " ").replace(/\\"/g, '"'),
+        );
+      }
+      break;
     case "tool_execution_start":
+      // Providers often deliver the whole tool call in a sub-second burst, so
+      // surface whatever streamed before the ticker could catch it.
+      flushStreamActivity();
+      resetStreamActivity();
       sendEvent({
         type: "activity",
         activity: "working",
@@ -195,10 +277,15 @@ function handleAgentEvent(event: AgentEvent) {
       });
       break;
     case "agent_end":
+      stopStreamActivity();
       persistSession();
       if (agent?.state.errorMessage) {
         turnFailureSent = true;
         sendEvent({ type: "turn-failed", message: agent.state.errorMessage });
+      } else if (agent?.hasQueuedMessages()) {
+        // A steered follow-up raced the end of the run. Hold the terminal
+        // events; the prompt handler continues the same logical turn.
+        continuationPending = true;
       } else {
         const output = latestAssistantText(event.messages);
         if (output) sendEvent({ type: "output", text: output });
@@ -238,16 +325,38 @@ async function handle(message: IncomingMessage) {
     return;
   }
   if (message.type === "shutdown") process.exit(0);
+  if (message.type === "steer") {
+    const accepted = turnActive && agent !== null;
+    if (accepted) {
+      agent!.steer({
+        role: "user",
+        content: [{ type: "text", text: message.message }],
+        timestamp: Date.now(),
+      });
+    }
+    send({ type: "steer-result", id: message.id, accepted });
+    return;
+  }
   if (!agent || !config) throw new Error("Pi worker is not initialized");
   agent.state.systemPrompt = config.systemPrompt;
   turnFailureSent = false;
+  continuationPending = false;
+  turnActive = true;
   try {
     await agent.prompt(message.message);
+    // A steer accepted in the final moments of the run stays queued; continue
+    // the same logical turn until the queue is dry.
+    while (continuationPending || agent.hasQueuedMessages()) {
+      continuationPending = false;
+      await agent.continue();
+    }
     send({ type: "prompt-result", id: message.id });
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Pi prompt failed";
     if (!turnFailureSent) sendEvent({ type: "turn-failed", message: detail });
     send({ type: "prompt-result", id: message.id, error: detail });
+  } finally {
+    turnActive = false;
   }
 }
 

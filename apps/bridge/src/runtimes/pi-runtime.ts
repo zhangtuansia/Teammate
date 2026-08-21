@@ -16,7 +16,10 @@ type WorkerMessage =
   | { type: "ready"; sessionId: string }
   | { type: "event"; event: RuntimeEvent }
   | { type: "prompt-result"; id: string; error?: string }
+  | { type: "steer-result"; id: string; accepted: boolean }
   | { type: "fatal"; error: string };
+
+const STEER_ACK_TIMEOUT_MS = 3_000;
 
 function workerCommand(config: RuntimeLaunchConfig) {
   const packagedPath = config.env.TEAMMATE_PI_PATH;
@@ -44,6 +47,7 @@ function workerCommand(config: RuntimeLaunchConfig) {
 
 class PiRuntimeHandle implements AgentRuntimeHandle {
   readonly runtimeId = "pi" as const;
+  readonly executionCapabilities = { steer: true } as const;
   sessionId: string | null = null;
   private running = true;
   private readyResolve: ((sessionId: string) => void) | null = null;
@@ -53,6 +57,7 @@ class PiRuntimeHandle implements AgentRuntimeHandle {
     string,
     { resolve: () => void; reject: (error: Error) => void }
   >();
+  private readonly pendingSteers = new Map<string, (accepted: boolean) => void>();
 
   constructor(
     private readonly child: ChildProcess,
@@ -113,12 +118,39 @@ class PiRuntimeHandle implements AgentRuntimeHandle {
     return result;
   }
 
+  /** Inject a follow-up into the running turn. Resolves false when the worker
+   * has no active turn (the caller then queues the message instead). */
+  async steer(message: string): Promise<boolean> {
+    if (!this.isRunning()) return false;
+    const id = randomUUID();
+    const result = new Promise<boolean>((resolve) => {
+      this.pendingSteers.set(id, resolve);
+    });
+    this.write({ type: "steer", id, message });
+    const timer = setTimeout(() => this.settleSteer(id, false), STEER_ACK_TIMEOUT_MS);
+    timer.unref();
+    try {
+      return await result;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private settleSteer(id: string, accepted: boolean) {
+    const resolve = this.pendingSteers.get(id);
+    if (!resolve) return;
+    this.pendingSteers.delete(id);
+    resolve(accepted);
+  }
+
   stop() {
     if (!this.running) return;
     this.running = false;
     const error = new Error("Pi runtime stopped");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const resolve of this.pendingSteers.values()) resolve(false);
+    this.pendingSteers.clear();
     this.write({ type: "shutdown" });
     const timer = setTimeout(() => this.child.kill("SIGTERM"), 1000);
     timer.unref();
@@ -151,6 +183,10 @@ class PiRuntimeHandle implements AgentRuntimeHandle {
       this.child.kill("SIGTERM");
       return;
     }
+    if (message.type === "steer-result") {
+      this.settleSteer(message.id, message.accepted);
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
@@ -166,6 +202,8 @@ class PiRuntimeHandle implements AgentRuntimeHandle {
     this.readyReject?.(error);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    for (const resolve of this.pendingSteers.values()) resolve(false);
+    this.pendingSteers.clear();
     if (initialized) this.onEvent({ type: "turn-failed", message: error.message });
   }
 }

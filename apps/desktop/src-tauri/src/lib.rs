@@ -44,6 +44,7 @@ fn focus_or_create_main_window(app: &tauri::AppHandle) {
         {
             Ok(window) => {
                 configure_main_window_close(&window);
+                ensure_window_on_screen(&window);
                 Some(window)
             }
             Err(error) => {
@@ -57,6 +58,34 @@ fn focus_or_create_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+/// Restored window positions can land entirely off-screen (a disconnected
+/// display, or stale saved state). Re-center the window when no monitor
+/// contains its title-bar area, so the app never launches invisible.
+fn ensure_window_on_screen(window: &tauri::WebviewWindow) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let Ok(monitors) = window.available_monitors() else {
+        return;
+    };
+    let probe_x = position.x + (size.width as i32) / 2;
+    let probe_y = position.y + 20;
+    let visible = monitors.iter().any(|monitor| {
+        let origin = monitor.position();
+        let extent = monitor.size();
+        probe_x >= origin.x
+            && probe_x < origin.x + extent.width as i32
+            && probe_y >= origin.y
+            && probe_y < origin.y + extent.height as i32
+    });
+    if !visible {
+        let _ = window.center();
     }
 }
 
@@ -177,6 +206,7 @@ pub fn run() {
             });
             if let Some(window) = app.get_webview_window("main") {
                 configure_main_window_close(&window);
+                ensure_window_on_screen(&window);
             }
             app.state::<AppLifecycle>()
                 .setup_complete

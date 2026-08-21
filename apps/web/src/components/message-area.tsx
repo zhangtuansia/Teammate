@@ -1884,9 +1884,9 @@ function MessageAreaContent({
             if (activity?.activity !== 'thinking' && activity?.activity !== 'working') return [];
             return [{
               agent,
-              // Runtime labels are deliberately limited to safe, observable states
-              // (for example "Searching web" or "Editing files"). Never surface
-              // command text, paths, tool input, or model reasoning here.
+              // Labels stay coarse observable states ("Searching web"); detail
+              // carries live context — tool target, reasoning stream — and is
+              // gated by the "show activity details" setting.
               label: activity.label || (activity.activity === 'working'
                 ? t('message.working')
                 : t('message.thinking')),

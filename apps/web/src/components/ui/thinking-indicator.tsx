@@ -16,8 +16,10 @@ export interface ThinkingIndicatorProps extends HTMLAttributes<HTMLDivElement> {
 }
 
 /**
- * Compact agent activity feedback. It reports observable runtime state only;
- * callers should not pass hidden model reasoning as `detail`.
+ * Compact agent activity feedback. `detail` carries whatever the runtime is
+ * currently doing — a tool target, a query, or the model's reasoning summary —
+ * as a single truncated line, so a long turn shows progress instead of a
+ * frozen label. It is live status, not transcript: nothing here is persisted.
  */
 export function ThinkingIndicator({
   className,

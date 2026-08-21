@@ -25,17 +25,17 @@ function describeCodexItem(item: CodexJsonEvent["item"]) {
   if (!item) return null;
   switch (item.type) {
     case "reasoning":
-      return { activity: "thinking" as const, label: "Thinking", detail: "" };
+      return { activity: "thinking" as const, label: "Thinking", detail: item.text || "" };
     case "agent_message":
       return { activity: "thinking" as const, label: "Preparing response", detail: "" };
     case "command_execution":
-      return { activity: "working" as const, label: "Running command", detail: "" };
+      return { activity: "working" as const, label: "Running command", detail: item.command || "" };
     case "file_change":
       return { activity: "working" as const, label: "Editing files", detail: "" };
     case "mcp_tool_call":
-      return { activity: "working" as const, label: "Using a tool", detail: "" };
+      return { activity: "working" as const, label: "Using a tool", detail: item.name || "" };
     case "web_search":
-      return { activity: "working" as const, label: "Searching web", detail: "" };
+      return { activity: "working" as const, label: "Searching web", detail: item.query || "" };
     case "todo_list":
       return { activity: "working" as const, label: "Updating plan", detail: "" };
     default:

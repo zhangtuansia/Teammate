@@ -75,6 +75,7 @@ interface DbMessage {
   sender_id: string;
   sender_type: "human" | "agent" | "system";
   content: string;
+  seq: number;
   thread_parent_id: string | null;
   created_at: string;
 }
@@ -438,6 +439,97 @@ export class Bridge {
   }
 
   /**
+   * Channels behave like Slack: teammates handle their own conversations
+   * without being re-mentioned every message. A human message reaches an
+   * unmentioned agent when it is plainly part of that agent's conversation —
+   * the agent is the only one in the channel, the message continues a thread
+   * the agent is part of, or the agent spoke in the immediately preceding
+   * flow. Mentioning a different agent always redirects the message instead.
+   */
+  private async implicitConversationReason(
+    delivery: DbMessageDelivery,
+    msg: DbMessage,
+    channelAgents: Map<string, Pick<DbAgent, "id" | "name" | "display_name">>,
+  ): Promise<string | null> {
+    if (channelAgents.size === 1 && channelAgents.has(delivery.agent_id)) {
+      return "only agent";
+    }
+    if (this.parseMentionedAgents(msg.content, channelAgents).size > 0) return null;
+
+    if (msg.thread_parent_id) {
+      const [parentResult, replyResult] = await Promise.all([
+        this.supabase
+          .from("messages")
+          .select("sender_id, sender_type")
+          .eq("id", msg.thread_parent_id)
+          .maybeSingle(),
+        this.supabase
+          .from("messages")
+          .select("id")
+          .eq("channel_id", msg.channel_id)
+          .eq("thread_parent_id", msg.thread_parent_id)
+          .eq("sender_id", delivery.agent_id)
+          .eq("sender_type", "agent")
+          .limit(1),
+      ]);
+      if (parentResult.error) throw new Error(parentResult.error.message);
+      if (replyResult.error) throw new Error(replyResult.error.message);
+      const parent = parentResult.data as { sender_id: string; sender_type: string } | null;
+      if (parent?.sender_type === "agent" && parent.sender_id === delivery.agent_id) {
+        return "their thread";
+      }
+      if (((replyResult.data || []) as unknown[]).length > 0) return "thread participant";
+      return null;
+    }
+
+    // Conversational continuation: within the last two main-flow messages, the
+    // most recent agent speaker owns the exchange. Requiring "most recent"
+    // keeps two recently active agents from both answering the same human.
+    const { data, error } = await this.supabase
+      .from("messages")
+      .select("sender_id, sender_type")
+      .eq("channel_id", msg.channel_id)
+      .is("thread_parent_id", null)
+      .lt("seq", msg.seq)
+      .order("seq", { ascending: false })
+      .limit(2);
+    if (error) throw new Error(error.message);
+    const recent = (data || []) as Array<{ sender_id: string; sender_type: string }>;
+    const lastAgentSpeaker = recent.find((row) => row.sender_type === "agent");
+    if (lastAgentSpeaker?.sender_id === delivery.agent_id) {
+      return "conversation continuation";
+    }
+    return null;
+  }
+
+  /**
+   * DMs normally rely on the runtime's own session memory. When that session
+   * is missing or belongs to another runtime (new agent, workspace reset,
+   * engine switch), prefix recent history so the agent does not greet its own
+   * conversation as a stranger.
+   */
+  private async getDmColdStartContext(delivery: DbMessageDelivery, msg: DbMessage) {
+    const { data, error } = await this.supabase
+      .from("agents")
+      .select("runtime, runtime_session_id, runtime_session_runtime, session_id")
+      .eq("id", delivery.agent_id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const stored = (data || {}) as {
+      runtime?: string | null;
+      runtime_session_id?: string | null;
+      runtime_session_runtime?: string | null;
+      session_id?: string | null;
+    };
+    const runtime = stored.runtime || "codex";
+    const hasUsableSession = stored.runtime_session_runtime === runtime
+      ? Boolean(stored.runtime_session_id)
+      : runtime === "claude-code" && !stored.runtime_session_runtime && Boolean(stored.session_id);
+    if (hasUsableSession) return "";
+    return this.getChannelContext(msg.channel_id, 10, msg.id);
+  }
+
+  /**
    * Fetch recent channel history for context.
    */
   private async getChannelContext(
@@ -747,7 +839,7 @@ export class Bridge {
         .maybeSingle(),
       this.supabase
         .from("messages")
-        .select("id, channel_id, sender_id, sender_type, content, thread_parent_id, created_at")
+        .select("id, channel_id, sender_id, sender_type, content, seq, thread_parent_id, created_at")
         .eq("id", delivery.message_id)
         .maybeSingle(),
     ]);
@@ -789,11 +881,25 @@ export class Bridge {
     let channelAgents:
       | Map<string, Pick<DbAgent, "id" | "name" | "display_name">>
       | undefined;
+    let ambientReason: string | null = null;
     if (isAgentAssignment || !isDm) {
       channelAgents = await this.loadCurrentChannelMentionAgents(delivery.channel_id);
       if (!this.parseMentionedAgents(msg.content, channelAgents).has(delivery.agent_id)) {
-        await this.finishDelivery(delivery, "skipped", "Agent was not mentioned");
-        return;
+        // Agent-authored messages stay strictly mention-driven so two agents
+        // can never talk each other into an unmentioned loop.
+        if (isAgentAssignment) {
+          await this.finishDelivery(delivery, "skipped", "Agent was not mentioned");
+          return;
+        }
+        ambientReason = await this.implicitConversationReason(delivery, msg, channelAgents);
+        if (!ambientReason) {
+          await this.finishDelivery(
+            delivery,
+            "skipped",
+            "Agent was not mentioned and the message is outside their conversations",
+          );
+          return;
+        }
       }
     }
 
@@ -806,7 +912,7 @@ export class Bridge {
     );
     const channelTarget = this.buildChannelTarget(msg.channel_id, senderName);
     const contextPrefix = isDm
-      ? ""
+      ? await this.getDmColdStartContext(delivery, msg)
       : await this.getChannelContext(msg.channel_id, 10, msg.id, channelAgents);
 
     // Recheck membership immediately before handing work to a runtime. A stale
@@ -817,18 +923,21 @@ export class Bridge {
     }
     if (!(await ensureLease())) throw new Error("Delivery lease was lost before runtime hand-off");
 
+    const receiptKind = isDm ? "" : ambientReason ? ` (${ambientReason})` : " (@mention)";
     console.log(
-      `  [${agent.display_name}] Received${isDm ? "" : " (@mention)"}: "${msg.content.substring(0, 60)}${msg.content.length > 60 ? "..." : ""}"`,
+      `  [${agent.display_name}] Received${receiptKind}: "${msg.content.substring(0, 60)}${msg.content.length > 60 ? "..." : ""}"`,
     );
     const threadTarget = msg.thread_parent_id
       ? `${channelTarget}:${msg.thread_parent_id.substring(0, 8)}`
       : channelTarget;
-    const msgHeader = `[target=${threadTarget} msg=${msg.id.substring(0, 8)} time=${msg.created_at} sender=@${senderName} type=${msg.sender_type}]`;
+    const msgHeader = `[target=${threadTarget} msg=${msg.id.substring(0, 8)} time=${msg.created_at} sender=@${senderName} type=${msg.sender_type}${ambientReason ? " delivery=unmentioned" : ""}]`;
     const prompt = contextPrefix
       ? `${contextPrefix}\n\n${msgHeader} ${msg.content}`
       : `${msgHeader} ${msg.content}`;
 
-    await this.agentManager.sendToAgent(delivery.agent_id, prompt, msg.channel_id);
+    await this.agentManager.sendToAgent(delivery.agent_id, prompt, msg.channel_id, {
+      ambient: ambientReason !== null,
+    });
     // Record this before the completion update. If that update fails, this
     // process can reclaim the row without sending the same prompt twice.
     this.rememberLocalDelivery(key);

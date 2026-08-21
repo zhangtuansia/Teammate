@@ -111,7 +111,7 @@ test("local connection contract preserves capability metadata and safe destructi
   assert.match(manager, /connection\.models\.some\(\(candidate\) => candidate\.id === model\)/);
   assert.match(manager, /storedModel === "default"[\s\S]*current\.model/);
   assert.match(manager, /AbortSignal\.timeout\(15_000\)/);
-  assert.match(worker, /reasoning: definition\.reasoning === true/);
+  assert.match(worker, /reasoning: definition\.reasoning \?\? inferReasoningModel\(id\)/);
   assert.match(worker, /thinkingLevel: selectedModel\.reasoning \? config\.thinkingLevel : "off"/);
   assert.match(worker, /definition\.contextWindow/);
   assert.match(worker, /definition\.maxTokens/);

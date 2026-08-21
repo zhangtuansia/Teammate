@@ -275,7 +275,10 @@ for each row execute function public.validate_message_delivery_scope();
 create or replace function public.enqueue_human_message_deliveries()
 returns trigger as $$
 begin
-  if new.sender_type <> 'human' then
+  -- Human messages fan out to every agent member; agent messages fan out too
+  -- (minus the sender) so agents can @mention each other — the runtime keeps
+  -- agent-authored deliveries strictly mention-gated.
+  if new.sender_type not in ('human', 'agent') then
     return new;
   end if;
 
@@ -302,6 +305,7 @@ begin
    and workspace_member.member_id = agent.id
    and workspace_member.member_type = 'agent'
   where member.channel_id = new.channel_id
+    and agent.id <> new.sender_id
   on conflict (message_id, agent_id) do nothing;
 
   return new;

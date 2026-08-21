@@ -40,7 +40,8 @@ const CODEX_MODELS = new Set([
   "gpt-5.6-luna",
   "gpt-5.3-codex",
 ]);
-const EXPLICIT_FINAL_LABEL = /^(?:final(?: answer| response)?|最终(?:答复|回复|结果|结论))\s*[:：-]\s*/i;
+const REPLY_SENT_MARKER = /\[teammate:reply-sent\]/gi;
+const MAX_ACTIVITY_DETAIL_LENGTH = 200;
 
 function normalizeVisibleOutput(value: string) {
   return value
@@ -52,23 +53,23 @@ function normalizeVisibleOutput(value: string) {
     .trim();
 }
 
-function isEquivalentVisibleOutput(existing: string, runtimeOutput: string) {
-  const normalizedExisting = normalizeVisibleOutput(existing);
-  const normalizedRuntime = normalizeVisibleOutput(runtimeOutput);
-  if (!normalizedExisting || !normalizedRuntime) return false;
-  if (normalizedExisting === normalizedRuntime) return true;
+function normalizeActivityDetail(value: string) {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  return collapsed.length > MAX_ACTIVITY_DETAIL_LENGTH
+    ? `${collapsed.slice(0, MAX_ACTIVITY_DETAIL_LENGTH - 1)}…`
+    : collapsed;
+}
 
-  const labeledExisting = normalizedExisting.replace(EXPLICIT_FINAL_LABEL, "");
-  const labeledRuntime = normalizedRuntime.replace(EXPLICIT_FINAL_LABEL, "");
-  if (labeledExisting === labeledRuntime) return true;
-
-  const shorter = labeledExisting.length <= labeledRuntime.length
-    ? labeledExisting
-    : labeledRuntime;
-  const longer = labeledExisting.length > labeledRuntime.length
-    ? labeledExisting
-    : labeledRuntime;
-  return shorter.length >= 80 && shorter.length / longer.length >= 0.95 && longer.includes(shorter);
+/**
+ * Agents that already replied (or decided no reply is needed) end the turn
+ * with this marker so a marker-only trailing text persists nothing.
+ */
+function stripReplySentMarker(output: string) {
+  const stripped = output.replace(REPLY_SENT_MARKER, " ");
+  return {
+    claimsReplySent: stripped !== output,
+    remainder: normalizeVisibleOutput(stripped),
+  };
 }
 
 function runtimeConnectionErrorMessage(value: unknown): string | null {
@@ -103,6 +104,7 @@ interface AgentSession {
 interface QueuedMessage {
   userMessage: string;
   channelId: string | null;
+  ambient: boolean;
   resolve: () => void;
   reject: (error: Error) => void;
 }
@@ -124,6 +126,7 @@ interface ManagedRuntime {
   activeChannelId: string | null;
   pendingOutput: string;
   turnStartSeq: number | null;
+  turnAmbient: boolean;
   eventTail: Promise<void>;
   restartAfterTurn: boolean;
 }
@@ -280,11 +283,12 @@ ${agent.description || agent.display_name}
     agentId: string,
     userMessage: string,
     channelId: string | null = null,
+    options: { ambient?: boolean } = {},
   ): Promise<void> {
     const previous = this.deliveryTails.get(agentId) || Promise.resolve();
     const delivery = previous
       .catch(() => undefined)
-      .then(() => this.sendToAgentNow(agentId, userMessage, channelId));
+      .then(() => this.sendToAgentNow(agentId, userMessage, channelId, options.ambient === true));
     this.deliveryTails.set(agentId, delivery);
     try {
       await delivery;
@@ -299,6 +303,7 @@ ${agent.description || agent.display_name}
     agentId: string,
     userMessage: string,
     channelId: string | null,
+    ambient = false,
   ): Promise<void> {
     const session = this.sessions.get(agentId);
     if (!session || this.removedAgentIds.has(agentId)) {
@@ -320,11 +325,35 @@ ${agent.description || agent.display_name}
 
     const current = this.processes.get(agentId);
     if (current?.busy) {
+      // Craft-style steering: a follow-up in the same conversation joins the
+      // running turn instead of waiting behind it, when the runtime supports it.
+      const activeTurn = current.execution.activeTurn;
+      if (
+        activeTurn &&
+        current.execution.phase === "running" &&
+        channelId !== null &&
+        channelId === current.activeChannelId &&
+        current.executionAdapter.capabilities.steer
+      ) {
+        const steerOutcome = await current.executionAdapter.trySteer(userMessage, activeTurn);
+        if (steerOutcome === "accepted") {
+          if (current.execution.isCurrent(activeTurn)) {
+            current.execution.submit(
+              { userMessage, channelId, ambient, resolve: () => undefined, reject: () => undefined },
+              { midStreamBehavior: "steer", steerOutcome },
+            );
+          }
+          console.log(
+            `  [${session.displayName}] Steered follow-up into the active ${current.runtimeId} turn.`,
+          );
+          return;
+        }
+      }
       console.log(
         `  [${session.displayName}] Agent busy, queueing message (${current.execution.queueLength + 1} queued)...`,
       );
       return new Promise<void>((resolve, reject) => {
-        const payload = { userMessage, channelId, resolve, reject };
+        const payload = { userMessage, channelId, ambient, resolve, reject };
         const result = current.execution.phase === "running"
           ? current.execution.submit(payload)
           : current.execution.enqueue(payload);
@@ -370,7 +399,7 @@ ${agent.description || agent.display_name}
       this.processes.set(agentId, managed);
     }
 
-    await this.deliverMessage(agentId, managed, session, userMessage, channelId);
+    await this.deliverMessage(agentId, managed, session, userMessage, channelId, ambient);
   }
 
   getWorkspaceDir(agentId: string): string | null {
@@ -565,6 +594,7 @@ ${agent.description || agent.display_name}
       activeChannelId: null,
       pendingOutput: "",
       turnStartSeq: null,
+      turnAmbient: false,
       eventTail: Promise.resolve(),
       restartAfterTurn: false,
     };
@@ -592,6 +622,7 @@ ${agent.description || agent.display_name}
     session: AgentSession,
     userMessage: string,
     channelId: string | null,
+    ambient = false,
   ) {
     const turnStartSeq = channelId
       ? await this.loadLatestMessageSeq(channelId)
@@ -599,6 +630,7 @@ ${agent.description || agent.display_name}
     const submitted = managed.execution.submit({
       userMessage,
       channelId,
+      ambient,
       resolve: () => undefined,
       reject: () => undefined,
     }, {
@@ -615,6 +647,7 @@ ${agent.description || agent.display_name}
     managed.activeChannelId = channelId;
     managed.pendingOutput = "";
     managed.turnStartSeq = turnStartSeq;
+    managed.turnAmbient = ambient;
     console.log(
       `  [${session.displayName}] Forwarding message to ${managed.runtimeId} (${userMessage.length} chars)...`,
     );
@@ -705,7 +738,7 @@ ${agent.description || agent.display_name}
           agentId,
           event.activity,
           event.label,
-          event.detail || "",
+          normalizeActivityDetail(event.detail || ""),
         );
         break;
       case "output":
@@ -732,7 +765,10 @@ ${agent.description || agent.display_name}
           );
         }
         if (event.terminal.status === "completed") {
-          if (managed.activeChannelId && managed.pendingOutput) {
+          // Ambient turns are courtesy deliveries the agent was never asked to
+          // answer: it speaks through the CLI or stays silent, so the trailing
+          // safety net never posts for them.
+          if (managed.activeChannelId && managed.pendingOutput && !managed.turnAmbient) {
             await this.persistOutputIfNeeded(
               agentId,
               managed.activeChannelId,
@@ -796,7 +832,7 @@ ${agent.description || agent.display_name}
     const managed = this.processes.get(agentId);
     const next = managed?.execution.dequeue()?.payload;
     if (!next) return;
-    void this.sendToAgentNow(agentId, next.userMessage, next.channelId).then(
+    void this.sendToAgentNow(agentId, next.userMessage, next.channelId, next.ambient).then(
       next.resolve,
       next.reject,
     );
@@ -849,33 +885,37 @@ ${agent.description || agent.display_name}
     output: string,
     turnStartSeq: number | null,
   ) {
+    const { claimsReplySent, remainder } = stripReplySentMarker(output);
+    const visibleOutput = claimsReplySent ? remainder : output;
+
     if (turnStartSeq !== null) {
       const { data: existingMessages, error: lookupError } = await this.supabase
         .from("messages")
-        .select("id, content")
+        .select("id")
         .eq("channel_id", channelId)
         .eq("sender_id", agentId)
         .eq("sender_type", "agent")
         .gt("seq", turnStartSeq)
-        .order("seq", { ascending: false })
-        .limit(50);
+        .limit(1);
       if (lookupError) {
         console.error(`  [${agentId}] Could not check visible runtime output: ${lookupError.message}`);
-      } else if (
-        ((existingMessages || []) as Array<{ content?: string | null }>).some(
-          (message) => typeof message.content === "string" &&
-            isEquivalentVisibleOutput(message.content, output),
-        )
-      ) {
+      } else if (((existingMessages || []) as unknown[]).length > 0) {
+        // The CLI is the agent's voice in the channel. Once it spoke there this
+        // turn, the trailing runtime text is addressed to the harness — closing
+        // narration, notes to self — and never a second chat message. Trailing
+        // text is only persisted as a safety net for turns where the agent
+        // produced an answer without ever reaching the channel.
         return;
       }
     }
+
+    if (!visibleOutput) return;
 
     const { error } = await this.supabase.from("messages").insert({
       channel_id: channelId,
       sender_id: agentId,
       sender_type: "agent",
-      content: output,
+      content: visibleOutput,
     });
     if (error) {
       console.error(`  [${agentId}] Could not save runtime output: ${error.message}`);
@@ -951,7 +991,15 @@ ${agent.description || agent.display_name}
     detail = "",
   ) {
     const managed = this.processes.get(agentId);
+    let repeatsInProgressState = false;
     if (managed) {
+      // Codex reports item.started and item.completed for the same step, so an
+      // unchanged in-progress tuple would otherwise broadcast the same line twice.
+      repeatsInProgressState =
+        (activity === "thinking" || activity === "working") &&
+        managed.activity === activity &&
+        managed.activityLabel === label &&
+        managed.activityDetail === detail;
       managed.activity = activity;
       managed.activityLabel = label;
       managed.activityDetail = detail;
@@ -966,6 +1014,7 @@ ${agent.description || agent.display_name}
         managed.heartbeatTimer = null;
       }
     }
+    if (repeatsInProgressState) return;
     this.sendActivity(agentId, activity, label, detail);
   }
 
