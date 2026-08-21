@@ -18,6 +18,15 @@ const MAX_LOCAL_DELIVERY_GUARDS = 10_000;
 // These have to stay mechanical: prompt etiquette alone cannot bound a loop.
 const AGENT_LOOP_UNCLAIMED_CAP = 8;
 const AGENT_LOOP_HARD_CAP = 20;
+// How long a teammate's last message keeps an exchange "theirs". Past this the
+// channel is quiet again and a new message belongs to the whole room.
+const EXCHANGE_ACTIVE_MS = 10 * 60_000;
+// A message to the room reaches everyone, but not all at once: the teammates
+// most recently present answer first, and the rest are only pulled in if the
+// room stays silent. Two agents behave exactly as before; twenty do not each
+// burn a turn on "morning". Scales without anyone configuring a number.
+const ROOM_FANOUT_WIDTH = 3;
+const ROOM_FANOUT_INTERVAL_MS = 25_000;
 // Proactive owed-work nudges: an assigned task nobody started is the one
 // unambiguous "this is your job" signal in the workspace, so it needs no
 // classifier. The cooldown and cap bound the cost of an agent that keeps
@@ -504,19 +513,119 @@ export class Bridge {
     // keeps two recently active agents from both answering the same human.
     const { data, error } = await this.supabase
       .from("messages")
-      .select("sender_id, sender_type")
+      .select("sender_id, sender_type, created_at")
       .eq("channel_id", msg.channel_id)
       .is("thread_parent_id", null)
       .lt("seq", msg.seq)
       .order("seq", { ascending: false })
       .limit(2);
     if (error) throw new Error(error.message);
-    const recent = (data || []) as Array<{ sender_id: string; sender_type: string }>;
-    const lastAgentSpeaker = recent.find((row) => row.sender_type === "agent");
+    const recent = (data || []) as Array<{
+      created_at: string;
+      sender_id: string;
+      sender_type: string;
+    }>;
+    const cutoff = Date.parse(msg.created_at) - EXCHANGE_ACTIVE_MS;
+    const lastAgentSpeaker = recent.find(
+      (row) => row.sender_type === "agent" && Date.parse(row.created_at) >= cutoff,
+    );
     if (lastAgentSpeaker?.sender_id === delivery.agent_id) {
       return "conversation continuation";
     }
     return null;
+  }
+
+  /**
+   * Which wave of the room fan-out this teammate belongs to. Whoever spoke in
+   * the channel most recently is treated as most present and goes first; those
+   * who have never spoken here are asked last.
+   */
+  private async roomFanoutWave(
+    delivery: DbMessageDelivery,
+    msg: DbMessage,
+    channelAgents: Map<string, Pick<DbAgent, "id" | "name" | "display_name">>,
+  ) {
+    if (channelAgents.size <= ROOM_FANOUT_WIDTH) return 0;
+    const { data, error } = await this.supabase
+      .from("messages")
+      .select("sender_id, seq")
+      .eq("channel_id", msg.channel_id)
+      .eq("sender_type", "agent")
+      .lt("seq", msg.seq)
+      .order("seq", { ascending: false })
+      .limit(200);
+    if (error) throw new Error(error.message);
+    const lastSpoke = new Map<string, number>();
+    for (const row of (data || []) as Array<{ sender_id: string; seq: number }>) {
+      if (!lastSpoke.has(row.sender_id)) lastSpoke.set(row.sender_id, Number(row.seq));
+    }
+    const ordered = [...channelAgents.keys()].sort((left, right) => {
+      const difference = (lastSpoke.get(right) ?? -1) - (lastSpoke.get(left) ?? -1);
+      // Ties (nobody has spoken) fall back to a stable order so every bridge
+      // process and restart computes the same waves.
+      return difference !== 0 ? difference : left.localeCompare(right);
+    });
+    const position = ordered.indexOf(delivery.agent_id);
+    return position < 0 ? 0 : Math.floor(position / ROOM_FANOUT_WIDTH);
+  }
+
+  /** True once any agent has spoken after this message. */
+  private async someoneAnswered(msg: DbMessage) {
+    const { data, error } = await this.supabase
+      .from("messages")
+      .select("id")
+      .eq("channel_id", msg.channel_id)
+      .eq("sender_type", "agent")
+      .gt("seq", msg.seq)
+      .limit(1);
+    if (error) throw new Error(error.message);
+    return ((data || []) as unknown[]).length > 0;
+  }
+
+  /**
+   * Hand a claimed delivery back for a later wave. Waiting is not a failed
+   * attempt, so the retry budget the claim consumed is returned — otherwise a
+   * teammate in the third wave would exhaust it before ever being asked.
+   */
+  private async deferDelivery(delivery: DbMessageDelivery, readyAtMs: number) {
+    const { error } = await this.supabase
+      .from("message_deliveries")
+      .update({
+        status: "pending",
+        attempts: Math.max(0, delivery.attempts - 1),
+        claim_token: null,
+        claimed_by: null,
+        lease_expires_at: null,
+        next_attempt_at: new Date(readyAtMs).toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("message_id", delivery.message_id)
+      .eq("agent_id", delivery.agent_id)
+      .eq("server_id", this.config.serverId)
+      .eq("claim_token", delivery.claim_token);
+    if (error) throw new Error(error.message);
+  }
+
+  /**
+   * True when a teammate is still visibly in conversation here, so a follow-up
+   * belongs to them rather than to the room. Conversations go cold: an agent
+   * who answered an hour ago is not "mid-exchange", and someone returning to a
+   * quiet channel should be heard by everyone in it.
+   */
+  private async exchangeIsUnderway(msg: DbMessage) {
+    const { data, error } = await this.supabase
+      .from("messages")
+      .select("sender_type, created_at")
+      .eq("channel_id", msg.channel_id)
+      .is("thread_parent_id", null)
+      .lt("seq", msg.seq)
+      .order("seq", { ascending: false })
+      .limit(2);
+    if (error) throw new Error(error.message);
+    const cutoff = Date.parse(msg.created_at) - EXCHANGE_ACTIVE_MS;
+    return ((data || []) as Array<{ sender_type: string; created_at: string }>).some(
+      (row) => row.sender_type === "agent" && Date.parse(row.created_at) >= cutoff,
+    );
   }
 
   /**
@@ -1026,21 +1135,58 @@ export class Bridge {
     let ambientReason: string | null = null;
     if (isAgentAssignment || !isDm) {
       channelAgents = await this.loadCurrentChannelMentionAgents(delivery.channel_id);
-      if (!this.parseMentionedAgents(msg.content, channelAgents).has(delivery.agent_id)) {
-        // Agent-authored messages stay strictly mention-driven so two agents
-        // can never talk each other into an unmentioned loop.
-        if (isAgentAssignment) {
-          await this.finishDelivery(delivery, "skipped", "Agent was not mentioned");
+      const mentioned = this.parseMentionedAgents(msg.content, channelAgents);
+      if (!mentioned.has(delivery.agent_id)) {
+        // A mention redirects: naming one teammate keeps the rest out of it.
+        if (mentioned.size > 0) {
+          await this.finishDelivery(delivery, "skipped", "Another teammate was named");
           return;
         }
-        ambientReason = await this.implicitConversationReason(delivery, msg, channelAgents);
-        if (!ambientReason) {
-          await this.finishDelivery(
-            delivery,
-            "skipped",
-            "Agent was not mentioned and the message is outside their conversations",
-          );
-          return;
+        // Nobody was named. A person talking to the room reaches everyone in
+        // it — deciding whether a message is "for you" is the teammate's job,
+        // not a rule applied before they ever see it. Silence when someone
+        // reaches out is the worst outcome this system can produce.
+        // Agent-authored messages stay narrower: they reach a teammate whose
+        // conversation they continue, and the loop guard bounds the run.
+        if (isAgentAssignment) {
+          ambientReason = await this.implicitConversationReason(delivery, msg, channelAgents);
+          if (!ambientReason) {
+            await this.finishDelivery(
+              delivery,
+              "skipped",
+              "Agent message outside this teammate's conversations",
+            );
+            return;
+          }
+        } else {
+          const mine = await this.implicitConversationReason(delivery, msg, channelAgents);
+          if (mine) {
+            ambientReason = mine;
+          } else if (msg.thread_parent_id || (await this.exchangeIsUnderway(msg))) {
+            // Someone else is already mid-conversation here (or this belongs to
+            // a thread that is not yours). Interrupting is what a person would
+            // not do; the room case below is what they would.
+            await this.finishDelivery(
+              delivery,
+              "skipped",
+              "Another teammate is mid-conversation here",
+            );
+            return;
+          } else {
+            const wave = await this.roomFanoutWave(delivery, msg, channelAgents);
+            if (wave > 0) {
+              const readyAt = Date.parse(msg.created_at) + wave * ROOM_FANOUT_INTERVAL_MS;
+              if (Date.now() < readyAt) {
+                await this.deferDelivery(delivery, readyAt);
+                return;
+              }
+              if (await this.someoneAnswered(msg)) {
+                await this.finishDelivery(delivery, "skipped", "A teammate already answered");
+                return;
+              }
+            }
+            ambientReason = "in the room";
+          }
         }
       }
       if (isAgentAssignment) {

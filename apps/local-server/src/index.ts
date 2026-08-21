@@ -6174,7 +6174,9 @@ function enforceAgentMessageGates(row: DbRow) {
     .join("\n");
   throw new LocalRequestError(
     409,
-    `HELD: ${newer.length} newer message(s) landed after what you last saw. Read them, reconsider your reply, then send again — an unchanged send now goes through if it is still right.\n${held}`,
+    `HELD: ${newer.length} newer message(s) landed while you were composing. Read them first.\n${held}\n` +
+      "If a teammate already covered this, drop your draft and stay quiet. " +
+      "If something is still missing, send only that part — resending as-is now goes through, so make sure it still adds something.",
   );
 }
 

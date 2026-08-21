@@ -481,9 +481,12 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
       expected_channel_description: channelInfo.description,
     });
 
-    const cold = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "anyone seen the report?");
+    // A person talking to the room reaches every teammate in it; who answers
+    // is their judgment, not a rule applied before they see the message.
+    const toTheRoom = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "anyone seen the report?");
     await drain(bridge);
-    assert.equal((await loadDelivery(client, cold.id))?.status, "skipped");
+    assert.equal((await loadDelivery(client, toTheRoom.id))?.status, "completed");
+    assert.match(prompts.at(-1) || "", /delivery=unmentioned/);
 
     // After the agent speaks in the flow, the human's follow-up continues
     // their conversation without a new mention.
@@ -535,6 +538,161 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     );
     await drain(bridge);
     assert.equal((await loadDelivery(client, agentChatter.id))?.status, "skipped");
+  });
+});
+
+test("a person talking to a quiet room reaches every teammate in it", async () => {
+  await withLocalHarness(async ({ client, baseUrl , databasePath }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    const channelRow = await client
+      .from("channels")
+      .select("name, description")
+      .eq("id", LOCAL_CHANNEL_ID)
+      .single();
+    assertQuery(channelRow);
+    const info = channelRow.data as { name: string; description: string | null };
+    await localRpc(client, "set_channel_agent_members", {
+      channel_uuid: LOCAL_CHANNEL_ID,
+      agent_ids: [LOCAL_AGENT_ID, created.agent.id],
+      channel_name: info.name,
+      channel_description: info.description,
+      expected_agent_ids: [LOCAL_AGENT_ID],
+      expected_channel_name: info.name,
+      expected_channel_description: info.description,
+    });
+
+    // The regression this guards: an unmentioned greeting used to be dropped
+    // for every agent, so a person reaching out met silence.
+    // Every agent member gets a row, and this bridge's agent takes its own.
+    // (Helper is not managed here, so only its row's existence is checked.)
+    const greeting = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "大家都在嘛");
+    const helperRow = await client
+      .from("message_deliveries")
+      .select("status")
+      .eq("message_id", greeting.id)
+      .eq("agent_id", created.agent.id)
+      .maybeSingle();
+    assertQuery(helperRow);
+    assert.ok(helperRow.data, "every agent member should be queued for a room message");
+
+    const bridge = deliveryBridge(client, async () => undefined);
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, greeting.id))?.status, "completed");
+
+    // Once a teammate is mid-exchange, the follow-up is theirs alone.
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "在的，我看看。");
+    const followUp = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "那你查一下吧");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "skipped");
+    assert.match(
+      (await loadDelivery(client, followUp.id))?.last_error || "",
+      /mid-conversation/,
+    );
+
+    // Conversations go cold. Once the exchange is old, a new message belongs
+    // to the room again instead of staying reserved for whoever spoke last.
+    const raw = new DatabaseSync(databasePath);
+    raw.exec("PRAGMA busy_timeout = 5000");
+    try {
+      raw.prepare("UPDATE messages SET created_at = ? WHERE channel_id = ? AND sender_type = 'agent'")
+        .run(new Date(Date.now() - 30 * 60_000).toISOString(), LOCAL_CHANNEL_ID);
+    } finally {
+      raw.close();
+    }
+    const laterTopic = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "另外问个别的事");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, laterTopic.id))?.status, "completed");
+  });
+});
+
+test("a crowded room answers in waves instead of waking everyone at once", async () => {
+  await withLocalHarness(async ({ client, baseUrl , databasePath }) => {
+    const helpers: string[] = [];
+    for (const name of ["Helper A", "Helper B", "Helper C"]) {
+      const created = await localApi<{ agent: { id: string } }>(
+        baseUrl,
+        "/api/agents",
+        "POST",
+        { display_name: name, server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+      );
+      helpers.push(created.agent.id);
+    }
+    const channelRow = await client
+      .from("channels")
+      .select("name, description")
+      .eq("id", LOCAL_CHANNEL_ID)
+      .single();
+    assertQuery(channelRow);
+    const info = channelRow.data as { name: string; description: string | null };
+    await localRpc(client, "set_channel_agent_members", {
+      channel_uuid: LOCAL_CHANNEL_ID,
+      agent_ids: [LOCAL_AGENT_ID, ...helpers],
+      channel_name: info.name,
+      channel_description: info.description,
+      expected_agent_ids: [LOCAL_AGENT_ID],
+      expected_channel_name: info.name,
+      expected_channel_description: info.description,
+    });
+
+    // The three helpers have been active here and this bridge's agent has not,
+    // so they take the first wave and it waits for the second. Their messages
+    // are then aged out so the room reads as quiet rather than mid-exchange.
+    for (const [index, helper] of helpers.entries()) {
+      await insertAgentMessage(client, LOCAL_CHANNEL_ID, helper, `helper note ${index}`);
+    }
+    const raw = new DatabaseSync(databasePath);
+    raw.exec("PRAGMA busy_timeout = 5000");
+    try {
+      raw.prepare("UPDATE messages SET created_at = ? WHERE channel_id = ? AND sender_type = 'agent'")
+        .run(new Date(Date.now() - 30 * 60_000).toISOString(), LOCAL_CHANNEL_ID);
+    } finally {
+      raw.close();
+    }
+
+    const greeting = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "早上好呀");
+    const bridge = deliveryBridge(client, async () => undefined);
+    await drain(bridge);
+    const deferred = await loadDelivery(client, greeting.id);
+    assert.equal(deferred?.status, "pending");
+    assert.equal(deferred?.attempts, 0, "waiting for a wave must not spend a retry");
+    assert.ok(
+      Date.parse(deferred?.next_attempt_at || "") > Date.now(),
+      "the later wave should be scheduled into the future",
+    );
+
+    // Nobody answered, so once the wave comes due the message still arrives.
+    // The wave clock runs from the message, so age the message itself.
+    const ageMessage = (id: string) => {
+      const handle = new DatabaseSync(databasePath);
+      handle.exec("PRAGMA busy_timeout = 5000");
+      try {
+        handle.prepare("UPDATE messages SET created_at = ? WHERE id = ?")
+          .run(new Date(Date.now() - 60_000).toISOString(), id);
+        handle.prepare(
+          "UPDATE message_deliveries SET next_attempt_at = ? WHERE message_id = ? AND agent_id = ?",
+        ).run(new Date(Date.now() - 1_000).toISOString(), id, LOCAL_AGENT_ID);
+      } finally {
+        handle.close();
+      }
+    };
+    ageMessage(greeting.id);
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, greeting.id))?.status, "completed");
+
+    // With an answer already in the channel, a due wave stands down.
+    const second = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "再问一句");
+    await drain(bridge);
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, helpers[0], "我来回答。");
+    ageMessage(second.id);
+    await drain(bridge);
+    const stoodDown = await loadDelivery(client, second.id);
+    assert.equal(stoodDown?.status, "skipped");
+    assert.match(stoodDown?.last_error || "", /already answered/);
   });
 });
 
