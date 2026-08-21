@@ -157,6 +157,13 @@ export class ExecutionSession<Payload, ThinkingLevel extends string = string> {
     return this.queue.shift() ?? null;
   }
 
+  /** Read the next queued payload without removing it. Null when the session
+   * is not idle, mirroring dequeue's guard. */
+  peekQueue(): Payload | null {
+    if (this.phaseValue !== "idle") return null;
+    return this.queue[0]?.payload ?? null;
+  }
+
   armWatchdog(
     turn: ExecutionTurnRef,
     timeoutMs: number,

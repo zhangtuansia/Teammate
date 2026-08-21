@@ -14,6 +14,19 @@ const DELIVERY_LEASE_MS = 5 * 60_000;
 const DELIVERY_LEASE_RENEW_MS = 30_000;
 const DELIVERY_POLL_MS = 2_000;
 const MAX_LOCAL_DELIVERY_GUARDS = 10_000;
+// Loop floors for agent-to-agent mention chains (see agentLoopGuardReason).
+// These have to stay mechanical: prompt etiquette alone cannot bound a loop.
+const AGENT_LOOP_UNCLAIMED_CAP = 8;
+const AGENT_LOOP_HARD_CAP = 20;
+// Proactive owed-work nudges: an assigned task nobody started is the one
+// unambiguous "this is your job" signal in the workspace, so it needs no
+// classifier. The cooldown and cap bound the cost of an agent that keeps
+// declining; a task that moves earns a fresh budget.
+const OWED_TASK_SCAN_MS = 60_000;
+const OWED_TASK_STALL_MS = 5 * 60_000;
+const OWED_TASK_NUDGE_COOLDOWN_MS = 30 * 60_000;
+const OWED_TASK_NUDGE_CAP = 3;
+const OWED_TASK_NUDGE_BATCH = 3;
 
 function hasHiddenPathSegment(filePath: string) {
   return filePath
@@ -65,6 +78,7 @@ interface BridgeConfig {
   arch?: string;
   localMode?: boolean;
   localServerUrl?: string;
+  attachmentsDir?: string;
   apiKey?: string;
   refreshAgentAuthTokens?: () => Promise<Record<string, string>>;
 }
@@ -140,6 +154,8 @@ export class Bridge {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private lastHeartbeatErrorLogAt = 0;
   private deliveryPollInterval: ReturnType<typeof setInterval> | null = null;
+  private owedWorkInterval: ReturnType<typeof setInterval> | null = null;
+  private owedWorkScanning = false;
   private deliveryPumpPromise: Promise<void> | null = null;
   private deliveryPumpRequested = false;
   private readonly bridgeInstanceId = randomUUID();
@@ -173,6 +189,7 @@ export class Bridge {
       config.apiKey || "",
       config.agentAuthTokens ?? {},
       config.refreshAgentAuthTokens,
+      { ...(config.attachmentsDir ? { attachmentsDir: config.attachmentsDir } : {}) },
     );
   }
 
@@ -503,6 +520,48 @@ export class Bridge {
   }
 
   /**
+   * Deterministic floor under agent-to-agent mentions, adapted from Cumora's
+   * loop floors: prompt etiquette shapes behavior, but only a mechanical cap
+   * guarantees two agents cannot mention-bounce forever. Counts the unbroken
+   * run of agent messages since a human last spoke in the channel; an
+   * in-progress task raises the ceiling because owned work legitimately needs
+   * longer agent exchanges.
+   */
+  private async agentLoopGuardReason(
+    delivery: DbMessageDelivery,
+    msg: DbMessage,
+  ): Promise<string | null> {
+    const { data, error } = await this.supabase
+      .from("messages")
+      .select("sender_type")
+      .eq("channel_id", msg.channel_id)
+      .lte("seq", msg.seq)
+      .order("seq", { ascending: false })
+      .limit(AGENT_LOOP_HARD_CAP + 1);
+    if (error) throw new Error(error.message);
+    const rows = (data || []) as Array<{ sender_type: string }>;
+    let runLength = 0;
+    for (const row of rows) {
+      if (row.sender_type === "human") break;
+      if (row.sender_type === "agent") runLength += 1;
+    }
+    if (runLength < AGENT_LOOP_UNCLAIMED_CAP) return null;
+    if (runLength >= AGENT_LOOP_HARD_CAP) {
+      return "Agent-only exchange reached the hard loop cap; waiting for a human to weigh in";
+    }
+    const { data: activeTask, error: taskError } = await this.supabase
+      .from("tasks")
+      .select("id")
+      .eq("channel_id", msg.channel_id)
+      .eq("status", "in_progress")
+      .is("archived_at", null)
+      .limit(1);
+    if (taskError) throw new Error(taskError.message);
+    if (((activeTask || []) as unknown[]).length > 0) return null;
+    return "Agent-only exchange with no in-progress task wound down by the loop guard";
+  }
+
+  /**
    * DMs normally rely on the runtime's own session memory. When that session
    * is missing or belongs to another runtime (new agent, workspace reset,
    * engine switch), prefix recent history so the agent does not greet its own
@@ -608,6 +667,89 @@ export class Bridge {
       void this.requestDeliveryPump();
     }, DELIVERY_POLL_MS);
     void this.requestDeliveryPump();
+
+    if (this.owedWorkInterval) clearInterval(this.owedWorkInterval);
+    this.owedWorkInterval = setInterval(() => {
+      void this.scanOwedWork().catch((error: unknown) => {
+        console.error(
+          "  Could not scan for owed work:",
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }, OWED_TASK_SCAN_MS);
+    this.owedWorkInterval.unref?.();
+  }
+
+  /**
+   * Wake agents for work that is theirs but that nobody pinged them about: a
+   * task assigned to them still sitting in `todo`. This is the proactive half
+   * of "agents are teammates" — a colleague picks up their own assignments
+   * without being reminded every time.
+   *
+   * Everything here is deterministic DB fact. Turning a nudge into a turn
+   * costs a claim (see `claim_task_nudge`), so a declining agent is asked at
+   * most `OWED_TASK_NUDGE_CAP` times per task revision.
+   */
+  private async scanOwedWork() {
+    if (this.stopping || this.owedWorkScanning || !this.config.localMode) return;
+    const agentIds = [...this.agentRecords.keys()];
+    if (agentIds.length === 0) return;
+    this.owedWorkScanning = true;
+    try {
+      const cutoff = new Date(Date.now() - OWED_TASK_STALL_MS).toISOString();
+      const { data, error } = await this.supabase
+        .from("tasks")
+        .select("id, task_number, title, channel_id, assignee_id, updated_at")
+        .eq("assignee_type", "agent")
+        .in("assignee_id", agentIds)
+        .eq("status", "todo")
+        .is("archived_at", null)
+        .lt("updated_at", cutoff)
+        .order("updated_at", { ascending: true })
+        .limit(OWED_TASK_NUDGE_BATCH * 4);
+      if (error) throw new Error(error.message);
+      const tasks = (data || []) as Array<{
+        id: string;
+        task_number: number;
+        title: string;
+        channel_id: string;
+        assignee_id: string;
+        updated_at: string;
+      }>;
+
+      let nudged = 0;
+      for (const task of tasks) {
+        if (this.stopping || nudged >= OWED_TASK_NUDGE_BATCH) break;
+        const agent = this.agentRecords.get(task.assignee_id);
+        if (!agent || this.agentManager.isBusy(task.assignee_id)) continue;
+        if (!(await this.isCurrentChannelAgent(task.assignee_id, task.channel_id))) continue;
+
+        const claim = await this.supabase.rpc("claim_task_nudge", {
+          task_uuid: task.id,
+          agent_uuid: task.assignee_id,
+          task_updated_at: task.updated_at,
+          cooldown_ms: OWED_TASK_NUDGE_COOLDOWN_MS,
+          max_nudges: OWED_TASK_NUDGE_CAP,
+        });
+        if (claim.error) throw new Error(claim.error.message);
+        if (!(claim.data as { claimed?: boolean } | null)?.claimed) continue;
+
+        nudged += 1;
+        const target = this.buildChannelTarget(task.channel_id);
+        const prompt =
+          `[target=${target} time=${new Date().toISOString()} sender=@teammate type=system delivery=owed-work]\n` +
+          `Task #${task.task_number} "${task.title}" is assigned to you and still unstarted. ` +
+          `If you can take it, claim it with \`teammate task claim ${task.task_number}\` and do the work. ` +
+          `If you cannot — blocked, missing input, or it is not really yours — say so once in ${target} and reassign or leave it. ` +
+          `Nobody is waiting on a reply to this notice itself.`;
+        console.log(`  [${agent.display_name}] Owed work: task #${task.task_number}.`);
+        await this.agentManager.sendToAgent(task.assignee_id, prompt, task.channel_id, {
+          ambient: true,
+        });
+      }
+    } finally {
+      this.owedWorkScanning = false;
+    }
   }
 
   /** Coalesce Realtime and polling wake-ups into one queue drain. */
@@ -901,6 +1043,13 @@ export class Bridge {
           return;
         }
       }
+      if (isAgentAssignment) {
+        const loopGuard = await this.agentLoopGuardReason(delivery, msg);
+        if (loopGuard) {
+          await this.finishDelivery(delivery, "skipped", loopGuard);
+          return;
+        }
+      }
     }
 
     this.channelTypes.set(channel.id, channel.type);
@@ -931,12 +1080,25 @@ export class Bridge {
       ? `${channelTarget}:${msg.thread_parent_id.substring(0, 8)}`
       : channelTarget;
     const msgHeader = `[target=${threadTarget} msg=${msg.id.substring(0, 8)} time=${msg.created_at} sender=@${senderName} type=${msg.sender_type}${ambientReason ? " delivery=unmentioned" : ""}]`;
-    const prompt = contextPrefix
-      ? `${contextPrefix}\n\n${msgHeader} ${msg.content}`
-      : `${msgHeader} ${msg.content}`;
+    const body = `${msgHeader} ${msg.content}`;
+    const prompt = contextPrefix ? `${contextPrefix}\n\n${body}` : body;
+
+    if (this.config.localMode) {
+      // "Shown ⇒ seen": the send-time freshness gate compares against what
+      // this delivery is about to show the agent.
+      const seen = await this.supabase.rpc("record_channel_seen", {
+        channel_uuid: msg.channel_id,
+        agent_uuid: delivery.agent_id,
+        seq: msg.seq,
+      });
+      if (seen.error) {
+        console.error(`  Could not record the seen baseline: ${seen.error.message}`);
+      }
+    }
 
     await this.agentManager.sendToAgent(delivery.agent_id, prompt, msg.channel_id, {
       ambient: ambientReason !== null,
+      body,
     });
     // Record this before the completion update. If that update fails, this
     // process can reclaim the row without sending the same prompt twice.
@@ -1528,6 +1690,10 @@ export class Bridge {
   }
 
   private async stopInternal() {
+    if (this.owedWorkInterval) {
+      clearInterval(this.owedWorkInterval);
+      this.owedWorkInterval = null;
+    }
     if (this.deliveryPollInterval) {
       clearInterval(this.deliveryPollInterval);
       this.deliveryPollInterval = null;

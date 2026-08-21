@@ -55,16 +55,40 @@ let continuationPending = false;
 // buffer; a per-turn ticker rebroadcasts the accumulated tail once per second,
 // so bursts and steady streams alike surface without flooding the log.
 const STREAM_ACTIVITY_INTERVAL_MS = 1_000;
+type StreamKind = "text" | "toolcall";
 let streamActivity: "thinking" | "working" = "thinking";
 let streamLabel = "";
+let streamKind: StreamKind = "text";
 let streamBuffer = "";
 let streamDirty = false;
 let streamTimer: ReturnType<typeof setInterval> | null = null;
+/** Set once the agent has spoken in the channel this turn. Whatever the model
+ * writes afterwards is closing narration that never becomes a message, so it
+ * must not reappear as a second "thinking" phase after the reply lands. */
+let repliedThisTurn = false;
+/** Tool calls that are the agent speaking, so their completion can retire the
+ * activity indicator the moment the message lands rather than leaving it up
+ * through the model's wrap-up. */
+const replyToolCalls = new Set<string>();
+
+/** Tool arguments stream as raw JSON. Surface the command being typed rather
+ * than the `{"command":"…` envelope around it. */
+function readableStreamDetail(buffer: string, kind: StreamKind) {
+  if (kind !== "toolcall") return buffer;
+  const command = buffer.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  return (command ? command[1] : buffer)
+    .replace(/\\[nrt]/g, " ")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
 
 function flushStreamActivity() {
   if (!streamDirty) return;
   streamDirty = false;
-  const detail = streamBuffer.replace(/\s+/g, " ").trim().slice(-200);
+  const detail = readableStreamDetail(streamBuffer, streamKind)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(-200);
   if (!detail) return;
   sendEvent({ type: "activity", activity: streamActivity, label: streamLabel, detail });
 }
@@ -92,10 +116,12 @@ function pushStreamDelta(
   activity: "thinking" | "working",
   label: string,
   delta: string,
+  kind: StreamKind = "text",
 ) {
   if (label !== streamLabel) {
     streamActivity = activity;
     streamLabel = label;
+    streamKind = kind;
     streamBuffer = "";
   }
   streamBuffer += delta;
@@ -247,34 +273,56 @@ function handleAgentEvent(event: AgentEvent) {
   switch (event.type) {
     case "agent_start":
       startStreamActivity();
+      repliedThisTurn = false;
+      replyToolCalls.clear();
       sendEvent({ type: "activity", activity: "thinking", label: "Thinking" });
       break;
     case "message_update":
       if (event.assistantMessageEvent.type === "thinking_delta") {
-        pushStreamDelta("thinking", "Thinking", event.assistantMessageEvent.delta);
+        if (!repliedThisTurn) {
+          pushStreamDelta("thinking", "Thinking", event.assistantMessageEvent.delta);
+        }
       } else if (event.assistantMessageEvent.type === "text_delta") {
-        pushStreamDelta("thinking", "Preparing response", event.assistantMessageEvent.delta);
+        if (!repliedThisTurn) {
+          pushStreamDelta("thinking", "Preparing response", event.assistantMessageEvent.delta);
+        }
       } else if (event.assistantMessageEvent.type === "toolcall_delta") {
-        // Replies travel as CLI tool calls, so the streaming reply text lives in
-        // the accumulating command arguments. Lightly unescape for display.
+        // Replies travel as CLI tool calls, so the streaming reply text lives
+        // in the accumulating command arguments.
         pushStreamDelta(
           "working",
           "Working",
-          event.assistantMessageEvent.delta.replace(/\\n/g, " ").replace(/\\"/g, '"'),
+          event.assistantMessageEvent.delta,
+          "toolcall",
         );
       }
       break;
-    case "tool_execution_start":
+    case "tool_execution_start": {
       // Providers often deliver the whole tool call in a sub-second burst, so
       // surface whatever streamed before the ticker could catch it.
       flushStreamActivity();
       resetStreamActivity();
+      const command = typeof event.args?.command === "string" ? event.args.command : "";
+      if (/\bteammate\s+message\s+send\b/.test(command)) {
+        repliedThisTurn = true;
+        replyToolCalls.add(event.toolCallId);
+      }
       sendEvent({
         type: "activity",
         activity: "working",
         label: "Working",
         detail: event.toolName,
       });
+      break;
+    }
+    case "tool_execution_end":
+      // The message is in the channel now. Whatever the model writes next is
+      // closing narration nobody sees, so stop implying it is still talking;
+      // genuine follow-up work lights the indicator again on its own.
+      if (replyToolCalls.delete(event.toolCallId)) {
+        resetStreamActivity();
+        sendEvent({ type: "activity", activity: "idle", label: "Idle" });
+      }
       break;
     case "agent_end":
       stopStreamActivity();

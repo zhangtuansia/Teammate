@@ -203,6 +203,31 @@ async function insertHumanMessage(client: LocalClient, channelId = LOCAL_DM_ID, 
   return result.data as { id: string; seq: number };
 }
 
+/** Agent sends face the coordination gates; a HELD send advances the seen
+ * baseline, so one plain retry goes through — same contract agents live by. */
+async function insertAgentMessage(
+  client: LocalClient,
+  channelId: string,
+  senderId: string,
+  content: string,
+) {
+  const insert = () => client
+    .from("messages")
+    .insert({
+      channel_id: channelId,
+      sender_id: senderId,
+      sender_type: "agent",
+      content,
+    })
+    .select("id")
+    .single();
+  let result = await insert();
+  if (result.error?.message.startsWith("HELD:")) result = await insert();
+  assertQuery(result);
+  assert.ok(result.data);
+  return result.data as { id: string };
+}
+
 async function loadDelivery(client: LocalClient, messageId: string) {
   const result = await client
     .from("message_deliveries")
@@ -225,7 +250,7 @@ function deliveryBridge(
     localMode: true,
   });
   Reflect.set(bridge, "supabase", client as unknown as SupabaseClient);
-  Reflect.set(bridge, "agentManager", { sendToAgent });
+  Reflect.set(bridge, "agentManager", { sendToAgent, isBusy: () => false });
   Reflect.set(bridge, "agentRecords", new Map([[LOCAL_AGENT_ID, {
     id: LOCAL_AGENT_ID,
     name: "local-assistant",
@@ -462,12 +487,7 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
 
     // After the agent speaks in the flow, the human's follow-up continues
     // their conversation without a new mention.
-    assertQuery(await client.from("messages").insert({
-      channel_id: LOCAL_CHANNEL_ID,
-      sender_id: LOCAL_AGENT_ID,
-      sender_type: "agent",
-      content: "On it — checking the report now.",
-    }));
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, LOCAL_AGENT_ID, "On it — checking the report now.");
     const followUp = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "great, ping me when done");
     await drain(bridge);
     assert.equal((await loadDelivery(client, followUp.id))?.status, "completed");
@@ -480,26 +500,20 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     assert.equal((await loadDelivery(client, redirected.id))?.status, "skipped");
 
     // When another agent spoke more recently, they own the exchange.
-    assertQuery(await client.from("messages").insert({
-      channel_id: LOCAL_CHANNEL_ID,
-      sender_id: created.agent.id,
-      sender_type: "agent",
-      content: "Sure, taking it.",
-    }));
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "Sure, taking it.");
     const towardHelper = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "thanks, how long will it take?");
     await drain(bridge);
     assert.equal((await loadDelivery(client, towardHelper.id))?.status, "skipped");
 
     // Agents can @mention each other: the mentioned agent gets the delivery,
     // and the sender never receives its own message.
-    const agentMention = await client.from("messages").insert({
-      channel_id: LOCAL_CHANNEL_ID,
-      sender_id: created.agent.id,
-      sender_type: "agent",
-      content: "@Local Assistant please review the report draft",
-    }).select("id").single();
-    assertQuery(agentMention);
-    const agentMentionId = (agentMention.data as { id: string }).id;
+    const agentMention = await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "@Local Assistant please review the report draft",
+    );
+    const agentMentionId = agentMention.id;
     await drain(bridge);
     assert.equal((await loadDelivery(client, agentMentionId))?.status, "completed");
     assert.match(prompts.at(-1) || "", /please review the report draft/);
@@ -513,18 +527,253 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     assert.equal(senderRow.data, null);
 
     // An unmentioned agent message never triggers other agents.
-    const agentChatter = await client.from("messages").insert({
-      channel_id: LOCAL_CHANNEL_ID,
-      sender_id: created.agent.id,
-      sender_type: "agent",
-      content: "Draft is coming along nicely.",
-    }).select("id").single();
-    assertQuery(agentChatter);
-    await drain(bridge);
-    assert.equal(
-      (await loadDelivery(client, (agentChatter.data as { id: string }).id))?.status,
-      "skipped",
+    const agentChatter = await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "Draft is coming along nicely.",
     );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, agentChatter.id))?.status, "skipped");
+  });
+});
+
+test("agent sends face the verbatim and freshness gates", async () => {
+  await withLocalHarness(async ({ client }) => {
+    // Verbatim: repeating the latest peer message is always rejected.
+    await insertHumanMessage(client, LOCAL_CHANNEL_ID, "请大家报个数");
+    const verbatim = await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: LOCAL_AGENT_ID,
+      sender_type: "agent",
+      content: "请大家报个数",
+    });
+    assertQueryError(verbatim, /HELD.*identical/i);
+
+    // A different reply passes and advances the baseline to its own seq.
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, LOCAL_AGENT_ID, "1");
+
+    // Freshness: a peer message the agent has not been shown holds the next
+    // send once, inlines the missed rows, and lets a plain retry through.
+    await insertHumanMessage(client, LOCAL_CHANNEL_ID, "2");
+    const stale = await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: LOCAL_AGENT_ID,
+      sender_type: "agent",
+      content: "3",
+    });
+    assertQueryError(stale, /HELD.*newer message/i);
+    assert.match(stale.error?.message || "", /@Local User: 2/);
+    const retry = await client.from("messages").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      sender_id: LOCAL_AGENT_ID,
+      sender_type: "agent",
+      content: "3",
+    }).select("id").single();
+    assertQuery(retry);
+
+    // DMs bypass the freshness gate: parallel typing there is normal.
+    await insertHumanMessage(client, LOCAL_DM_ID, "在忙吗");
+    await insertHumanMessage(client, LOCAL_DM_ID, "顺便看下群里");
+    const dmReply = await client.from("messages").insert({
+      channel_id: LOCAL_DM_ID,
+      sender_id: LOCAL_AGENT_ID,
+      sender_type: "agent",
+      content: "在的，马上看",
+    }).select("id").single();
+    assertQuery(dmReply);
+  });
+});
+
+test("the loop guard winds down unclaimed agent-only mention chains", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    const channelRow = await client
+      .from("channels")
+      .select("name, description")
+      .eq("id", LOCAL_CHANNEL_ID)
+      .single();
+    assertQuery(channelRow);
+    const channelInfo = channelRow.data as { name: string; description: string | null };
+    await localRpc(client, "set_channel_agent_members", {
+      channel_uuid: LOCAL_CHANNEL_ID,
+      agent_ids: [LOCAL_AGENT_ID, created.agent.id],
+      channel_name: channelInfo.name,
+      channel_description: channelInfo.description,
+      expected_agent_ids: [LOCAL_AGENT_ID],
+      expected_channel_name: channelInfo.name,
+      expected_channel_description: channelInfo.description,
+    });
+
+    // Eight agent messages with no human in between reach the unclaimed cap.
+    for (let index = 0; index < 7; index += 1) {
+      const sender = index % 2 === 0 ? created.agent.id : LOCAL_AGENT_ID;
+      await insertAgentMessage(client, LOCAL_CHANNEL_ID, sender, `交接进度 ${index + 1}`);
+    }
+    const capped = await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "@Local Assistant 再确认一下第 8 步",
+    );
+    const bridge = deliveryBridge(client, async () => undefined);
+    await drain(bridge);
+    assert.match(
+      (await loadDelivery(client, capped.id))?.last_error || "",
+      /loop guard/i,
+    );
+
+    // A human joining resets the run and the same mention flows again.
+    await insertHumanMessage(client, LOCAL_CHANNEL_ID, "我来看看你们聊到哪了");
+    const afterHuman = await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "@Local Assistant 人来了，继续第 8 步吧",
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, afterHuman.id))?.status, "completed");
+  });
+});
+
+test("owed-work nudges wake an agent for its own unstarted task, then wind down", async () => {
+  await withLocalHarness(async ({ client, databasePath }) => {
+    const createdTask = await localRpc<{ task: { id: string; task_number: number } }>(
+      client,
+      "create_task_with_message",
+      {
+        channel_uuid: LOCAL_CHANNEL_ID,
+        task_title: "write the release notes",
+        parent_task_uuid: null,
+        assignee_uuid: LOCAL_AGENT_ID,
+        assignee_type: "agent",
+        assignee_mention_name: "local-assistant",
+        sender_agent_uuid: null,
+      },
+    );
+    const taskId = createdTask.task.id;
+
+    const prompts: string[] = [];
+    const bridge = deliveryBridge(client, async (_agentId, prompt) => {
+      prompts.push(prompt);
+    });
+    const scan = Reflect.get(bridge, "scanOwedWork") as () => Promise<void>;
+
+    // A freshly created task is not stale yet.
+    await scan.call(bridge);
+    assert.equal(prompts.length, 0);
+
+    const raw = new DatabaseSync(databasePath);
+    raw.exec("PRAGMA busy_timeout = 5000");
+    const backdateTask = (minutesAgo: number) => {
+      raw.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(
+        new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+        taskId,
+      );
+    };
+    const agedNudge = (minutesAgo: number) => {
+      raw.prepare("UPDATE agent_task_nudges SET last_nudge_at = ? WHERE task_id = ?").run(
+        new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+        taskId,
+      );
+    };
+
+    try {
+      backdateTask(10);
+      await scan.call(bridge);
+      assert.equal(prompts.length, 1);
+      assert.match(prompts[0], /delivery=owed-work/);
+      assert.match(prompts[0], /write the release notes/);
+      assert.match(prompts[0], /teammate task claim/);
+
+      // The cooldown holds the next scan even though the task is still stale.
+      await scan.call(bridge);
+      assert.equal(prompts.length, 1);
+
+      // Past the cooldown the agent is asked again, up to the cap.
+      agedNudge(45);
+      await scan.call(bridge);
+      assert.equal(prompts.length, 2);
+      agedNudge(45);
+      await scan.call(bridge);
+      assert.equal(prompts.length, 3);
+
+      // Three declines is the answer: stop asking about this revision.
+      agedNudge(45);
+      await scan.call(bridge);
+      assert.equal(prompts.length, 3);
+
+      // The task moving is new state, so the budget resets.
+      backdateTask(10);
+      await scan.call(bridge);
+      assert.equal(prompts.length, 4);
+
+      // Starting the task removes it from the owed-work sweep entirely.
+      const current = await client.from("tasks").select("updated_at").eq("id", taskId).single();
+      assertQuery(current);
+      await localRpc(client, "update_task_status", {
+        task_uuid: taskId,
+        task_status: "in_progress",
+        sender_agent_uuid: LOCAL_AGENT_ID,
+        expected_updated_at: (current.data as { updated_at: string }).updated_at,
+      });
+      backdateTask(10);
+      agedNudge(45);
+      await scan.call(bridge);
+      assert.equal(prompts.length, 4);
+    } finally {
+      raw.close();
+    }
+  });
+});
+
+test("a busy agent is never nudged for owed work", async () => {
+  await withLocalHarness(async ({ client, databasePath }) => {
+    const createdTask = await localRpc<{ task: { id: string } }>(
+      client,
+      "create_task_with_message",
+      {
+        channel_uuid: LOCAL_CHANNEL_ID,
+        task_title: "second pass on the draft",
+        parent_task_uuid: null,
+        assignee_uuid: LOCAL_AGENT_ID,
+        assignee_type: "agent",
+        assignee_mention_name: "local-assistant",
+        sender_agent_uuid: null,
+      },
+    );
+    const prompts: string[] = [];
+    const bridge = deliveryBridge(client, async (_agentId, prompt) => {
+      prompts.push(prompt);
+    });
+    Reflect.set(bridge, "agentManager", {
+      sendToAgent: async (_agentId: string, prompt: string) => { prompts.push(prompt); },
+      isBusy: () => true,
+    });
+
+    const raw = new DatabaseSync(databasePath);
+    raw.exec("PRAGMA busy_timeout = 5000");
+    try {
+      raw.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(
+        new Date(Date.now() - 10 * 60_000).toISOString(),
+        createdTask.task.id,
+      );
+      const scan = Reflect.get(bridge, "scanOwedWork") as () => Promise<void>;
+      await scan.call(bridge);
+      assert.equal(prompts.length, 0);
+      // No claim was spent either, so the nudge is still available later.
+      const claims = raw
+        .prepare("SELECT count(*) AS count FROM agent_task_nudges")
+        .get() as { count: number };
+      assert.equal(Number(claims.count), 0);
+    } finally {
+      raw.close();
+    }
   });
 });
 

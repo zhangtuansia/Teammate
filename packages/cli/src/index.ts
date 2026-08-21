@@ -36,7 +36,8 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { createLocalClient } from "@teammate/local-client";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { join } from "path";
+import { readFile } from "fs/promises";
+import { basename, join, resolve as resolvePath } from "path";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -168,6 +169,93 @@ function parseArgs(args: string[]): Record<string, string> {
     }
   }
   return result;
+}
+
+/** parseArgs keeps one value per flag; attachments are the only flag that may
+ * legitimately repeat, so read those straight from argv. */
+function repeatedFlagValues(key: string): string[] {
+  const args = process.argv.slice(4);
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== `--${key}`) continue;
+    const value = args[i + 1];
+    if (value && !value.startsWith("--")) {
+      values.push(value);
+      i += 1;
+    }
+  }
+  return values;
+}
+
+const ATTACHMENT_EXTENSION_TYPES: Record<string, string> = {
+  csv: "text/csv",
+  gif: "image/gif",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  json: "application/json",
+  log: "text/plain",
+  markdown: "text/markdown",
+  md: "text/markdown",
+  mov: "video/quicktime",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  pdf: "application/pdf",
+  png: "image/png",
+  svg: "image/svg+xml",
+  txt: "text/plain",
+  wav: "audio/wav",
+  webp: "image/webp",
+  zip: "application/zip",
+};
+
+interface UploadedAttachment {
+  url: string;
+  display_name: string;
+  mime_type: string;
+}
+
+function attachmentMarkdown(attachment: UploadedAttachment) {
+  const label = attachment.display_name.replace(/[[\]]/g, "");
+  return attachment.mime_type.startsWith("image/") &&
+    attachment.mime_type !== "image/svg+xml"
+    ? `![${label}](${attachment.url})`
+    : `[${label}](${attachment.url})`;
+}
+
+async function uploadAttachment(path: string): Promise<UploadedAttachment> {
+  if (!LOCAL_SERVER_URL) {
+    fail("ATTACH_UNSUPPORTED", "Attachments require the local Teammate service");
+  }
+  const resolved = resolvePath(path);
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(resolved);
+  } catch {
+    return fail("ATTACH_FAILED", `Could not read ${resolved}`);
+  }
+  const name = basename(resolved);
+  const extension = name.split(".").pop()?.toLowerCase() || "";
+  const mimeType = ATTACHMENT_EXTENSION_TYPES[extension];
+  if (!mimeType) {
+    fail("ATTACH_UNSUPPORTED", `${name} is not a file type Teammate can attach`);
+  }
+
+  const response = await fetch(`${LOCAL_SERVER_URL.replace(/\/+$/, "")}/api/attachments`, {
+    body: new Uint8Array(bytes),
+    headers: {
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+      "Content-Type": mimeType,
+      "X-Teammate-Filename": encodeURIComponent(name),
+    },
+    method: "POST",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | { attachment?: UploadedAttachment; error?: string }
+    | null;
+  if (!response.ok || !payload?.attachment) {
+    return fail("ATTACH_FAILED", payload?.error || `Upload failed with HTTP ${response.status}`);
+  }
+  return payload.attachment;
 }
 
 function shortId(uuid: string): string {
@@ -626,10 +714,18 @@ async function cmdMessageSend(flags: Record<string, string>) {
   const target = flags.target;
   if (!target) fail("INVALID_ARG", "Missing --target");
 
+  const attachments = repeatedFlagValues("attach");
   const content = await readStdin();
-  if (!content) fail("INVALID_ARG", "Message content must be provided via stdin");
+  if (!content && attachments.length === 0) {
+    fail("INVALID_ARG", "Message content must be provided via stdin");
+  }
 
   const { channelId, threadParentId } = await resolveTarget(target);
+  const attached: string[] = [];
+  for (const path of attachments) {
+    attached.push(attachmentMarkdown(await uploadAttachment(path)));
+  }
+  const body = [content, ...attached].filter(Boolean).join("\n\n");
 
   const { data, error } = await supabase
     .from("messages")
@@ -637,7 +733,7 @@ async function cmdMessageSend(flags: Record<string, string>) {
       channel_id: channelId,
       sender_id: AGENT_ID,
       sender_type: "agent",
-      content,
+      content: body,
       thread_parent_id: threadParentId,
     })
     .select("id")
@@ -647,6 +743,26 @@ async function cmdMessageSend(flags: Record<string, string>) {
 
   const sid = shortId(data.id);
   console.log(`Message sent to ${target}. Message ID: ${sid}`);
+}
+
+/** "Shown ⇒ seen": reads advance the send-time freshness baseline so a reply
+ * composed right after reading is never held against the rows just shown.
+ * Best-effort — hosted mode has no such RPC. */
+async function recordChannelSeen(channelId: string, seq: number) {
+  if (!Number.isFinite(seq) || seq <= 0) return;
+  try {
+    await supabase.rpc("record_channel_seen", {
+      channel_uuid: channelId,
+      agent_uuid: AGENT_ID,
+      seq,
+    });
+  } catch {
+    // Seen tracking must never block reading.
+  }
+}
+
+function maxShownSeq(messages: Array<{ seq?: unknown }>) {
+  return messages.reduce((max, message) => Math.max(max, Number(message.seq) || 0), 0);
 }
 
 async function cmdMessageCheck() {
@@ -694,7 +810,10 @@ async function cmdMessageCheck() {
       hasMore = page.length === 100;
     }
 
-    if (afterSeq !== undefined) cursor.channels[channelId] = afterSeq;
+    if (afterSeq !== undefined) {
+      cursor.channels[channelId] = afterSeq;
+      await recordChannelSeen(channelId, afterSeq);
+    }
   }
 
   if (messageCount === 0) {
@@ -757,6 +876,7 @@ async function cmdMessageRead(flags: Record<string, string>) {
       for (const msg of all) {
         console.log(await formatMessage(msg));
       }
+      await recordChannelSeen(channelId, maxShownSeq(all));
       return;
     }
   }
@@ -772,6 +892,7 @@ async function cmdMessageRead(flags: Record<string, string>) {
   for (const msg of messages.reverse()) {
     console.log(await formatMessage(msg));
   }
+  await recordChannelSeen(channelId, maxShownSeq(messages));
 }
 
 async function findMessageById(

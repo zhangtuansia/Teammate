@@ -103,11 +103,15 @@ interface AgentSession {
 
 interface QueuedMessage {
   userMessage: string;
+  /** The message header + content without the recent-history prefix, so
+   * queued same-channel messages can merge without duplicating context. */
+  body?: string;
   channelId: string | null;
   ambient: boolean;
   resolve: () => void;
   reject: (error: Error) => void;
 }
+const QUEUE_MERGE_LIMIT = 5;
 
 interface ManagedRuntime {
   handle: AgentRuntimeHandle;
@@ -139,6 +143,9 @@ interface StoredSession {
 
 export interface AgentManagerOptions {
   turnTimeoutMs?: number;
+  /** Directory holding uploaded attachments, so agents can open the real file
+   * behind an `/api/attachments/...` reference. */
+  attachmentsDir?: string;
 }
 
 export class AgentManager {
@@ -153,6 +160,7 @@ export class AgentManager {
   private authToken: string;
   private agentAuthTokens: Map<string, string>;
   private readonly localServerUrl: string;
+  private readonly attachmentsDir: string;
   private readonly serverId: string;
   private readonly runtimeApiKey: string;
   private readonly refreshAgentAuthTokens?: () => Promise<Record<string, string>>;
@@ -180,6 +188,7 @@ export class AgentManager {
     this.authToken = authToken;
     this.agentAuthTokens = new Map(Object.entries(agentAuthTokens));
     this.localServerUrl = localServerUrl;
+    this.attachmentsDir = options.attachmentsDir || "";
     this.serverId = serverId;
     this.runtimeApiKey = runtimeApiKey;
     this.refreshAgentAuthTokens = refreshAgentAuthTokens;
@@ -283,12 +292,19 @@ ${agent.description || agent.display_name}
     agentId: string,
     userMessage: string,
     channelId: string | null = null,
-    options: { ambient?: boolean } = {},
+    options: { ambient?: boolean; body?: string } = {},
   ): Promise<void> {
     const previous = this.deliveryTails.get(agentId) || Promise.resolve();
     const delivery = previous
       .catch(() => undefined)
-      .then(() => this.sendToAgentNow(agentId, userMessage, channelId, options.ambient === true));
+      .then(() =>
+        this.sendToAgentNow(
+          agentId,
+          userMessage,
+          channelId,
+          options.ambient === true,
+          options.body,
+        ));
     this.deliveryTails.set(agentId, delivery);
     try {
       await delivery;
@@ -304,6 +320,7 @@ ${agent.description || agent.display_name}
     userMessage: string,
     channelId: string | null,
     ambient = false,
+    body?: string,
   ): Promise<void> {
     const session = this.sessions.get(agentId);
     if (!session || this.removedAgentIds.has(agentId)) {
@@ -339,7 +356,7 @@ ${agent.description || agent.display_name}
         if (steerOutcome === "accepted") {
           if (current.execution.isCurrent(activeTurn)) {
             current.execution.submit(
-              { userMessage, channelId, ambient, resolve: () => undefined, reject: () => undefined },
+              { userMessage, body, channelId, ambient, resolve: () => undefined, reject: () => undefined },
               { midStreamBehavior: "steer", steerOutcome },
             );
           }
@@ -353,7 +370,7 @@ ${agent.description || agent.display_name}
         `  [${session.displayName}] Agent busy, queueing message (${current.execution.queueLength + 1} queued)...`,
       );
       return new Promise<void>((resolve, reject) => {
-        const payload = { userMessage, channelId, ambient, resolve, reject };
+        const payload = { userMessage, body, channelId, ambient, resolve, reject };
         const result = current.execution.phase === "running"
           ? current.execution.submit(payload)
           : current.execution.enqueue(payload);
@@ -400,6 +417,14 @@ ${agent.description || agent.display_name}
     }
 
     await this.deliverMessage(agentId, managed, session, userMessage, channelId, ambient);
+  }
+
+  /** True while a turn is running or queued work is waiting. Proactive nudges
+   * check this so they never pile onto an agent that is already working. */
+  isBusy(agentId: string): boolean {
+    const managed = this.processes.get(agentId);
+    if (!managed) return false;
+    return managed.busy || managed.execution.queueLength > 0;
   }
 
   getWorkspaceDir(agentId: string): string | null {
@@ -561,6 +586,9 @@ ${agent.description || agent.display_name}
           TEAMMATE_AUTH_TOKEN: agentAuthToken,
           ...(this.localServerUrl
             ? { TEAMMATE_LOCAL_SERVER_URL: this.localServerUrl }
+            : {}),
+          ...(this.attachmentsDir
+            ? { TEAMMATE_ATTACHMENTS_DIR: this.attachmentsDir }
             : {}),
           PATH: `${teammateDir}${delimiter}${process.env.PATH ?? ""}`,
         },
@@ -831,10 +859,28 @@ ${agent.description || agent.display_name}
   private drainQueue(agentId: string) {
     const managed = this.processes.get(agentId);
     const next = managed?.execution.dequeue()?.payload;
-    if (!next) return;
-    void this.sendToAgentNow(agentId, next.userMessage, next.channelId, next.ambient).then(
-      next.resolve,
-      next.reject,
+    if (!managed || !next) return;
+    // Messages that piled up for the same channel while the runtime was busy
+    // become one turn: keep the first prompt (it carries the history prefix)
+    // and append the bare bodies of the rest.
+    const batch = [next];
+    while (batch.length < QUEUE_MERGE_LIMIT) {
+      const upcoming = managed.execution.peekQueue();
+      if (!upcoming || upcoming.channelId !== next.channelId) break;
+      const merged = managed.execution.dequeue()?.payload;
+      if (!merged) break;
+      batch.push(merged);
+    }
+    const userMessage = batch
+      .map((item, index) => (index === 0 ? item.userMessage : item.body || item.userMessage))
+      .join("\n\n");
+    const ambient = batch.every((item) => item.ambient);
+    if (batch.length > 1) {
+      console.log(`  Merged ${batch.length} queued messages into one turn.`);
+    }
+    void this.sendToAgentNow(agentId, userMessage, next.channelId, ambient, next.body).then(
+      () => batch.forEach((item) => item.resolve()),
+      (error: Error) => batch.forEach((item) => item.reject(error)),
     );
   }
 

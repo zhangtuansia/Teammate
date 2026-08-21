@@ -1,15 +1,31 @@
 "use client";
 
-import { useEditor, EditorContent } from "@tiptap/react";
+import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import Link from "@tiptap/extension-link";
 import { Extension } from "@tiptap/core";
-import { forwardRef, useImperativeHandle, useEffect, useRef } from "react";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import {
+  BoldIcon,
+  CodeIcon,
+  ItalicIcon,
+  ListIcon,
+  ListOrderedIcon,
+  SquareCodeIcon,
+  StrikethroughIcon,
+  TextQuoteIcon,
+} from "lucide-react";
+import { forwardRef, useImperativeHandle, useEffect, useReducer } from "react";
+import { Toggle } from "@/components/ui/toggle";
 
 export interface TiptapMessageInputHandle {
   focus: () => void;
   clear: () => void;
   getMarkdown: () => string;
+  /** Insert text at the cursor and focus, for composer shortcuts like "@". */
+  insertText: (text: string) => void;
   /** Replace @query text near cursor with replacement string */
   replaceMention: (query: string, replacement: string) => void;
 }
@@ -22,6 +38,10 @@ interface TiptapMessageInputProps {
   ariaActiveDescendant?: string;
   disabled?: boolean;
   initialContent?: string;
+  /** Render the formatting toolbar above the editor. */
+  showFormatting?: boolean;
+  /** Localized labels for the formatting controls. */
+  formattingLabels?: Partial<Record<FormattingAction, string>>;
   /** Called when user presses Enter on non-empty content */
   onSend: (text: string) => boolean | void | Promise<boolean | void>;
   /** Called on every content change */
@@ -30,35 +50,195 @@ interface TiptapMessageInputProps {
   onSelectionUpdate?: (textBeforeCursor: string) => void;
   /** Intercept keys before Tiptap. Return true to consume (for @mention nav). */
   onKeyDown?: (event: KeyboardEvent) => boolean;
+  /** Files pasted into the editor, so a screenshot can go straight into a message. */
+  onPasteFiles?: (files: File[]) => void;
 }
 
-function createSendOnEnterExtension(
-  onSendRef: React.RefObject<
-    (text: string) => boolean | void | Promise<boolean | void>
-  >
-) {
-  return Extension.create({
-    name: "sendOnEnter",
-    addKeyboardShortcuts() {
-      return {
-        Enter: ({ editor }) => {
-          if (editor.view.composing) return false;
-          const text = editor.getText({ blockSeparator: "\n" });
-          if (!text.trim()) return true;
-          void Promise.resolve(onSendRef.current(text))
-            .then((sent) => {
-              if (sent !== false) editor.commands.clearContent(true);
-            })
-            .catch(() => {
-              // The parent owns delivery feedback. Keep the editor content when
-              // an asynchronous send handler rejects instead of losing the draft.
-            });
-          return true;
-        },
-      };
-    },
+export type FormattingAction =
+  | "bold"
+  | "italic"
+  | "strike"
+  | "orderedList"
+  | "bulletList"
+  | "blockquote"
+  | "code"
+  | "codeBlock";
+
+/**
+ * Serializes the document to the Markdown the workspace stores and renders.
+ *
+ * Written by hand rather than delegated to a generic serializer so plain
+ * prose survives untouched: a generic one escapes Markdown punctuation, which
+ * would turn ordinary chat text like snake_case or a * bullet into backslash
+ * noise for every message anyone sends.
+ */
+function serializeInline(node: ProseMirrorNode): string {
+  let out = "";
+  node.forEach((child) => {
+    if (child.type.name === "hardBreak") {
+      out += "\n";
+      return;
+    }
+    if (!child.isText) {
+      out += child.textContent;
+      return;
+    }
+    let text = child.text || "";
+    if (!text) return;
+    const marks = child.marks.map((mark) => mark.type.name);
+    // Code spans are literal: Markdown emphasis does not nest inside them.
+    if (marks.includes("code")) {
+      out += `\`${text}\``;
+      return;
+    }
+    if (marks.includes("bold")) text = `**${text}**`;
+    if (marks.includes("italic")) text = `*${text}*`;
+    if (marks.includes("strike")) text = `~~${text}~~`;
+    const link = child.marks.find((mark) => mark.type.name === "link");
+    if (link?.attrs.href) text = `[${text}](${String(link.attrs.href)})`;
+    out += text;
   });
+  return out;
 }
+
+function serializeBlock(node: ProseMirrorNode, indent = ""): string[] {
+  switch (node.type.name) {
+    case "paragraph":
+      return serializeInline(node)
+        .split("\n")
+        .map((line) => `${indent}${line}`);
+    case "codeBlock": {
+      const language = typeof node.attrs.language === "string" ? node.attrs.language : "";
+      return [
+        `${indent}\`\`\`${language}`,
+        ...node.textContent.split("\n").map((line) => `${indent}${line}`),
+        `${indent}\`\`\``,
+      ];
+    }
+    case "blockquote": {
+      const lines: string[] = [];
+      node.forEach((child) => lines.push(...serializeBlock(child, indent)));
+      return lines.map((line) => `${indent}> ${line.slice(indent.length)}`);
+    }
+    case "bulletList":
+    case "orderedList": {
+      const ordered = node.type.name === "orderedList";
+      const start = ordered && typeof node.attrs.start === "number" ? node.attrs.start : 1;
+      const lines: string[] = [];
+      node.forEach((item, _offset, index) => {
+        const marker = ordered ? `${start + index}. ` : "- ";
+        const itemLines: string[] = [];
+        item.forEach((child) => itemLines.push(...serializeBlock(child, "")));
+        itemLines.forEach((line, lineIndex) => {
+          lines.push(
+            lineIndex === 0
+              ? `${indent}${marker}${line}`
+              : `${indent}${" ".repeat(marker.length)}${line}`,
+          );
+        });
+      });
+      return lines;
+    }
+    default: {
+      if (node.isTextblock) {
+        return serializeInline(node)
+          .split("\n")
+          .map((line) => `${indent}${line}`);
+      }
+      const lines: string[] = [];
+      node.forEach((child) => lines.push(...serializeBlock(child, indent)));
+      return lines;
+    }
+  }
+}
+
+function serializeDocument(editor: Editor | null): string {
+  if (!editor) return "";
+  const blocks: string[] = [];
+  editor.state.doc.forEach((node) => {
+    blocks.push(serializeBlock(node).join("\n"));
+  });
+  // Blank paragraphs are the user's own spacing; collapse only trailing ones.
+  return blocks.join("\n").replace(/\n+$/, "");
+}
+
+interface SendMessageStorage {
+  onSend: (text: string) => boolean | void | Promise<boolean | void>;
+  onPasteFiles: (files: File[]) => void;
+  placeholder: string;
+}
+
+const DEFAULT_PLACEHOLDER = "Write a message...";
+
+function sendStorage(editor: Editor): SendMessageStorage {
+  // Tiptap types `editor.storage` from global extension augmentation, which a
+  // locally declared extension does not participate in.
+  return (editor.storage as unknown as Record<string, SendMessageStorage>)
+    .sendMessage;
+}
+
+function sendCurrentDocument(editor: Editor) {
+  if (editor.view.composing) return false;
+  const markdown = serializeDocument(editor);
+  if (!markdown.trim()) return true;
+  void Promise.resolve(sendStorage(editor).onSend(markdown))
+    .then((sent) => {
+      if (sent !== false) editor.commands.clearContent(true);
+    })
+    .catch(() => {
+      // The parent owns delivery feedback. Keep the editor content when
+      // an asynchronous send handler rejects instead of losing the draft.
+    });
+  return true;
+}
+
+/**
+ * Holds the live send handler and placeholder in editor storage rather than in
+ * component refs: the editor instance outlives every render, so the props it
+ * needs are pushed into it from an effect instead of read during render.
+ */
+const SendMessageExtension = Extension.create<
+  Record<string, never>,
+  SendMessageStorage
+>({
+  name: "sendMessage",
+  addStorage(): SendMessageStorage {
+    return {
+      onPasteFiles: () => undefined,
+      onSend: () => undefined,
+      placeholder: DEFAULT_PLACEHOLDER,
+    };
+  },
+  addProseMirrorPlugins() {
+    const { editor } = this;
+    return [
+      new Plugin({
+        key: new PluginKey("teammateAttachmentPaste"),
+        props: {
+          handlePaste: (_view, event) => {
+            const files = Array.from(event.clipboardData?.files || []);
+            if (files.length === 0) return false;
+            sendStorage(editor).onPasteFiles(files);
+            return true;
+          },
+        },
+      }),
+    ];
+  },
+  addKeyboardShortcuts() {
+    return {
+      Enter: ({ editor }) => {
+        // Inside a code block or a list, Enter is structural: it opens the
+        // next line or the next item. Everywhere else it sends.
+        if (editor.isActive("codeBlock") || editor.isActive("listItem")) {
+          return false;
+        }
+        return sendCurrentDocument(editor);
+      },
+      "Mod-Enter": ({ editor }) => sendCurrentDocument(editor),
+    };
+  },
+});
 
 function textDocument(content: string) {
   return {
@@ -68,6 +248,89 @@ function textDocument(content: string) {
       ...(line ? { content: [{ type: "text", text: line }] } : {}),
     })),
   };
+}
+
+const FORMATTING_CONTROLS: Array<{
+  action: FormattingAction;
+  fallbackLabel: string;
+  Icon: typeof BoldIcon;
+  separatorBefore?: boolean;
+}> = [
+  { action: "bold", fallbackLabel: "Bold", Icon: BoldIcon },
+  { action: "italic", fallbackLabel: "Italic", Icon: ItalicIcon },
+  { action: "strike", fallbackLabel: "Strikethrough", Icon: StrikethroughIcon },
+  {
+    action: "orderedList",
+    fallbackLabel: "Ordered list",
+    Icon: ListOrderedIcon,
+    separatorBefore: true,
+  },
+  { action: "bulletList", fallbackLabel: "Bulleted list", Icon: ListIcon },
+  {
+    action: "blockquote",
+    fallbackLabel: "Blockquote",
+    Icon: TextQuoteIcon,
+    separatorBefore: true,
+  },
+  { action: "code", fallbackLabel: "Code", Icon: CodeIcon },
+  { action: "codeBlock", fallbackLabel: "Code block", Icon: SquareCodeIcon },
+];
+
+function runFormatting(editor: Editor, action: FormattingAction) {
+  const chain = editor.chain().focus();
+  switch (action) {
+    case "bold":
+      return chain.toggleBold().run();
+    case "italic":
+      return chain.toggleItalic().run();
+    case "strike":
+      return chain.toggleStrike().run();
+    case "orderedList":
+      return chain.toggleOrderedList().run();
+    case "bulletList":
+      return chain.toggleBulletList().run();
+    case "blockquote":
+      return chain.toggleBlockquote().run();
+    case "code":
+      return chain.toggleCode().run();
+    case "codeBlock":
+      return chain.toggleCodeBlock().run();
+  }
+}
+
+function FormattingToolbar({
+  editor,
+  disabled,
+  labels,
+}: {
+  editor: Editor;
+  disabled?: boolean;
+  labels?: Partial<Record<FormattingAction, string>>;
+}): React.ReactElement {
+  return (
+    <div
+      aria-label={labels?.bold ? undefined : "Formatting"}
+      className="flex flex-wrap items-center gap-0.5 border-b px-2 py-1"
+      role="toolbar">
+      {FORMATTING_CONTROLS.map(({ action, fallbackLabel, Icon, separatorBefore }) => (
+        <div className="contents" key={action}>
+          {separatorBefore && (
+            <span aria-hidden="true" className="mx-1 h-4 w-px shrink-0 bg-border" />
+          )}
+          <Toggle
+            aria-label={labels?.[action] || fallbackLabel}
+            disabled={disabled}
+            onMouseDown={(event) => event.preventDefault()}
+            onPressedChange={() => runFormatting(editor, action)}
+            pressed={editor.isActive(action)}
+            size="sm"
+            title={labels?.[action] || fallbackLabel}>
+            <Icon />
+          </Toggle>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 const TiptapMessageInput = forwardRef<
@@ -82,36 +345,38 @@ const TiptapMessageInput = forwardRef<
     ariaActiveDescendant,
     disabled,
     initialContent = "",
+    showFormatting = false,
+    formattingLabels,
     onSend,
     onTextUpdate,
     onSelectionUpdate,
     onKeyDown,
+    onPasteFiles,
   },
   ref
 ) {
-  const onSendRef = useRef(onSend);
-  onSendRef.current = onSend;
-  const placeholderRef = useRef(placeholder || "Write a message...");
-  placeholderRef.current = placeholder || "Write a message...";
+  // Formatting buttons reflect the caret, which moves without changing content.
+  const [, refreshToolbar] = useReducer((count: number) => count + 1, 0);
 
   const editor = useEditor({
     content: textDocument(initialContent),
     extensions: [
       StarterKit.configure({
         heading: false,
-        blockquote: false,
-        bulletList: false,
-        orderedList: false,
-        listItem: false,
-        codeBlock: false,
         horizontalRule: false,
         dropcursor: false,
         gapcursor: false,
+        link: false,
+      }),
+      Link.configure({
+        autolink: true,
+        linkOnPaste: true,
+        openOnClick: false,
       }),
       Placeholder.configure({
-        placeholder: () => placeholderRef.current,
+        placeholder: ({ editor: ed }) => sendStorage(ed).placeholder,
       }),
-      createSendOnEnterExtension(onSendRef),
+      SendMessageExtension,
     ],
     editorProps: {
       attributes: {
@@ -137,8 +402,10 @@ const TiptapMessageInput = forwardRef<
       );
       onTextUpdate?.(textBeforeCursor, ed.getText({ blockSeparator: "\n" }));
       onSelectionUpdate?.(textBeforeCursor);
+      refreshToolbar();
     },
     onSelectionUpdate: ({ editor: ed }) => {
+      refreshToolbar();
       if (onSelectionUpdate) {
         const { from } = ed.state.selection;
         const $from = ed.state.doc.resolve(from);
@@ -161,11 +428,22 @@ const TiptapMessageInput = forwardRef<
 
   useEffect(() => {
     if (!editor) return;
+    sendStorage(editor).onSend = onSend;
+  }, [editor, onSend]);
+
+  useEffect(() => {
+    if (!editor || !onPasteFiles) return;
+    sendStorage(editor).onPasteFiles = onPasteFiles;
+  }, [editor, onPasteFiles]);
+
+  useEffect(() => {
+    if (!editor) return;
+    sendStorage(editor).placeholder = placeholder || DEFAULT_PLACEHOLDER;
     editor.view.dom.setAttribute(
       "aria-label",
       ariaLabel || placeholder || "Write a message",
     );
-    // Placeholder decorations read through the ref, so recompute them without
+    // Placeholder decorations read from storage, so recompute them without
     // recreating the editor or discarding an in-progress draft.
     editor.view.updateState(editor.state);
   }, [ariaLabel, editor, placeholder]);
@@ -190,7 +468,10 @@ const TiptapMessageInput = forwardRef<
   useImperativeHandle(ref, () => ({
     focus: () => editor?.commands.focus(),
     clear: () => editor?.commands.clearContent(true),
-    getMarkdown: () => editor?.getText({ blockSeparator: "\n" }) ?? "",
+    getMarkdown: () => serializeDocument(editor),
+    insertText: (text: string) => {
+      editor?.chain().focus().insertContent(text).run();
+    },
     replaceMention: (query: string, replacement: string) => {
       if (!editor) return;
       const { from } = editor.state.selection;
@@ -211,7 +492,16 @@ const TiptapMessageInput = forwardRef<
 
   return (
     <div className="tiptap-input">
-      <EditorContent editor={editor} />
+      {showFormatting && editor && (
+        <FormattingToolbar
+          disabled={disabled}
+          editor={editor}
+          labels={formattingLabels}
+        />
+      )}
+      <div className="px-4 pt-3 pb-1 text-[15px] leading-[1.54]">
+        <EditorContent editor={editor} />
+      </div>
     </div>
   );
 });

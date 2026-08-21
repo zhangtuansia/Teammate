@@ -43,8 +43,7 @@ fn focus_or_create_main_window(app: &tauri::AppHandle) {
             .and_then(|builder| builder.build())
         {
             Ok(window) => {
-                configure_main_window_close(&window);
-                ensure_window_on_screen(&window);
+                configure_main_window(&window);
                 Some(window)
             }
             Err(error) => {
@@ -61,47 +60,51 @@ fn focus_or_create_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Restored window positions can land entirely off-screen (a disconnected
-/// display, or stale saved state). Re-center the window when no monitor
-/// contains its title-bar area, so the app never launches invisible.
+/// A restored window frame can land entirely off-screen — a display that is no
+/// longer attached, or saved state that was already off-screen and keeps
+/// restoring itself there. Recenter only when the frame overlaps no monitor at
+/// all, so a window the user deliberately parked half off the edge is left
+/// alone.
 fn ensure_window_on_screen(window: &tauri::WebviewWindow) {
-    let Ok(position) = window.outer_position() else {
+    let (Ok(position), Ok(size), Ok(monitors)) = (
+        window.outer_position(),
+        window.outer_size(),
+        window.available_monitors(),
+    ) else {
         return;
     };
-    let Ok(size) = window.outer_size() else {
-        return;
-    };
-    let Ok(monitors) = window.available_monitors() else {
-        return;
-    };
-    let probe_x = position.x + (size.width as i32) / 2;
-    let probe_y = position.y + 20;
-    let visible = monitors.iter().any(|monitor| {
+    let left = position.x;
+    let top = position.y;
+    let right = left + size.width as i32;
+    let bottom = top + size.height as i32;
+    let intersects_a_monitor = monitors.iter().any(|monitor| {
         let origin = monitor.position();
         let extent = monitor.size();
-        probe_x >= origin.x
-            && probe_x < origin.x + extent.width as i32
-            && probe_y >= origin.y
-            && probe_y < origin.y + extent.height as i32
+        left < origin.x + extent.width as i32
+            && right > origin.x
+            && top < origin.y + extent.height as i32
+            && bottom > origin.y
     });
-    if !visible {
+    if !intersects_a_monitor {
         let _ = window.center();
     }
 }
 
-#[cfg(target_os = "macos")]
-fn configure_main_window_close(window: &tauri::WebviewWindow) {
-    let window_to_hide = window.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+/// The frame is restored by the OS after `setup` runs, so the off-screen check
+/// has to react to the move rather than sample the position once at startup.
+fn configure_main_window(window: &tauri::WebviewWindow) {
+    let observed = window.clone();
+    window.on_window_event(move |event| match event {
+        #[cfg(target_os = "macos")]
+        tauri::WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
-            let _ = window_to_hide.hide();
+            let _ = observed.hide();
         }
+        tauri::WindowEvent::Moved(_) => ensure_window_on_screen(&observed),
+        _ => {}
     });
+    ensure_window_on_screen(window);
 }
-
-#[cfg(not(target_os = "macos"))]
-fn configure_main_window_close(_window: &tauri::WebviewWindow) {}
 
 fn generate_controller_credential() -> String {
     let mut bytes = [0_u8; 32];
@@ -205,8 +208,7 @@ pub fn run() {
                 terminated: runtime_terminated,
             });
             if let Some(window) = app.get_webview_window("main") {
-                configure_main_window_close(&window);
-                ensure_window_on_screen(&window);
+                configure_main_window(&window);
             }
             app.state::<AppLifecycle>()
                 .setup_complete

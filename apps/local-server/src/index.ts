@@ -82,6 +82,8 @@ const dbPath = resolve(configuredDbPath || ".teammate/local.db");
 ensurePrivateDirectory(dirname(dbPath));
 const avatarsDir = join(dirname(dbPath), "avatars");
 ensurePrivateDirectory(avatarsDir);
+const attachmentsDir = join(dirname(dbPath), "attachments");
+ensurePrivateDirectory(attachmentsDir);
 const credentialStorePath = join(dirname(dbPath), "credentials.enc");
 restrictPrivateFile(credentialStorePath);
 const credentialStore = new EncryptedCredentialStore(
@@ -773,6 +775,174 @@ function avatarBytesMatchMime(bytes: Buffer, mime: keyof typeof AVATAR_MIME_TYPE
   return bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
 }
 
+const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
+/**
+ * Extensions are chosen by us from the declared type, never taken from the
+ * upload's own name: the served path must never carry an attacker-chosen
+ * extension, and the browser must never be told to run what it downloads.
+ */
+const ATTACHMENT_MIME_TYPES: Record<string, string> = {
+  "application/json": "json",
+  "application/pdf": "pdf",
+  "application/zip": "zip",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "image/gif": "gif",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/svg+xml": "svg",
+  "image/webp": "webp",
+  "text/csv": "csv",
+  "text/markdown": "md",
+  "text/plain": "txt",
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+};
+
+function attachmentDisplayName(raw: unknown, fallbackExtension: string) {
+  const decoded = typeof raw === "string" ? decodeURIComponent(raw) : "";
+  // Keep the name for humans only; strip anything that could escape the
+  // directory or read as a path.
+  const cleaned = decoded.replace(/[/\\]/g, " ").replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") {
+    return `attachment.${fallbackExtension}`;
+  }
+  return cleaned.slice(0, 200);
+}
+
+async function readRequestBody(request: IncomingMessage, limit: number) {
+  const declaredLength = Number(request.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    request.once("error", () => undefined);
+    request.resume();
+    throw new LocalRequestError(413, "Attachment is larger than the 64 MiB limit");
+  }
+  return new Promise<Buffer>((resolveBody, rejectBody) => {
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
+    const settle = (error: LocalRequestError | null, value?: Buffer) => {
+      if (settled) return;
+      settled = true;
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      if (error) rejectBody(error);
+      else resolveBody(value as Buffer);
+    };
+    const onData = (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > limit) {
+        request.resume();
+        settle(new LocalRequestError(413, "Attachment is larger than the 64 MiB limit"));
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => settle(null, Buffer.concat(chunks));
+    const onError = () => settle(new LocalRequestError(400, "Could not read the attachment"));
+    request.on("data", onData);
+    request.on("end", onEnd);
+    request.on("error", onError);
+  });
+}
+
+async function handleAttachmentUpload(
+  request: IncomingMessage,
+  response: ServerResponse,
+  uploadedBy: string,
+) {
+  const declaredType = String(request.headers["content-type"] || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  const extension = ATTACHMENT_MIME_TYPES[declaredType];
+  if (!extension) {
+    return sendJson(response, 415, {
+      error: "That file type cannot be attached",
+    });
+  }
+  const bytes = await readRequestBody(request, MAX_ATTACHMENT_BYTES);
+  if (!bytes.length) {
+    return sendJson(response, 400, { error: "Attachment is empty" });
+  }
+
+  const id = randomUUID();
+  const fileName = `${id}.${extension}`;
+  const displayName = attachmentDisplayName(
+    request.headers["x-teammate-filename"],
+    extension,
+  );
+  await writeFile(join(attachmentsDir, fileName), bytes, { mode: 0o600 });
+  const createdAt = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO attachments
+       (id, file_name, display_name, mime_type, byte_size, uploaded_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, fileName, displayName, declaredType, bytes.length, uploadedBy, createdAt);
+
+  return sendJson(response, 201, {
+    attachment: {
+      id,
+      url: `/api/attachments/${fileName}`,
+      display_name: displayName,
+      mime_type: declaredType,
+      byte_size: bytes.length,
+    },
+  });
+}
+
+const ATTACHMENT_REFERENCE = /\/api\/attachments\/([a-f0-9-]{36}\.[a-z0-9]{1,5})/gi;
+/** How long an uploaded file may sit unreferenced before the sweep reclaims
+ * it. Long enough to cover a draft the author has not sent yet. */
+const ATTACHMENT_ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
+
+function attachmentIsReferenced(fileName: string) {
+  const row = db
+    .prepare("SELECT 1 AS found FROM messages WHERE content LIKE ? LIMIT 1")
+    .get(`%/api/attachments/${fileName}%`) as { found: number } | undefined;
+  return Boolean(row);
+}
+
+function deleteAttachmentRecord(fileName: string) {
+  db.prepare("DELETE FROM attachments WHERE file_name = ?").run(fileName);
+  // Best effort: the row is the index, so a file left behind by a failed
+  // unlink is already unreachable and the next sweep is not needed for it.
+  void unlink(join(attachmentsDir, fileName)).catch(() => undefined);
+}
+
+/** Drop files whose last referencing message just went away. */
+function releaseAttachmentsFor(contents: string[]) {
+  const candidates = new Set<string>();
+  for (const content of contents) {
+    for (const match of content.matchAll(ATTACHMENT_REFERENCE)) {
+      candidates.add(match[1]);
+    }
+  }
+  for (const fileName of candidates) {
+    if (attachmentIsReferenced(fileName)) continue;
+    deleteAttachmentRecord(fileName);
+  }
+}
+
+/** Reclaim uploads that were never sent, and any file whose message vanished
+ * through a path that could not run the cascade. */
+function sweepOrphanAttachments() {
+  const cutoff = new Date(Date.now() - ATTACHMENT_ORPHAN_GRACE_MS).toISOString();
+  const stale = db
+    .prepare("SELECT file_name FROM attachments WHERE created_at < ?")
+    .all(cutoff) as Array<{ file_name: string }>;
+  let reclaimed = 0;
+  for (const { file_name: fileName } of stale) {
+    if (attachmentIsReferenced(fileName)) continue;
+    deleteAttachmentRecord(fileName);
+    reclaimed += 1;
+  }
+  if (reclaimed > 0) {
+    console.log(`Reclaimed ${reclaimed} unreferenced attachment(s).`);
+  }
+}
+
 async function persistAgentAvatar(agentId: string, dataUrl: unknown) {
   if (typeof dataUrl !== "string") throw new Error("Invalid avatar image");
   const match = dataUrl.match(
@@ -1022,6 +1192,33 @@ db.exec(`
     ON message_deliveries(server_id, status, lease_expires_at, created_at);
   CREATE INDEX IF NOT EXISTS idx_local_message_deliveries_agent
     ON message_deliveries(agent_id, status, created_at);
+
+  CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS agent_task_nudges (
+    task_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    nudges INTEGER NOT NULL DEFAULT 0,
+    task_updated_at TEXT NOT NULL,
+    last_nudge_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, agent_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS agent_channel_seen (
+    agent_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    seq INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, channel_id)
+  );
 
   DROP TRIGGER IF EXISTS trg_local_enqueue_human_message_deliveries;
   CREATE TRIGGER IF NOT EXISTS trg_local_enqueue_message_deliveries
@@ -1297,6 +1494,49 @@ async function dispatchLocalRequest(
       });
     }
 
+    if (request.method === "POST" && url.pathname === "/api/attachments") {
+      // Agents upload too — a teammate that can read a file should be able to
+      // hand one back. Reading stays human-only; agents open the real path.
+      const uploader = authenticateLocalRequest(request);
+      return await handleAttachmentUpload(
+        request,
+        response,
+        uploader.kind === "agent" ? uploader.agentId : LOCAL_USER_ID,
+      );
+    }
+
+    const attachmentRoute = url.pathname.match(
+      /^\/api\/attachments\/([a-f0-9-]{36}\.[a-z0-9]{1,5})$/i,
+    );
+    if (request.method === "GET" && attachmentRoute) {
+      requireHumanPrincipal(authenticateLocalRequest(request));
+      const stored = db
+        .prepare("SELECT display_name, mime_type FROM attachments WHERE file_name = ?")
+        .get(attachmentRoute[1]) as
+          | { display_name: string; mime_type: string }
+          | undefined;
+      if (!stored) return sendJson(response, 404, { error: "Attachment not found" });
+      try {
+        const content = await readFile(join(attachmentsDir, attachmentRoute[1]));
+        response.writeHead(200, {
+          // Everything is served as an attachment-style download except the
+          // media the UI renders inline, so a stored SVG or HTML-ish payload
+          // can never execute in the app's origin.
+          "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(stored.display_name)}`,
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "Content-Type": stored.mime_type === "image/svg+xml"
+            ? "application/octet-stream"
+            : stored.mime_type,
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "X-Content-Type-Options": "nosniff",
+        });
+        response.end(content);
+        return;
+      } catch {
+        return sendJson(response, 404, { error: "Attachment not found" });
+      }
+    }
+
     const avatarRoute = url.pathname.match(
       /^\/api\/avatars\/([a-f0-9-]{36}\.(?:png|jpg|webp))$/i,
     );
@@ -1474,6 +1714,7 @@ async function dispatchLocalRequest(
         protocolVersion: 2,
         localMode: true,
         localServerUrl,
+        attachmentsDir,
         supabaseUrl: localServerUrl,
         supabaseAnonKey: "local",
         token: localControllerCredential,
@@ -1522,6 +1763,9 @@ void reconcileAutoSyncedConnectionsAtStartup()
       console.log(`Teammate local service ready at http://127.0.0.1:${port}`);
       console.log(`SQLite database: ${dbPath}`);
       console.log("Local agent runtime authentication enabled.");
+      sweepOrphanAttachments();
+      const attachmentSweep = setInterval(sweepOrphanAttachments, 6 * 60 * 60 * 1000);
+      attachmentSweep.unref();
     });
   });
 
@@ -4126,6 +4370,79 @@ function localTouchCurrentBridgeMachineKey(argsValue: unknown) {
   });
 }
 
+/**
+ * Atomic claim for one owed-work nudge, adapted from Cumora's stall-nudge
+ * claim. The policy lives here so a nudge cannot be double-spent: the local
+ * service is single-threaded, so read-decide-write is one critical section.
+ *
+ * A task that MOVED since the last nudge earns a fresh budget; a task that
+ * never moved stops being nudged after the cap, because the agent has already
+ * declined it that many times and asking again only burns turns.
+ */
+function localClaimTaskNudge(argsValue: unknown) {
+  const args = requireRpcArguments(argsValue, [
+    "task_uuid",
+    "agent_uuid",
+    "task_updated_at",
+    "cooldown_ms",
+    "max_nudges",
+  ]);
+  const taskId = rpcUuid(args.task_uuid, "task_uuid");
+  const agentId = rpcUuid(args.agent_uuid, "agent_uuid");
+  const taskUpdatedAt = String(args.task_updated_at || "");
+  const cooldownMs = Number(args.cooldown_ms);
+  const maxNudges = Number(args.max_nudges);
+  if (!taskUpdatedAt) throw new LocalRequestError(400, "task_updated_at is required");
+  if (!Number.isFinite(cooldownMs) || cooldownMs < 0) {
+    throw new LocalRequestError(400, "cooldown_ms must be a non-negative number");
+  }
+  if (!Number.isFinite(maxNudges) || maxNudges < 1) {
+    throw new LocalRequestError(400, "max_nudges must be at least 1");
+  }
+
+  const now = Date.now();
+  const existing = db
+    .prepare("SELECT nudges, task_updated_at, last_nudge_at FROM agent_task_nudges WHERE task_id = ? AND agent_id = ?")
+    .get(taskId, agentId) as
+      | { nudges: number; task_updated_at: string; last_nudge_at: string }
+      | undefined;
+
+  const taskMoved = existing !== undefined && existing.task_updated_at !== taskUpdatedAt;
+  const priorNudges = !existing || taskMoved ? 0 : Number(existing.nudges);
+  if (priorNudges >= maxNudges) {
+    return { claimed: false, reason: "declined", nudges: priorNudges };
+  }
+  if (existing && !taskMoved) {
+    const elapsed = now - Date.parse(existing.last_nudge_at);
+    if (Number.isFinite(elapsed) && elapsed < cooldownMs) {
+      return { claimed: false, reason: "cooldown", nudges: priorNudges };
+    }
+  }
+
+  const nudges = priorNudges + 1;
+  db.prepare(
+    `INSERT INTO agent_task_nudges (task_id, agent_id, nudges, task_updated_at, last_nudge_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(task_id, agent_id) DO UPDATE SET
+       nudges = excluded.nudges,
+       task_updated_at = excluded.task_updated_at,
+       last_nudge_at = excluded.last_nudge_at`,
+  ).run(taskId, agentId, nudges, taskUpdatedAt, new Date(now).toISOString());
+  return { claimed: true, reason: "claimed", nudges };
+}
+
+function localRecordChannelSeen(argsValue: unknown) {
+  const args = requireRpcArguments(argsValue, ["channel_uuid", "agent_uuid", "seq"]);
+  const channelId = rpcUuid(args.channel_uuid, "channel_uuid");
+  const agentId = rpcUuid(args.agent_uuid, "agent_uuid");
+  const seq = Number(args.seq);
+  if (!Number.isFinite(seq) || seq < 0) {
+    throw new LocalRequestError(400, "seq must be a non-negative number");
+  }
+  recordAgentChannelSeen(agentId, channelId, seq);
+  return { ok: true };
+}
+
 function localListChannelAgentMentions(argsValue: unknown) {
   const args = requireRpcArguments(argsValue, ["channel_uuid"]);
   const channelId = rpcUuid(args.channel_uuid, "channel_uuid");
@@ -4224,6 +4541,12 @@ async function handleRpcRequest(
     case "list_channel_agent_mentions":
       data = localListChannelAgentMentions(args);
       break;
+    case "record_channel_seen":
+      data = localRecordChannelSeen(args);
+      break;
+    case "claim_task_nudge":
+      data = localClaimTaskNudge(args);
+      break;
     default:
       throw new LocalRequestError(404, "Unknown local RPC");
   }
@@ -4256,6 +4579,21 @@ function authorizeLocalRpc(
       throw new LocalRequestError(403, "Channel access denied");
     }
     return;
+  }
+  if (functionName === "record_channel_seen") {
+    if (args.agent_uuid !== principal.agentId) {
+      throw new LocalRequestError(403, "RPC agent identity does not match the local capability");
+    }
+    const channelId = rpcUuid(args.channel_uuid, "channel_uuid");
+    if (!localMemberBelongsToChannel(channelId, principal.agentId, "agent")) {
+      throw new LocalRequestError(403, "Channel access denied");
+    }
+    return;
+  }
+  if (functionName === "claim_task_nudge") {
+    // Nudges are scheduled by the runtime on an agent's behalf, never by the
+    // agent itself, so this stays a human-controller RPC.
+    throw new LocalRequestError(403, "This local RPC requires the human controller");
   }
 
   const agentTaskFunctions = new Set([
@@ -5724,6 +6062,104 @@ function authorizeLocalQuery(
   throw new LocalRequestError(403, "The local agent capability cannot perform this mutation");
 }
 
+function recordAgentChannelSeen(agentId: string, channelId: string, seq: number) {
+  if (!Number.isFinite(seq) || seq <= 0) return;
+  db.prepare(
+    `INSERT INTO agent_channel_seen (agent_id, channel_id, seq, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(agent_id, channel_id) DO UPDATE SET
+       seq = max(agent_channel_seen.seq, excluded.seq),
+       updated_at = excluded.updated_at`,
+  ).run(agentId, channelId, Math.floor(seq), new Date().toISOString());
+}
+
+function agentChannelSeenSeq(agentId: string, channelId: string) {
+  const row = db
+    .prepare("SELECT seq FROM agent_channel_seen WHERE agent_id = ? AND channel_id = ?")
+    .get(agentId, channelId) as { seq: number } | undefined;
+  return row ? Number(row.seq) : 0;
+}
+
+function messageSenderLabel(senderId: unknown, senderType: unknown) {
+  if (senderType === "agent") {
+    const agent = db.prepare("SELECT name FROM agents WHERE id = ?").get(toSqlValue(senderId)) as
+      | { name: string }
+      | undefined;
+    return `@${agent?.name || "agent"}`;
+  }
+  if (senderType === "human") {
+    const profile = db.prepare("SELECT display_name FROM profiles WHERE id = ?").get(toSqlValue(senderId)) as
+      | { display_name: string }
+      | undefined;
+    return `@${profile?.display_name || "user"}`;
+  }
+  return "system";
+}
+
+/**
+ * Coordination gates for agent-authored sends, adapted from Cumora's
+ * server-side reply preflight. Agents post optimistically; these gates are the
+ * safety net that serializes collisions:
+ * - Verbatim gate: posting content identical to the latest peer message has no
+ *   legitimate use, so it is always rejected.
+ * - Freshness gate: when peers posted after what this agent was last shown,
+ *   hold the send once and show the newer rows. Showing them advances the seen
+ *   baseline, so a re-send after reconsidering goes through with no ritual.
+ */
+function enforceAgentMessageGates(row: DbRow) {
+  const agentId = String(row.sender_id);
+  const channelId = String(row.channel_id);
+  const draft = typeof row.content === "string" ? row.content.replace(/\r\n?/g, "\n").trim() : "";
+
+  const latestPeer = db
+    .prepare(
+      `SELECT content FROM messages
+       WHERE channel_id = ? AND sender_id <> ? AND sender_type <> 'system'
+       ORDER BY seq DESC LIMIT 1`,
+    )
+    .get(channelId, agentId) as { content: string } | undefined;
+  if (
+    draft &&
+    latestPeer &&
+    latestPeer.content.replace(/\r\n?/g, "\n").trim() === draft
+  ) {
+    throw new LocalRequestError(
+      409,
+      "HELD: your draft is identical to the latest message in this conversation — it was already said. Do not resend it; react or move the conversation forward instead.",
+    );
+  }
+
+  const channel = db.prepare("SELECT type FROM channels WHERE id = ?").get(channelId) as
+    | { type: string }
+    | undefined;
+  if (channel?.type === "dm") return;
+
+  const baseline = agentChannelSeenSeq(agentId, channelId);
+  if (baseline <= 0) return;
+  const newer = db
+    .prepare(
+      `SELECT seq, sender_id, sender_type, content FROM messages
+       WHERE channel_id = ? AND sender_id <> ? AND seq > ?
+       ORDER BY seq ASC LIMIT 8`,
+    )
+    .all(channelId, agentId, baseline) as Array<{
+      seq: number;
+      sender_id: string;
+      sender_type: string;
+      content: string;
+    }>;
+  if (newer.length === 0) return;
+  recordAgentChannelSeen(agentId, channelId, newer[newer.length - 1].seq);
+  const held = newer
+    .map((message) =>
+      `${messageSenderLabel(message.sender_id, message.sender_type)}: ${message.content.substring(0, 300)}`)
+    .join("\n");
+  throw new LocalRequestError(
+    409,
+    `HELD: ${newer.length} newer message(s) landed after what you last saw. Read them, reconsider your reply, then send again — an unchanged send now goes through if it is still right.\n${held}`,
+  );
+}
+
 function executeQuery(query: QueryRequest): QueryExecutionResult {
   const parsed = parseQueryRequest(query);
   if ("error" in parsed) throw new LocalRequestError(400, parsed.error);
@@ -5788,6 +6224,14 @@ function executeQuery(query: QueryRequest): QueryExecutionResult {
       }
       const row = applyDefaults(table, { ...(input as DbRow) });
       validateLocalMutation(table, row);
+      if (
+        table === "messages" &&
+        row.sender_type === "agent" &&
+        typeof row.sender_id === "string" &&
+        typeof row.channel_id === "string"
+      ) {
+        enforceAgentMessageGates(row);
+      }
       const columns = Object.keys(row).map((column) => assertColumn(table, column));
       const placeholders = columns.map(() => "?").join(", ");
       db.prepare(
@@ -5796,7 +6240,13 @@ function executeQuery(query: QueryRequest): QueryExecutionResult {
       const stored = fetchInsertedRow(table, row);
       inserted.push(stored);
       emitDatabaseEvent("INSERT", table, stored);
-      if (table === "messages" && stored.sender_type === "human") {
+      if (
+        table === "messages" &&
+        (stored.sender_type === "human" || stored.sender_type === "agent")
+      ) {
+        if (stored.sender_type === "agent") {
+          recordAgentChannelSeen(String(stored.sender_id), String(stored.channel_id), Number(stored.seq));
+        }
         const deliveries = db
           .prepare("SELECT * FROM message_deliveries WHERE message_id = ?")
           .all(toSqlValue(stored.id)) as DbRow[];
@@ -6142,6 +6592,15 @@ function executeQuery(query: QueryRequest): QueryExecutionResult {
     .all(...whereParams) as DbRow[];
   if (table === "agents") {
     for (const row of rows) deleteAgentCapabilities(String(row.id));
+  }
+  if (table === "messages" && rows.length > 0) {
+    // Runs after the delete so a file still referenced by a surviving message
+    // is recognised as in use.
+    releaseAttachmentsFor(
+      rows
+        .map((row) => (typeof row.content === "string" ? row.content : ""))
+        .filter(Boolean),
+    );
   }
   for (const row of rows) emitDatabaseEvent("DELETE", table, row);
   return {

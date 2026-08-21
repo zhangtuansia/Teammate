@@ -5,19 +5,32 @@ import { createClient } from '@/lib/supabase/client';
 import {
   AlertCircleIcon,
   ArrowDownIcon,
+  AtSignIcon,
   CheckIcon,
   LoaderCircleIcon,
+  PlusIcon,
   RotateCcwIcon,
   SettingsIcon,
+  TypeIcon,
   XIcon,
 } from 'lucide-react';
-import TiptapMessageInput, { type TiptapMessageInputHandle } from './tiptap-message-input';
+import TiptapMessageInput, {
+  type FormattingAction,
+  type TiptapMessageInputHandle,
+} from './tiptap-message-input';
 import { useAgentActivity } from '@/hooks/use-agent-activity';
 import { useAppSettings } from '@/hooks/use-app-settings';
 import { useMessageSounds } from '@/hooks/use-message-sounds';
 import { useWorkspaceNavigation } from '@/hooks/use-navigation-guard';
 import { useWorkspaceServer } from '@/components/workspace-server-context';
 import { Button } from '@/components/ui/button';
+import { Kbd } from '@/components/ui/kbd';
+import { Toggle } from '@/components/ui/toggle';
+import {
+  ATTACHMENT_ACCEPT,
+  attachmentMarkdown,
+  uploadAttachment,
+} from '@/lib/attachments';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { SafeMarkdown } from '@/components/ui/safe-markdown';
@@ -310,6 +323,28 @@ function MessageAreaContent({
 }: MessageAreaProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [hasContent, setHasContent] = useState(false);
+  const [formattingVisible, setFormattingVisible] = useState(false);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const attachFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+    try {
+      for (const file of files) {
+        const uploaded = await uploadAttachment(file);
+        inputRef.current?.insertText(`\n${attachmentMarkdown(uploaded)}\n`);
+      }
+    } catch (error: unknown) {
+      setAttachmentError(
+        error instanceof Error ? error.message : 'Could not attach the file',
+      );
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }, []);
   const [sendError, setSendError] = useState("");
   const [sendWarning, setSendWarning] = useState("");
   const [snapshotChannelId, setSnapshotChannelId] = useState<string | null>(null);
@@ -1647,6 +1682,17 @@ function MessageAreaContent({
     ? t('message.newMessage')
     : t('message.newMessages', { count: String(newMessageCount) });
 
+  const formattingLabels: Record<FormattingAction, string> = {
+    blockquote: t('message.format.blockquote'),
+    bold: t('message.format.bold'),
+    bulletList: t('message.format.bulletList'),
+    code: t('message.format.code'),
+    codeBlock: t('message.format.codeBlock'),
+    italic: t('message.format.italic'),
+    orderedList: t('message.format.orderedList'),
+    strike: t('message.format.strike'),
+  };
+
   const composerPlaceholder =
     channel.type === 'dm'
       ? t('message.agentPlaceholder', {
@@ -2067,10 +2113,12 @@ function MessageAreaContent({
             );
           })()}
         <div className="rounded-lg border bg-card shadow-xs/5 overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24 transition-shadow">
-          <div className="px-4 pt-3 pb-1 text-[15px] leading-[1.54]">
+          <div>
             <TiptapMessageInput
               key={channel.id}
               ref={inputRef}
+              showFormatting={formattingVisible}
+              formattingLabels={formattingLabels}
               placeholder={composerPlaceholder}
               ariaLabel={composerPlaceholder}
               ariaControls={mentionOpen ? mentionListboxId : undefined}
@@ -2086,6 +2134,7 @@ function MessageAreaContent({
                 ))
               }
               initialContent={initialDraft}
+              onPasteFiles={(files) => void attachFiles(files)}
               onSend={doSend}
               onTextUpdate={(textBeforeCursor, fullText) => {
                 updateMentionFromCursor(textBeforeCursor);
@@ -2124,6 +2173,11 @@ function MessageAreaContent({
               }}
             />
           </div>
+          {attachmentError && (
+            <p role="alert" className="px-4 pb-2 text-xs text-destructive">
+              {attachmentError}
+            </p>
+          )}
           {sendError && (
             <p role="alert" className="px-4 pb-2 text-xs text-destructive">
               {sendError}
@@ -2134,8 +2188,62 @@ function MessageAreaContent({
               {sendWarning}
             </p>
           )}
-          <div className="flex items-center justify-end px-2.5 pb-2.5">
+          <div className="flex items-center gap-1 px-2.5 pb-2.5">
+            <input
+              accept={ATTACHMENT_ACCEPT.join(',')}
+              className="hidden"
+              multiple
+              onChange={(event) => {
+                const files = Array.from(event.target.files || []);
+                event.target.value = '';
+                void attachFiles(files);
+              }}
+              ref={fileInputRef}
+              tabIndex={-1}
+              type="file"
+            />
             <Button
+              aria-label={t('message.attachFile')}
+              disabled={attachmentBusy}
+              onClick={() => fileInputRef.current?.click()}
+              onMouseDown={(event) => event.preventDefault()}
+              size="icon-sm"
+              title={t('message.attachFile')}
+              type="button"
+              variant="ghost">
+              {attachmentBusy ? <LoaderCircleIcon className="animate-spin" /> : <PlusIcon />}
+            </Button>
+            <Toggle
+              aria-label={t('message.showFormatting')}
+              onMouseDown={(event) => event.preventDefault()}
+              onPressedChange={setFormattingVisible}
+              pressed={formattingVisible}
+              size="sm"
+              title={t('message.showFormatting')}>
+              <TypeIcon />
+            </Toggle>
+            {/* A DM has exactly one peer, so there is nobody to disambiguate
+                and mention autocomplete stays off. */}
+            {channel.type !== 'dm' && (
+              <Button
+                aria-label={t('message.mentionSomeone')}
+                onClick={() => inputRef.current?.insertText('@')}
+                onMouseDown={(event) => event.preventDefault()}
+                size="icon-sm"
+                title={t('message.mentionSomeone')}
+                type="button"
+                variant="ghost">
+                <AtSignIcon />
+              </Button>
+            )}
+            <p className="ml-auto hidden items-center gap-1 pr-1 text-xs text-muted-foreground sm:flex">
+              <Kbd>Shift</Kbd>
+              <span aria-hidden="true">+</span>
+              <Kbd>Enter</Kbd>
+              <span>{t('message.newLineHint')}</span>
+            </p>
+            <Button
+              className="max-sm:ml-auto"
               type="button"
               onClick={() => {
                 const md = inputRef.current?.getMarkdown() ?? '';

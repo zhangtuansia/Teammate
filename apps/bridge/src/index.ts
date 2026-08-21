@@ -20,6 +20,7 @@ interface ConnectResponse {
   serverName: string;
   localMode?: boolean;
   localServerUrl?: string;
+  attachmentsDir?: string;
   agents: Array<{
     id: string;
     name: string;
@@ -173,6 +174,7 @@ async function main() {
     arch: arch(),
     localMode: creds.localMode,
     localServerUrl: creds.localServerUrl,
+    attachmentsDir: creds.attachmentsDir,
     apiKey,
     refreshAgentAuthTokens: async () => {
       const fresh = await authenticate(serverUrl, apiKey);

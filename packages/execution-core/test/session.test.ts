@@ -57,6 +57,21 @@ test("queued turns replay in FIFO order with their per-turn config", () => {
   });
 });
 
+test("peekQueue reads the next payload without draining and honors the idle guard", () => {
+  const session = new ExecutionSession<string>();
+  const active = session.submit("active");
+  assert.equal(active.kind, "started");
+  session.enqueue("waiting");
+  assert.equal(session.peekQueue(), null);
+
+  if (active.kind !== "started") return;
+  session.finish(active.turn, { status: "completed" });
+  assert.equal(session.peekQueue(), "waiting");
+  assert.equal(session.queueLength, 1);
+  assert.equal(session.dequeue()?.payload, "waiting");
+  assert.equal(session.peekQueue(), null);
+});
+
 test("transport restart can hold a turn without pretending it is active", () => {
   const session = new ExecutionSession<string>();
   assert.deepEqual(session.enqueue("during restart"), {

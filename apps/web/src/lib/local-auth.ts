@@ -71,7 +71,16 @@ export function installLocalFetchAuthentication() {
 }
 
 export function isAuthenticatedLocalAssetPath(url: string) {
-  return LOCAL_MODE && url.startsWith("/api/avatars/");
+  return (
+    LOCAL_MODE &&
+    (url.startsWith("/api/avatars/") || url.startsWith("/api/attachments/"))
+  );
+}
+
+/** Attachment references are written by the composer as a root-relative local
+ * service path, so they stay portable across the dev and packaged ports. */
+export function isLocalAttachmentPath(url: string) {
+  return /^\/api\/attachments\/[a-f0-9-]{36}\.[a-z0-9]{1,5}$/i.test(url);
 }
 
 if (localFetchState().credential) installLocalFetchAuthentication();

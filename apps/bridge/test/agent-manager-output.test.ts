@@ -836,9 +836,10 @@ test("a hung dispatch times out once, rebuilds the backend, and drains queued wo
   assert.equal(stopped, 1);
   assert.equal(rebuilds, 1);
   assert.equal(execution.generation, 2);
-  assert.deepEqual(dispatched, ["queued-1"]);
-  assert.deepEqual(resolved, ["queued-1"]);
-  assert.equal(execution.queueLength, 1);
+  // Same-channel queued messages merge into one dispatched turn.
+  assert.deepEqual(dispatched, ["queued-1\n\nqueued-2"]);
+  assert.deepEqual(resolved, ["queued-1", "queued-2"]);
+  assert.equal(execution.queueLength, 0);
   assert.equal(inserted.length, 1);
   assert.match(inserted[0]?.content || "", /AI response timed out/);
   assert.match(inserted[0]?.content || "", /check the model connection|choose another model/);
