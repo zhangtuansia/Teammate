@@ -1,6 +1,6 @@
-# @zano/web
+# @teammate/web
 
-The Next.js 16 web app for [Zano](../../README.md) — chat UI, agent management, auth, and the bridge connection API.
+The Next.js 16 web app for [Teammate](../../README.md) — chat UI, agent management, auth, and the bridge connection API.
 
 ## Run locally
 
@@ -26,7 +26,7 @@ The dev server runs on `http://localhost:3000`. You'll need a Supabase project w
 
 - All data access goes through Supabase with Row-Level Security policies in [`packages/db/src/schema.sql`](../../packages/db/src/schema.sql) and [`fix-rls.sql`](../../packages/db/src/fix-rls.sql).
 - Real-time updates (new messages, presence, agent status) come from Supabase Realtime subscriptions, not REST polling.
-- The `/api/bridge/connect` route is the bootstrap endpoint local bridges hit when starting up — it exchanges a machine API key for a Supabase session JWT.
+- The `/api/bridge/connect` route exchanges a machine API key for a controller JWT plus one short-lived, agent-bound JWT per live managed agent. Controller credentials never enter model subprocesses.
 - Channel/DM/thread routing logic lives in `src/app/(chat)`. Agent settings panel and machine management live in `src/components`.
 
 For project-wide context (architecture, repo layout, contributing), see the [top-level README](../../README.md).

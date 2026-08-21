@@ -13,10 +13,13 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
   },
   define: {
-    "process.env.NEXT_PUBLIC_ZANO_LOCAL_MODE": JSON.stringify("true"),
-    "process.env.NEXT_PUBLIC_ZANO_DESKTOP": JSON.stringify("true"),
-    "process.env.NEXT_PUBLIC_ZANO_LOCAL_SERVER_URL": JSON.stringify(
-      "http://127.0.0.1:8787",
+    "process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE": JSON.stringify("true"),
+    "process.env.NEXT_PUBLIC_TEAMMATE_DESKTOP": JSON.stringify("true"),
+    "process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_SERVER_URL": JSON.stringify(
+      process.env.TEAMMATE_LOCAL_SERVER_URL || "http://127.0.0.1:8787",
+    ),
+    "process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_CONTROLLER_TOKEN": JSON.stringify(
+      process.env.TEAMMATE_LOCAL_CONTROLLER_TOKEN || "",
     ),
   },
   server: {
@@ -29,5 +32,30 @@ export default defineConfig({
   },
   build: {
     target: ["es2022", "chrome105", "safari13"],
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (
+            /\/node_modules\/(?:\.pnpm\/[^/]+\/node_modules\/)?(?:react|react-dom|scheduler)\//.test(id)
+          ) {
+            return "react-vendor";
+          }
+          if (id.includes("@base-ui") || id.includes("lucide-react")) return "ui-vendor";
+          if (id.includes("@tiptap") || id.includes("prosemirror")) return "editor-vendor";
+          if (
+            id.includes("react-markdown") ||
+            id.includes("remark-") ||
+            id.includes("unified") ||
+            id.includes("micromark") ||
+            id.includes("hast-util") ||
+            id.includes("mdast-util")
+          ) {
+            return "markdown-vendor";
+          }
+          return "vendor";
+        },
+      },
+    },
   },
 });

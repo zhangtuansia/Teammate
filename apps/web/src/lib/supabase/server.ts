@@ -1,18 +1,22 @@
 import { createServerClient } from "@supabase/ssr";
-import { createLocalClient } from "@zano/local-client";
+import { createLocalClient } from "@teammate/local-client";
 import { cookies } from "next/headers";
+import { getLocalControllerCredential } from "@/lib/local-auth";
 
 type ServerClient = ReturnType<typeof createServerClient>;
 let localClient: ServerClient | null = null;
 
 export async function createClient(): Promise<ServerClient> {
-  if (process.env.NEXT_PUBLIC_ZANO_LOCAL_MODE === "true") {
+  if (process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === "true") {
     if (!localClient) {
       const baseUrl =
-        process.env.NEXT_PUBLIC_ZANO_LOCAL_SERVER_URL ||
+        process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_SERVER_URL ||
         "http://127.0.0.1:8787";
       // LocalClient intentionally mirrors the Supabase methods used by API routes.
-      localClient = createLocalClient(baseUrl) as unknown as ServerClient;
+      localClient = createLocalClient(
+        baseUrl,
+        getLocalControllerCredential(),
+      ) as unknown as ServerClient;
     }
     return localClient;
   }

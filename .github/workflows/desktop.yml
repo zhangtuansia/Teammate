@@ -17,9 +17,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macOS
-            os: macos-14
-          - platform: Windows
+          - platform: macOS-arm64
+            os: macos-15
+          - platform: macOS-x64
+            os: macos-15-intel
+          - platform: Windows-x64
             os: windows-latest
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -37,6 +39,24 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Read pinned Bun version
+        id: bun-version
+        shell: bash
+        run: echo "version=$(tr -d '\r\n' < .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        if: runner.os != 'Windows'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Set up Bun (Windows baseline)
+        if: runner.os == 'Windows'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+          bun-download-url: https://github.com/oven-sh/bun/releases/download/bun-v${{ steps.bun-version.outputs.version }}/bun-windows-x64-baseline.zip
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -46,9 +66,11 @@ jobs:
       - name: Build desktop app
         run: pnpm desktop:build
 
-      - name: Upload installers
+      # Pull-request artifacts are for installation testing only. A public release
+      # must use the platform signing/notarization secrets in a dedicated workflow.
+      - name: Upload unsigned CI installers
         uses: actions/upload-artifact@v4
         with:
-          name: teammate-${{ matrix.platform }}
+          name: teammate-${{ matrix.platform }}-unsigned
           path: apps/desktop/src-tauri/target/release/bundle/**
           if-no-files-found: error

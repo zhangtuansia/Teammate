@@ -1,9 +1,22 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ExecutionSession,
+  type ExecutionTurn,
+  type NormalizedExecutionEvent,
+} from "@teammate/execution-core";
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
+import { ExecutionRuntimeAdapter } from "./execution-runtime-adapter.js";
+import {
+  enforcePrivateFileCreationMask,
+  ensurePrivateDirectory,
+  restrictPrivateFile,
+  writePrivateFile,
+} from "./private-filesystem.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { runtimeProcessEnvironment } from "./runtime-env.js";
 import {
   createAgentRuntime,
   normalizeRuntimeId,
@@ -11,10 +24,61 @@ import {
   type AgentRuntimeId,
   type RuntimeActivity,
   type RuntimeConnectionConfig,
-  type RuntimeEvent,
+  type RuntimeThinkingLevel,
 } from "./runtimes/index.js";
 
 const ACTIVITY_HEARTBEAT_MS = 60_000;
+const ACTIVITY_SEND_ERROR_LOG_INTERVAL_MS = 30_000;
+export const DEFAULT_AGENT_TURN_TIMEOUT_MS = 10 * 60_000;
+const RUNTIME_ERROR_MESSAGE_PREFIX = "<!-- teammate:runtime-error -->";
+const RUNTIME_TURN_TIMEOUT_MESSAGE =
+  "The AI response timed out. Teammate is restarting the runtime before continuing queued messages. Retry this message; if it keeps happening, check the model connection or choose another model.";
+const CODEX_MODELS = new Set([
+  "default",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.3-codex",
+]);
+const EXPLICIT_FINAL_LABEL = /^(?:final(?: answer| response)?|最终(?:答复|回复|结果|结论))\s*[:：-]\s*/i;
+
+function normalizeVisibleOutput(value: string) {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function isEquivalentVisibleOutput(existing: string, runtimeOutput: string) {
+  const normalizedExisting = normalizeVisibleOutput(existing);
+  const normalizedRuntime = normalizeVisibleOutput(runtimeOutput);
+  if (!normalizedExisting || !normalizedRuntime) return false;
+  if (normalizedExisting === normalizedRuntime) return true;
+
+  const labeledExisting = normalizedExisting.replace(EXPLICIT_FINAL_LABEL, "");
+  const labeledRuntime = normalizedRuntime.replace(EXPLICIT_FINAL_LABEL, "");
+  if (labeledExisting === labeledRuntime) return true;
+
+  const shorter = labeledExisting.length <= labeledRuntime.length
+    ? labeledExisting
+    : labeledRuntime;
+  const longer = labeledExisting.length > labeledRuntime.length
+    ? labeledExisting
+    : labeledRuntime;
+  return shorter.length >= 80 && shorter.length / longer.length >= 0.95 && longer.includes(shorter);
+}
+
+function runtimeConnectionErrorMessage(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return runtimeConnectionErrorMessage(record.message) ||
+    runtimeConnectionErrorMessage(record.error) ||
+    runtimeConnectionErrorMessage(record.detail);
+}
 
 interface AgentRecord {
   id: string;
@@ -25,6 +89,7 @@ interface AgentRecord {
   runtime?: string | null;
   model: string;
   connection_id?: string | null;
+  thinking_level?: string | null;
   status: string;
 }
 
@@ -37,6 +102,7 @@ interface AgentSession {
 
 interface QueuedMessage {
   userMessage: string;
+  channelId: string | null;
   resolve: () => void;
   reject: (error: Error) => void;
 }
@@ -46,13 +112,19 @@ interface ManagedRuntime {
   runtimeId: AgentRuntimeId;
   model: string;
   connectionId: string | null;
+  thinkingLevel: RuntimeThinkingLevel;
   sessionId: string | null;
   busy: boolean;
   activity: RuntimeActivity;
   activityLabel: string;
   activityDetail: string;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
-  messageQueue: QueuedMessage[];
+  execution: ExecutionSession<QueuedMessage, RuntimeThinkingLevel>;
+  executionAdapter: ExecutionRuntimeAdapter<RuntimeThinkingLevel>;
+  activeChannelId: string | null;
+  pendingOutput: string;
+  turnStartSeq: number | null;
+  eventTail: Promise<void>;
   restartAfterTurn: boolean;
 }
 
@@ -62,17 +134,28 @@ interface StoredSession {
   session_id?: string | null;
 }
 
+export interface AgentManagerOptions {
+  turnTimeoutMs?: number;
+}
+
 export class AgentManager {
   private readonly sessions = new Map<string, AgentSession>();
   private readonly processes = new Map<string, ManagedRuntime>();
   private readonly deliveryTails = new Map<string, Promise<void>>();
+  private readonly removedAgentIds = new Set<string>();
   private readonly agentsDir: string;
   private supabase: SupabaseClient;
   private readonly supabaseUrl: string;
   private readonly supabaseKey: string;
   private authToken: string;
+  private agentAuthTokens: Map<string, string>;
   private readonly localServerUrl: string;
+  private readonly serverId: string;
+  private readonly runtimeApiKey: string;
+  private readonly refreshAgentAuthTokens?: () => Promise<Record<string, string>>;
+  private readonly turnTimeoutMs: number;
   private activityChannel: RealtimeChannel;
+  private lastActivitySendErrorLogAt = 0;
 
   constructor(
     agentsDir: string,
@@ -81,36 +164,84 @@ export class AgentManager {
     supabaseKey: string,
     authToken = "",
     localServerUrl = "",
+    serverId = "local",
+    runtimeApiKey = "",
+    agentAuthTokens: Record<string, string> = {},
+    refreshAgentAuthTokens?: () => Promise<Record<string, string>>,
+    options: AgentManagerOptions = {},
   ) {
     this.agentsDir = agentsDir;
     this.supabase = supabase;
     this.supabaseUrl = supabaseUrl;
     this.supabaseKey = supabaseKey;
     this.authToken = authToken;
+    this.agentAuthTokens = new Map(Object.entries(agentAuthTokens));
     this.localServerUrl = localServerUrl;
+    this.serverId = serverId;
+    this.runtimeApiKey = runtimeApiKey;
+    this.refreshAgentAuthTokens = refreshAgentAuthTokens;
+    const turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_AGENT_TURN_TIMEOUT_MS;
+    if (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs < 1 || turnTimeoutMs > 2_147_483_647) {
+      throw new RangeError("Agent turn timeout must be between 1 and 2147483647 ms");
+    }
+    this.turnTimeoutMs = Math.floor(turnTimeoutMs);
 
-    if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
+    enforcePrivateFileCreationMask();
+    ensurePrivateDirectory(agentsDir);
 
-    this.activityChannel = this.supabase.channel("agent-activity", {
-      config: { broadcast: { self: false } },
+    this.activityChannel = this.supabase.channel(`agent-activity:${this.serverId}`, {
+      config: { private: true, broadcast: { ack: true, self: false } },
     });
-    this.activityChannel.subscribe();
+    this.activityChannel.subscribe((status, error) => {
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        console.error("  Agent activity subscription failed:", status, error || "");
+      }
+    });
   }
 
-  updateSupabaseClient(supabase: SupabaseClient, authToken: string) {
+  updateSupabaseClient(
+    supabase: SupabaseClient,
+    authToken: string,
+    agentAuthTokens: Record<string, string> = {},
+  ) {
     this.supabase.removeChannel(this.activityChannel);
     this.supabase = supabase;
     this.authToken = authToken;
-    this.activityChannel = this.supabase.channel("agent-activity", {
-      config: { broadcast: { self: false } },
+    this.activityChannel = this.supabase.channel(`agent-activity:${this.serverId}`, {
+      config: { private: true, broadcast: { ack: true, self: false } },
     });
-    this.activityChannel.subscribe();
+    this.activityChannel.subscribe((status, error) => {
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        console.error("  Agent activity subscription failed:", status, error || "");
+      }
+    });
+
+    this.updateAgentAuthTokens(agentAuthTokens);
+  }
+
+  updateAgentAuthTokens(agentAuthTokens: Record<string, string>) {
+    this.agentAuthTokens = new Map(Object.entries(agentAuthTokens));
+    // Spawned runtimes inherit the scoped token through their environment.
+    // Recycle idle handles now and busy handles after their current turn so
+    // subsequent CLI calls never keep using the retired token.
+    for (const [agentId, managed] of this.processes) {
+      if (managed.busy || managed.execution.queueLength > 0) {
+        managed.restartAfterTurn = true;
+        continue;
+      }
+      this.stopManagedRuntime(managed);
+      this.processes.delete(agentId);
+    }
   }
 
   async initAgent(agentId: string, agent: AgentRecord) {
+    this.removedAgentIds.delete(agentId);
     const workDir = join(this.agentsDir, agentId);
-    if (!existsSync(workDir)) {
-      mkdirSync(join(workDir, "notes"), { recursive: true });
+    const existingWorkspace = existsSync(workDir);
+    ensurePrivateDirectory(workDir);
+    ensurePrivateDirectory(join(workDir, "notes"));
+    const memoryPath = join(workDir, "MEMORY.md");
+    if (!existsSync(memoryPath)) {
       const memoryContent = `# ${agent.display_name}
 
 ## Role
@@ -123,7 +254,11 @@ ${agent.description || agent.display_name}
 - Status: First startup — no prior conversations.
 - Workspace initialized at: ${new Date().toISOString().split("T")[0]}
 `;
-      writeFileSync(join(workDir, "MEMORY.md"), memoryContent);
+      writePrivateFile(memoryPath, memoryContent);
+    } else {
+      restrictPrivateFile(memoryPath);
+    }
+    if (!existingWorkspace) {
       console.log(`  [${agent.display_name}] Workspace created: ${workDir}`);
     } else {
       console.log(`  [${agent.display_name}] Workspace exists: ${workDir}`);
@@ -141,11 +276,15 @@ ${agent.description || agent.display_name}
       .eq("id", agentId);
   }
 
-  async sendToAgent(agentId: string, userMessage: string): Promise<void> {
+  async sendToAgent(
+    agentId: string,
+    userMessage: string,
+    channelId: string | null = null,
+  ): Promise<void> {
     const previous = this.deliveryTails.get(agentId) || Promise.resolve();
     const delivery = previous
       .catch(() => undefined)
-      .then(() => this.sendToAgentNow(agentId, userMessage));
+      .then(() => this.sendToAgentNow(agentId, userMessage, channelId));
     this.deliveryTails.set(agentId, delivery);
     try {
       await delivery;
@@ -159,9 +298,12 @@ ${agent.description || agent.display_name}
   private async sendToAgentNow(
     agentId: string,
     userMessage: string,
+    channelId: string | null,
   ): Promise<void> {
     const session = this.sessions.get(agentId);
-    if (!session) throw new Error(`Agent ${agentId} not initialized`);
+    if (!session || this.removedAgentIds.has(agentId)) {
+      throw new Error(`Agent ${agentId} not initialized`);
+    }
 
     const { data: rawAgent, error } = await this.supabase
       .from("agents")
@@ -171,60 +313,152 @@ ${agent.description || agent.display_name}
     if (error || !rawAgent) {
       throw new Error(error?.message || `Agent ${agentId} not found`);
     }
+    if (this.removedAgentIds.has(agentId) || !this.sessions.has(agentId)) {
+      throw new Error(`Agent ${agentId} was removed`);
+    }
     const agent = rawAgent as AgentRecord;
 
     const current = this.processes.get(agentId);
     if (current?.busy) {
       console.log(
-        `  [${session.displayName}] Agent busy, queueing message (${current.messageQueue.length + 1} queued)...`,
+        `  [${session.displayName}] Agent busy, queueing message (${current.execution.queueLength + 1} queued)...`,
       );
       return new Promise<void>((resolve, reject) => {
-        current.messageQueue.push({ userMessage, resolve, reject });
+        const payload = { userMessage, channelId, resolve, reject };
+        const result = current.execution.phase === "running"
+          ? current.execution.submit(payload)
+          : current.execution.enqueue(payload);
+        if (result.kind !== "queued") {
+          reject(new Error("Could not queue the message while the runtime was busy"));
+        }
       });
     }
 
     const runtimeId = normalizeRuntimeId(agent.runtime);
-    const model = this.resolveModel(runtimeId, agent.model);
+    const storedModel = this.resolveModel(runtimeId, agent.model);
+    const model = runtimeId === "pi" && storedModel === "default" &&
+      current?.runtimeId === "pi" && current.connectionId === (agent.connection_id || null)
+      ? current.model
+      : storedModel;
     let managed = current;
     if (
       !managed ||
       !managed.handle.isRunning() ||
       managed.runtimeId !== runtimeId ||
       managed.model !== model ||
-      managed.connectionId !== (agent.connection_id || null)
+      managed.connectionId !== (agent.connection_id || null) ||
+      managed.thinkingLevel !== this.resolveThinkingLevel(agent.thinking_level)
     ) {
-      const queued = managed?.messageQueue || [];
+      const execution = managed?.execution;
+      if (execution) execution.rotateGeneration();
       this.stopManagedRuntime(managed);
-      managed = await this.startManagedRuntime(agentId, session, agent, queued);
+      try {
+        managed = await this.startManagedRuntime(agentId, session, agent, execution);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Agent runtime failed to start";
+        this.sendActivity(agentId, "error", "Runtime error", "", channelId);
+        if (channelId) await this.persistRuntimeError(agentId, channelId, message);
+        throw error;
+      }
+      if (this.removedAgentIds.has(agentId) || !this.sessions.has(agentId)) {
+        const removalError = new Error(`Agent ${agentId} was removed`);
+        const disposed = managed.execution.dispose(removalError.message);
+        for (const queued of disposed.dropped) queued.payload.reject(removalError);
+        this.stopManagedRuntime(managed);
+        throw removalError;
+      }
       this.processes.set(agentId, managed);
     }
 
-    await this.deliverMessage(agentId, managed, session, userMessage);
+    await this.deliverMessage(agentId, managed, session, userMessage, channelId);
   }
 
   getWorkspaceDir(agentId: string): string | null {
     return this.sessions.get(agentId)?.workDir ?? null;
   }
 
+  async cancelAgentTurn(agentId: string, reason = "User requested stop") {
+    const managed = this.processes.get(agentId);
+    if (!managed) return false;
+    const operation = managed.eventTail
+      .catch(() => undefined)
+      .then(() => this.cancelManagedTurn(agentId, managed, reason));
+    managed.eventTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async cancelManagedTurn(
+    agentId: string,
+    managed: ManagedRuntime,
+    reason: string,
+  ) {
+    if (this.processes.get(agentId) !== managed) return false;
+    const activeTurn = managed.execution.activeTurn;
+    if (!activeTurn) return false;
+
+    const cancelled = managed.execution.cancel(reason);
+    const cancelError = new Error(reason);
+    for (const queued of cancelled.dropped) queued.payload.reject(cancelError);
+    managed.pendingOutput = "";
+    managed.activeChannelId = null;
+    managed.busy = false;
+
+    let backendCancelled = false;
+    try {
+      backendCancelled = await managed.executionAdapter.cancel(reason, activeTurn);
+    } catch (error) {
+      console.error(
+        `  [${agentId}] Runtime cancellation failed: ${
+          error instanceof Error ? error.message : "Unknown cancellation error"
+        }`,
+      );
+    }
+
+    if (backendCancelled) {
+      managed.execution.completeCancellation();
+    } else {
+      // An undeclared/unsupported cancellation capability must not leave a
+      // provider running behind a locally-cancelled turn.
+      managed.execution.dispose(reason);
+      this.stopManagedRuntime(managed);
+      if (this.processes.get(agentId) === managed) this.processes.delete(agentId);
+    }
+    this.broadcastActivity(agentId, "idle", "Idle", "");
+    return true;
+  }
+
+  removeAgent(agentId: string) {
+    this.removedAgentIds.add(agentId);
+    const managed = this.processes.get(agentId);
+    this.processes.delete(agentId);
+    this.sessions.delete(agentId);
+    this.deliveryTails.delete(agentId);
+
+    if (!managed) return;
+    const error = new Error("Agent removed");
+    const disposed = managed.execution.dispose(error.message);
+    for (const queued of disposed.dropped) queued.payload.reject(error);
+    this.stopManagedRuntime(managed);
+  }
+
   stopAll() {
     for (const [agentId, managed] of this.processes) {
-      for (const queued of managed.messageQueue) {
-        queued.reject(new Error("Agent manager stopped"));
-      }
-      managed.messageQueue = [];
+      this.removedAgentIds.add(agentId);
+      const error = new Error("Agent manager stopped");
+      const disposed = managed.execution.dispose(error.message);
+      for (const queued of disposed.dropped) queued.payload.reject(error);
       console.log(`  Stopping agent runtime: ${agentId}`);
       this.stopManagedRuntime(managed);
     }
     this.processes.clear();
     this.sessions.clear();
+    this.deliveryTails.clear();
     this.supabase.removeChannel(this.activityChannel);
   }
 
   private resolveModel(runtimeId: AgentRuntimeId, model: string | null | undefined) {
     if (runtimeId === "codex") {
-      return model && !["opus", "sonnet", "haiku"].includes(model)
-        ? model
-        : "default";
+      return model && CODEX_MODELS.has(model) ? model : "default";
     }
     if (runtimeId === "pi") {
       return model?.trim() || "default";
@@ -232,6 +466,10 @@ ${agent.description || agent.display_name}
     return ["opus", "sonnet", "haiku"].includes(model || "")
       ? model!
       : "sonnet";
+  }
+
+  private resolveThinkingLevel(value: string | null | undefined): RuntimeThinkingLevel {
+    return value === "low" || value === "high" ? value : "medium";
   }
 
   private readSystemPrompt(session: AgentSession, agent: AgentRecord) {
@@ -246,18 +484,34 @@ ${agent.description || agent.display_name}
     agentId: string,
     session: AgentSession,
     agent: AgentRecord,
-    messageQueue: QueuedMessage[] = [],
+    existingExecution?: ExecutionSession<QueuedMessage, RuntimeThinkingLevel>,
   ): Promise<ManagedRuntime> {
     const runtimeId = normalizeRuntimeId(agent.runtime);
-    const model = this.resolveModel(runtimeId, agent.model);
+    let model = this.resolveModel(runtimeId, agent.model);
+    const thinkingLevel = this.resolveThinkingLevel(agent.thinking_level);
     const sessionId = await this.loadSessionId(agentId, runtimeId);
-    const zanoDir = this.prepareCliTransport(agentId, session);
+    const teammateDir = this.prepareCliTransport(agentId, session);
     const runtime = createAgentRuntime(runtimeId);
     const connection = runtimeId === "pi"
       ? await this.loadRuntimeConnection(agent.connection_id)
       : undefined;
+    if (connection) {
+      if (model === "default" || !model) model = connection.defaultModel;
+      if (!connection.models.some((candidate) => candidate.id === model)) {
+        throw new Error("The selected model is no longer available for this connection");
+      }
+    }
+    const agentAuthToken = await this.resolveAgentAuthToken(agentId);
+    const execution = existingExecution ?? new ExecutionSession<
+      QueuedMessage,
+      RuntimeThinkingLevel
+    >({ midStreamBehavior: "queue", thinkingLevel });
+    execution.updateDefaults({ midStreamBehavior: "queue", thinkingLevel });
+    const executionAdapter = new ExecutionRuntimeAdapter<RuntimeThinkingLevel>(
+      execution.generation,
+    );
     let managed: ManagedRuntime | null = null;
-    const pendingEvents: RuntimeEvent[] = [];
+    const pendingEvents: Array<NormalizedExecutionEvent<RuntimeActivity>> = [];
     const handle = await runtime.start(
       {
         agentId,
@@ -265,40 +519,53 @@ ${agent.description || agent.display_name}
         workDir: session.workDir,
         systemPrompt: this.readSystemPrompt(session, agent),
         model,
+        thinkingLevel,
         sessionId,
         connection,
         env: {
-          ...process.env,
+          ...runtimeProcessEnvironment(),
           FORCE_COLOR: "0",
           NO_COLOR: "1",
-          ZANO_AGENT_ID: agentId,
-          ZANO_SUPABASE_URL: this.supabaseUrl,
-          ZANO_SUPABASE_KEY: this.supabaseKey,
-          ZANO_AUTH_TOKEN: this.authToken,
+          TEAMMATE_AGENT_ID: agentId,
+          TEAMMATE_SUPABASE_URL: this.supabaseUrl,
+          TEAMMATE_SUPABASE_KEY: this.supabaseKey,
+          TEAMMATE_AUTH_TOKEN: agentAuthToken,
           ...(this.localServerUrl
-            ? { ZANO_LOCAL_SERVER_URL: this.localServerUrl }
+            ? { TEAMMATE_LOCAL_SERVER_URL: this.localServerUrl }
             : {}),
-          PATH: `${zanoDir}${delimiter}${process.env.PATH ?? ""}`,
+          PATH: `${teammateDir}${delimiter}${process.env.PATH ?? ""}`,
         },
       },
       (event) => {
-        if (managed) void this.handleRuntimeEvent(agentId, managed, event);
-        else pendingEvents.push(event);
+        const normalized = executionAdapter.normalize(event);
+        if (!normalized) return;
+        if (!managed) {
+          pendingEvents.push(normalized);
+          return;
+        }
+        this.enqueueRuntimeEvent(agentId, managed, normalized, session.displayName);
       },
     );
+    executionAdapter.attach(handle);
 
     managed = {
       handle,
       runtimeId,
       model,
       connectionId: agent.connection_id || null,
+      thinkingLevel,
       sessionId,
       busy: false,
       activity: "idle",
       activityLabel: "Idle",
       activityDetail: "",
       heartbeatTimer: null,
-      messageQueue,
+      execution,
+      executionAdapter,
+      activeChannelId: null,
+      pendingOutput: "",
+      turnStartSeq: null,
+      eventTail: Promise.resolve(),
       restartAfterTurn: false,
     };
     for (const event of pendingEvents) {
@@ -307,34 +574,117 @@ ${agent.description || agent.display_name}
     return managed;
   }
 
+  private async resolveAgentAuthToken(agentId: string): Promise<string> {
+    const current = this.agentAuthTokens.get(agentId);
+    if (current) return current;
+    if (this.refreshAgentAuthTokens) {
+      const refreshed = await this.refreshAgentAuthTokens();
+      this.agentAuthTokens = new Map(Object.entries(refreshed));
+      const token = this.agentAuthTokens.get(agentId);
+      if (token) return token;
+    }
+    throw new Error(`No scoped runtime credential is available for agent ${agentId}`);
+  }
+
   private async deliverMessage(
     agentId: string,
     managed: ManagedRuntime,
     session: AgentSession,
     userMessage: string,
+    channelId: string | null,
   ) {
+    const turnStartSeq = channelId
+      ? await this.loadLatestMessageSeq(channelId)
+      : null;
+    const submitted = managed.execution.submit({
+      userMessage,
+      channelId,
+      resolve: () => undefined,
+      reject: () => undefined,
+    }, {
+      midStreamBehavior: "queue",
+      thinkingLevel: managed.thinkingLevel,
+    });
+    if (submitted.kind !== "started") {
+      throw new Error("Could not start an execution turn on an idle runtime");
+    }
+    const turn = submitted.turn;
+    managed.executionAdapter.bindTurn(turn);
+    this.armTurnWatchdog(agentId, managed, turn);
     managed.busy = true;
+    managed.activeChannelId = channelId;
+    managed.pendingOutput = "";
+    managed.turnStartSeq = turnStartSeq;
     console.log(
       `  [${session.displayName}] Forwarding message to ${managed.runtimeId} (${userMessage.length} chars)...`,
     );
     this.broadcastActivity(agentId, "working", "Working", "Message received");
     try {
-      await managed.handle.send(userMessage);
+      const dispatch = managed.handle.send(userMessage);
+      void dispatch.catch((error: unknown) => {
+        const failure = managed.executionAdapter.normalizeDispatchFailure(turn, error);
+        if (failure) this.enqueueRuntimeEvent(agentId, managed, failure, session.displayName);
+      });
     } catch (error) {
-      if (managed.busy) {
-        await this.handleRuntimeEvent(agentId, managed, {
-          type: "turn-failed",
-          message: error instanceof Error ? error.message : "Runtime failed",
-        });
-      }
+      const failure = managed.executionAdapter.normalizeDispatchFailure(turn, error);
+      if (failure) this.enqueueRuntimeEvent(agentId, managed, failure, session.displayName);
     }
+  }
+
+  private armTurnWatchdog(
+    agentId: string,
+    managed: ManagedRuntime,
+    turn: ExecutionTurn<QueuedMessage, RuntimeThinkingLevel>,
+  ) {
+    managed.execution.armWatchdog(
+      turn,
+      this.turnTimeoutMs || DEFAULT_AGENT_TURN_TIMEOUT_MS,
+      (expiredTurn) => {
+        const timeout = managed.executionAdapter.normalizeTimeout(
+          expiredTurn,
+          RUNTIME_TURN_TIMEOUT_MESSAGE,
+        );
+        if (!timeout) return;
+        managed.restartAfterTurn = true;
+        this.enqueueRuntimeEvent(
+          agentId,
+          managed,
+          timeout,
+          this.sessions.get(agentId)?.displayName || agentId,
+        );
+      },
+    );
+  }
+
+  private enqueueRuntimeEvent(
+    agentId: string,
+    managed: ManagedRuntime,
+    event: NormalizedExecutionEvent<RuntimeActivity>,
+    displayName: string,
+  ) {
+    if (event.type === "terminal") {
+      managed.execution.clearWatchdog(event.turn);
+    }
+    managed.eventTail = managed.eventTail
+      .catch(() => undefined)
+      .then(() => this.handleRuntimeEvent(agentId, managed, event))
+      .catch((error) => {
+        console.error(
+          `  [${displayName}] Could not process runtime event: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`,
+        );
+      });
   }
 
   private async handleRuntimeEvent(
     agentId: string,
     managed: ManagedRuntime,
-    event: RuntimeEvent,
+    event: NormalizedExecutionEvent<RuntimeActivity>,
   ) {
+    if (this.removedAgentIds.has(agentId)) return;
+    if (managed.execution.phase === "disposed") return;
+    if (event.generation !== managed.execution.generation) return;
     const registered = this.processes.get(agentId);
     if (registered && registered !== managed && registered.handle.isRunning()) {
       return;
@@ -350,6 +700,7 @@ ${agent.description || agent.display_name}
         );
         break;
       case "activity":
+        if (event.turn && !managed.execution.isCurrent(event.turn)) return;
         this.broadcastActivity(
           agentId,
           event.activity,
@@ -357,70 +708,240 @@ ${agent.description || agent.display_name}
           event.detail || "",
         );
         break;
+      case "output":
+        if (!managed.execution.isCurrent(event.turn)) return;
+        managed.pendingOutput = event.text.trim().slice(0, 50_000);
+        break;
       case "context-compacting":
+        if (!managed.execution.isCurrent(event.turn)) return;
         managed.restartAfterTurn = true;
         this.broadcastActivity(agentId, "working", "Optimizing context", "");
         break;
-      case "turn-complete":
-        if (event.sessionId) {
-          managed.sessionId = event.sessionId;
-          await this.saveSessionId(agentId, managed.runtimeId, event.sessionId);
+      case "terminal": {
+        const finished = managed.execution.finish(event.turn, event.terminal);
+        if (!finished.accepted) return;
+        if (event.terminal.status === "timed_out") {
+          managed.restartAfterTurn = true;
         }
-        managed.busy = false;
-        this.broadcastActivity(agentId, "idle", "Idle", "");
-        console.log(`  [${displayName}] ${managed.runtimeId} turn complete.`);
-        if (managed.restartAfterTurn) {
-          await this.restartRuntime(agentId, managed);
+        if (event.terminal.sessionId) {
+          managed.sessionId = event.terminal.sessionId;
+          await this.saveSessionId(
+            agentId,
+            managed.runtimeId,
+            event.terminal.sessionId,
+          );
         }
-        this.drainQueue(agentId);
+        if (event.terminal.status === "completed") {
+          if (managed.activeChannelId && managed.pendingOutput) {
+            await this.persistOutputIfNeeded(
+              agentId,
+              managed.activeChannelId,
+              managed.pendingOutput,
+              managed.turnStartSeq,
+            );
+          }
+          managed.pendingOutput = "";
+          managed.busy = false;
+          // Preserve the turn's channel on the terminal event so the UI can
+          // settle the matching pending indicator without affecting another chat.
+          this.broadcastActivity(agentId, "idle", "Idle", "");
+          managed.activeChannelId = null;
+          console.log(`  [${displayName}] ${managed.runtimeId} turn complete.`);
+        } else {
+          const failedChannelId = managed.activeChannelId;
+          const message = event.terminal.message || "Runtime failed";
+          managed.pendingOutput = "";
+          const timedOut = event.terminal.status === "timed_out";
+          this.broadcastActivity(
+            agentId,
+            "error",
+            timedOut ? "Response timed out" : "Runtime error",
+            timedOut ? "The runtime will restart automatically. Retry the message." : "",
+          );
+          managed.activeChannelId = null;
+          console.error(`  [${displayName}] ${managed.runtimeId}: ${message}`);
+          if (failedChannelId) {
+            await this.persistRuntimeError(agentId, failedChannelId, message);
+          }
+          managed.busy = false;
+        }
+        await this.finalizeTurn(agentId, managed);
         break;
-      case "turn-failed":
-        if (!managed.busy && managed.activity === "error") return;
-        managed.busy = false;
-        this.broadcastActivity(agentId, "error", "Runtime error", event.message);
-        console.error(`  [${displayName}] ${managed.runtimeId}: ${event.message}`);
-        this.drainQueue(agentId);
-        break;
+      }
     }
+  }
+
+  private async finalizeTurn(agentId: string, managed: ManagedRuntime) {
+    let current = managed;
+    while (current.restartAfterTurn) {
+      // Keep new deliveries queued on this handle until its replacement is
+      // installed, so a refresh cannot race a message into two runtimes.
+      current.busy = true;
+      try {
+        current = await this.restartRuntime(agentId, current);
+      } catch (error) {
+        console.error(
+          `  [${agentId}] Could not restart runtime after turn: ${
+            error instanceof Error ? error.message : "Unknown runtime restart error"
+          }`,
+        );
+        return;
+      }
+    }
+    current.busy = false;
+    this.drainQueue(agentId);
   }
 
   private drainQueue(agentId: string) {
     const managed = this.processes.get(agentId);
-    const next = managed?.messageQueue.shift();
+    const next = managed?.execution.dequeue()?.payload;
     if (!next) return;
-    void this.sendToAgentNow(agentId, next.userMessage).then(
+    void this.sendToAgentNow(agentId, next.userMessage, next.channelId).then(
       next.resolve,
       next.reject,
     );
   }
 
+  private async persistRuntimeError(
+    agentId: string,
+    channelId: string,
+    message: string,
+  ) {
+    const detail = message.trim().slice(0, 4_000) || "The runtime failed without an error message.";
+    try {
+      const { error } = await this.supabase.from("messages").insert({
+        channel_id: channelId,
+        sender_id: agentId,
+        sender_type: "agent",
+        content: `${RUNTIME_ERROR_MESSAGE_PREFIX}\n${detail}`,
+      });
+      if (error) {
+        console.error(`  [${agentId}] Could not save runtime error message: ${error.message}`);
+      }
+    } catch (error) {
+      console.error(
+        `  [${agentId}] Could not save runtime error message: ${
+          error instanceof Error ? error.message : "Unknown persistence error"
+        }`,
+      );
+    }
+  }
+
+  private async loadLatestMessageSeq(channelId: string) {
+    const { data, error } = await this.supabase
+      .from("messages")
+      .select("seq")
+      .eq("channel_id", channelId)
+      .order("seq", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      console.error(`  Could not load message sequence: ${error.message}`);
+      return null;
+    }
+    const value = Number((data as { seq?: number | string | null } | null)?.seq || 0);
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  }
+
+  private async persistOutputIfNeeded(
+    agentId: string,
+    channelId: string,
+    output: string,
+    turnStartSeq: number | null,
+  ) {
+    if (turnStartSeq !== null) {
+      const { data: existingMessages, error: lookupError } = await this.supabase
+        .from("messages")
+        .select("id, content")
+        .eq("channel_id", channelId)
+        .eq("sender_id", agentId)
+        .eq("sender_type", "agent")
+        .gt("seq", turnStartSeq)
+        .order("seq", { ascending: false })
+        .limit(50);
+      if (lookupError) {
+        console.error(`  [${agentId}] Could not check visible runtime output: ${lookupError.message}`);
+      } else if (
+        ((existingMessages || []) as Array<{ content?: string | null }>).some(
+          (message) => typeof message.content === "string" &&
+            isEquivalentVisibleOutput(message.content, output),
+        )
+      ) {
+        return;
+      }
+    }
+
+    const { error } = await this.supabase.from("messages").insert({
+      channel_id: channelId,
+      sender_id: agentId,
+      sender_type: "agent",
+      content: output,
+    });
+    if (error) {
+      console.error(`  [${agentId}] Could not save runtime output: ${error.message}`);
+    }
+  }
+
   private async restartRuntime(agentId: string, previous: ManagedRuntime) {
     const session = this.sessions.get(agentId);
-    if (!session) return;
-    const { data } = await this.supabase
-      .from("agents")
-      .select("*")
-      .eq("id", agentId)
-      .single();
-    if (!data) return;
-
-    const queue = previous.messageQueue;
-    previous.messageQueue = [];
+    const execution = previous.execution;
+    // A token update racing the replacement will set this flag again on the
+    // still-registered handle. Carry that request onto the new runtime.
+    previous.restartAfterTurn = false;
+    execution.rotateGeneration();
     this.stopManagedRuntime(previous);
-    const replacement = await this.startManagedRuntime(
-      agentId,
-      session,
-      data as AgentRecord,
-      queue,
-    );
-    this.processes.set(agentId, replacement);
+
+    try {
+      if (!session || this.removedAgentIds.has(agentId)) {
+        throw new Error(`Agent ${agentId} is no longer available`);
+      }
+      const { data, error } = await this.supabase
+        .from("agents")
+        .select("*")
+        .eq("id", agentId)
+        .single();
+      if (error || !data) {
+        throw new Error(error?.message || `Agent ${agentId} is no longer available`);
+      }
+
+      const replacement = await this.startManagedRuntime(
+        agentId,
+        session,
+        data as AgentRecord,
+        execution,
+      );
+      if (this.removedAgentIds.has(agentId) || !this.sessions.has(agentId)) {
+        this.stopManagedRuntime(replacement);
+        throw new Error(`Agent ${agentId} was removed while its runtime restarted`);
+      }
+      replacement.restartAfterTurn = previous.restartAfterTurn;
+      this.processes.set(agentId, replacement);
+      return replacement;
+    } catch (error) {
+      const restartError = error instanceof Error
+        ? error
+        : new Error("Agent runtime restart failed");
+      const disposed = execution.dispose(restartError.message);
+      for (const queued of disposed.dropped) queued.payload.reject(restartError);
+      if (this.processes.get(agentId) === previous) {
+        this.processes.delete(agentId);
+      }
+      throw restartError;
+    }
   }
 
   private stopManagedRuntime(managed: ManagedRuntime | undefined) {
     if (!managed) return;
+    managed.execution.clearWatchdog();
     if (managed.heartbeatTimer) clearInterval(managed.heartbeatTimer);
     managed.heartbeatTimer = null;
-    managed.handle.stop();
+    try {
+      managed.handle.stop();
+    } catch (error) {
+      console.error(
+        `  Runtime stop failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+      );
+    }
   }
 
   private broadcastActivity(
@@ -453,12 +974,37 @@ ${agent.description || agent.display_name}
     activity: RuntimeActivity,
     label: string,
     detail: string,
+    channelId = this.processes.get(agentId)?.activeChannelId || null,
   ) {
-    this.activityChannel.send({
-      type: "broadcast",
-      event: "activity",
-      payload: { agentId, activity, label, detail },
-    });
+    void this.activityChannel
+      .send({
+        type: "broadcast",
+        event: "activity",
+        payload: {
+          serverId: this.serverId,
+          channelId,
+          agentId,
+          activity,
+          label,
+          detail,
+        },
+      })
+      .then((status) => {
+        if (status !== "ok") this.reportActivitySendError(status);
+      })
+      .catch((error: unknown) => this.reportActivitySendError(error));
+  }
+
+  private reportActivitySendError(error: unknown) {
+    const now = Date.now();
+    if (now - this.lastActivitySendErrorLogAt < ACTIVITY_SEND_ERROR_LOG_INTERVAL_MS) {
+      return;
+    }
+    this.lastActivitySendErrorLogAt = now;
+    console.error(
+      "  Agent activity broadcast failed:",
+      error instanceof Error ? error.message : error,
+    );
   }
 
   private async saveSessionId(
@@ -505,15 +1051,29 @@ ${agent.description || agent.display_name}
     if (!this.localServerUrl || !connectionId) {
       throw new Error("Pi requires a local model connection");
     }
-    const response = await fetch(
-      `${this.localServerUrl}/api/connections/${encodeURIComponent(connectionId)}/runtime`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.ZANO_API_KEY || "zk_local"}`,
+    let response: Response;
+    try {
+      response = await fetch(
+        `${this.localServerUrl}/api/connections/${encodeURIComponent(connectionId)}/runtime`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.runtimeApiKey}`,
+          },
+          signal: AbortSignal.timeout(15_000),
         },
-      },
-    );
-    const result = (await response.json()) as {
+      );
+    } catch (error) {
+      if (error instanceof Error && (
+        error.name === "AbortError" ||
+        error.name === "TimeoutError"
+      )) {
+        throw new Error("Timed out while loading the model connection. Try again.", {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+    const result = (await response.json().catch(() => ({}))) as {
       connection?: {
         id: string;
         name: string;
@@ -521,12 +1081,23 @@ ${agent.description || agent.display_name}
         base_url: string | null;
         api_format: RuntimeConnectionConfig["apiFormat"];
         default_model: string;
+        models: RuntimeConnectionConfig["models"];
         credential: RuntimeConnectionConfig["credential"];
       };
-      error?: string;
+      error?: unknown;
     };
     if (!response.ok || !result.connection) {
-      throw new Error(result.error || "Could not load Pi model connection");
+      throw new Error(
+        runtimeConnectionErrorMessage(result.error) || "Could not load Pi model connection",
+      );
+    }
+    if (
+      Array.isArray((result.connection as { models?: unknown }).models) &&
+      !(result.connection as { models: Array<{ id?: unknown }> }).models.some(
+        (model) => model && model.id === result.connection!.default_model,
+      )
+    ) {
+      throw new Error("The selected model is no longer available for this connection");
     }
     return {
       id: result.connection.id,
@@ -535,21 +1106,27 @@ ${agent.description || agent.display_name}
       baseUrl: result.connection.base_url,
       apiFormat: result.connection.api_format,
       defaultModel: result.connection.default_model,
+      models: result.connection.models,
       credential: result.connection.credential,
     };
   }
 
   private prepareCliTransport(agentId: string, session: AgentSession): string {
-    const zanoDir = join(session.workDir, ".zano");
-    if (!existsSync(zanoDir)) mkdirSync(zanoDir, { recursive: true });
+    const teammateDir = join(session.workDir, ".teammate");
+    // Move an existing pre-Teammate wrapper directory once instead of orphaning agent state.
+    const legacyDir = join(session.workDir, ".zano");
+    if (!existsSync(teammateDir) && existsSync(legacyDir)) {
+      renameSync(legacyDir, teammateDir);
+    }
+    ensurePrivateDirectory(teammateDir);
 
-    const wrapperPath = join(zanoDir, "zano");
+    const wrapperPath = join(teammateDir, "teammate");
     const bashPath = (path: string) =>
       `'${path.replace(/\\/g, "/").replace(/'/g, "'\\''")}'`;
     const cmdPath = (path: string) => `"${path.replace(/"/g, '""')}"`;
     let bashCommand: string;
     let windowsCommand: string;
-    const packagedCliPath = process.env.ZANO_CLI_PATH;
+    const packagedCliPath = process.env.TEAMMATE_CLI_PATH;
 
     if (this.localServerUrl && packagedCliPath && existsSync(packagedCliPath)) {
       bashCommand = `${bashPath(packagedCliPath)} "$@"`;
@@ -571,7 +1148,7 @@ ${agent.description || agent.display_name}
     } else {
       try {
         const req = createRequire(import.meta.url);
-        const cliPath = req.resolve("@fehey/zano-cli/dist/index.js");
+        const cliPath = req.resolve("@teammate/cli/dist/index.js");
         bashCommand = `node ${bashPath(cliPath)} "$@"`;
         windowsCommand = `node ${cmdPath(cliPath)} %*`;
       } catch {
@@ -597,6 +1174,6 @@ ${agent.description || agent.display_name}
     if (process.platform === "win32") {
       writeFileSync(`${wrapperPath}.cmd`, `@echo off\r\n${windowsCommand}\r\n`);
     }
-    return zanoDir;
+    return teammateDir;
   }
 }

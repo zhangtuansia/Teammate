@@ -11,10 +11,12 @@ export type {
   RuntimeEvent,
   RuntimeLaunchConfig,
   RuntimeConnectionConfig,
+  RuntimeThinkingLevel,
+  RuntimeModelDefinition,
 } from "./types.js";
 
 export function normalizeRuntimeId(value: unknown): AgentRuntimeId {
-  return value === "codex" || value === "pi" ? value : "claude-code";
+  return value === "claude-code" || value === "pi" ? value : "codex";
 }
 
 export function createAgentRuntime(id: AgentRuntimeId): AgentRuntime {

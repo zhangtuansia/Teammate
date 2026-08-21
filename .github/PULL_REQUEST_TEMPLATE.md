@@ -16,7 +16,7 @@
 
 ## Checklist
 
-- [ ] I've tested this locally (web in a browser, bridge via `pnpm dev:bridge`, or both)
+- [ ] I've tested this locally (web in a browser, agent runtime via `pnpm dev:runtime`, or both)
 - [ ] I've updated docs / READMEs if behavior changed
 - [ ] I've considered RLS / auth implications if I touched the database or `/api` routes
 - [ ] If this is a breaking change, I've called it out in the PR description

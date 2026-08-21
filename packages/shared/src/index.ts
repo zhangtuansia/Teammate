@@ -1,5 +1,5 @@
 // ============================================================
-// Zano — Shared Types
+// Teammate — Shared Types
 // ============================================================
 
 // --- Users & Agents ---
@@ -107,9 +107,42 @@ export interface Task {
   message_id: string;
   channel_id: string;
   task_number: number;
+  title: string;
+  description: string;
   status: TaskStatus;
+  parent_task_id: string | null;
   assignee_id: string | null;
   assignee_type: "human" | "agent" | null;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- Workspace Documents ---
+
+export interface WorkspaceDocument {
+  id: string;
+  server_id: string;
+  title: string;
+  content: string;
+  created_by: string | null;
+  generated_by_agent_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceTask {
+  id: string;
+  message_id: string;
+  channel_id: string;
+  task_number: number;
+  title: string;
+  description: string;
+  status: "todo" | "in_progress" | "in_review" | "done";
+  parent_task_id: string | null;
+  assignee_id: string | null;
+  assignee_type: "human" | "agent" | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }

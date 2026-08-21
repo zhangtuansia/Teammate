@@ -1,3 +1,7 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+overrides:
+  "react-notion-avatar>@types/react": "^19"
+  "react-notion-avatar>@types/react-dom": "^19"

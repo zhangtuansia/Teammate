@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Zano MCP Chat Bridge
+ * Teammate MCP chat runtime
  *
  * A standalone MCP server that Claude Code agents can call to:
  * - send_message: Send messages to channels or DMs
@@ -171,7 +171,7 @@ function formatTimestamp(iso: string): string {
 
 // Create MCP server
 const server = new McpServer({
-  name: "zano-chat",
+  name: "teammate-chat",
   version: "1.0.0",
 });
 
@@ -423,6 +423,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Chat bridge fatal error:", err);
+  console.error("Chat runtime fatal error:", err);
   process.exit(1);
 });

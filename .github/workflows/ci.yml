@@ -32,12 +32,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Lint has known pre-existing issues from a recent React 19 / Next 16 upgrade.
-      # Surface them in CI output but don't block the build until they're cleaned up.
-      # See CONTRIBUTING.md — this is a good first-issue opportunity.
       - name: Lint
         run: pnpm lint
-        continue-on-error: true
+
+      - name: Type check
+        run: |
+          pnpm --filter @teammate/web exec tsc --noEmit
+          pnpm desktop:check
+
+      - name: Core tests
+        run: |
+          pnpm --filter @teammate/execution-core test
+          pnpm --filter @teammate/local-server test
+          pnpm --filter @teammate/runtime test
 
       - name: Build
         run: pnpm build
@@ -45,5 +52,5 @@ jobs:
           # The Next.js build reads these at compile time. CI uses placeholders
           # since we're only checking that the build succeeds — no actual data
           # access happens. Self-hosters set their real values in their deploy env.
-          NEXT_PUBLIC_ZANO_LOCAL_MODE: "true"
-          NEXT_PUBLIC_ZANO_LOCAL_SERVER_URL: http://127.0.0.1:8787
+          NEXT_PUBLIC_TEAMMATE_LOCAL_MODE: "true"
+          NEXT_PUBLIC_TEAMMATE_LOCAL_SERVER_URL: http://127.0.0.1:8787

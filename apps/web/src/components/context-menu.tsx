@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { ContextMenu as ContextMenuPrimitive } from "@base-ui/react/context-menu";
+import type { ReactNode } from "react";
+import { MenuItem, MenuPopup } from "@/components/ui/menu";
+import { cn } from "@/lib/utils";
 
 interface MenuItem {
   label: string;
@@ -10,70 +13,32 @@ interface MenuItem {
 }
 
 interface ContextMenuProps {
-  x: number;
-  y: number;
+  children: ReactNode;
+  className?: string;
   items: MenuItem[];
-  onClose: () => void;
 }
 
-export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    }
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
-    }
-    // Use setTimeout to avoid the same click that opened the menu from closing it
-    setTimeout(() => {
-      document.addEventListener("mousedown", handleClick);
-      document.addEventListener("keydown", handleKeyDown);
-    }, 0);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [onClose]);
-
-  // Adjust position to stay within viewport
-  useEffect(() => {
-    if (!menuRef.current) return;
-    const rect = menuRef.current.getBoundingClientRect();
-    if (rect.right > window.innerWidth) {
-      menuRef.current.style.left = `${x - rect.width}px`;
-    }
-    if (rect.bottom > window.innerHeight) {
-      menuRef.current.style.top = `${y - rect.height}px`;
-    }
-  }, [x, y]);
-
+export function ContextMenu({ children, className, items }: ContextMenuProps) {
   return (
-    <div
-      ref={menuRef}
-      className="fixed z-[60] min-w-[160px] rounded-lg border bg-popover py-1 shadow-md"
-      style={{ left: x, top: y }}
-    >
-      {items.map((item, i) => (
-        <button
-          key={i}
-          onClick={() => {
-            item.onClick();
-            onClose();
-          }}
-          className={`flex w-full items-center gap-2 px-3 py-1.5 text-sm transition-colors ${
-            item.danger
-              ? "text-destructive-foreground hover:bg-destructive/8"
-              : "text-foreground hover:bg-accent"
-          }`}
-        >
-          {item.icon && <span className="flex-shrink-0">{item.icon}</span>}
-          {item.label}
-        </button>
-      ))}
-    </div>
+    <ContextMenuPrimitive.Root>
+      <ContextMenuPrimitive.Trigger className={className}>
+        {children}
+      </ContextMenuPrimitive.Trigger>
+      <MenuPopup align="start" className="min-w-40" sideOffset={2}>
+        {items.map((item) => (
+          <MenuItem
+            key={item.label}
+            className={cn(
+              item.danger &&
+                "text-destructive-foreground data-highlighted:bg-destructive/8 data-highlighted:text-destructive-foreground",
+            )}
+            onClick={item.onClick}
+          >
+            {item.icon}
+            <span>{item.label}</span>
+          </MenuItem>
+        ))}
+      </MenuPopup>
+    </ContextMenuPrimitive.Root>
   );
 }

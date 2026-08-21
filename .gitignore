@@ -16,6 +16,8 @@ supabase/.branches/
 *.log
 
 # Local Node/SQLite mode runtime data
+.teammate/
+# Legacy local data may still exist until Teammate migrates it on startup.
 .zano/
 
 # Tauri desktop generated output and packaged sidecars

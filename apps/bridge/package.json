@@ -1,10 +1,10 @@
 {
-  "name": "@fehey/zano-bridge",
+  "name": "@teammate/runtime",
   "version": "0.1.5",
-  "description": "Zano local bridge — connects your Claude Code agents to Zano",
+  "description": "Teammate agent runtime — runs AI teammates and connects them to a workspace",
   "type": "module",
   "bin": {
-    "zano-bridge": "./dist/index.js"
+    "teammate-runtime": "./dist/index.js"
   },
   "files": [
     "dist"
@@ -12,25 +12,27 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "test": "tsx --test test/**/*.test.ts",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
-    "zano",
+    "teammate",
     "claude",
     "ai",
     "agent",
-    "bridge"
+    "runtime"
   ],
   "license": "MIT",
   "dependencies": {
-    "@fehey/zano-cli": "^0.1.0",
+    "@teammate/execution-core": "workspace:*",
+    "@teammate/cli": "workspace:*",
     "@mariozechner/pi-agent-core": "0.66.1",
     "@mariozechner/pi-ai": "0.66.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@sinclair/typebox": "^0.34.52",
     "@supabase/supabase-js": "^2.104.1",
-    "@zano/local-client": "workspace:*",
+    "@teammate/local-client": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

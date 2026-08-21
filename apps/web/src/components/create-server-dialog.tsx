@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useRef } from "react";
 import { apiUrl } from "@/lib/api-url";
+import { useAppSettings } from "@/hooks/use-app-settings";
+import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import {
   Dialog,
   DialogPopup,
@@ -16,6 +17,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldLabel, FieldDescription } from "@/components/ui/field";
+import {
+  isValidWorkspaceSlug,
+  normalizeWorkspaceSlug,
+  workspaceSlugFromName,
+} from "@/lib/workspace-slug";
 
 interface CreateServerDialogProps {
   open: boolean;
@@ -29,129 +35,180 @@ export function CreateServerDialog({ open, onClose }: CreateServerDialogProps) {
   const [description, setDescription] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
-  const router = useRouter();
+  const creatingRef = useRef(false);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const { t } = useAppSettings();
+  const { navigate } = useWorkspaceNavigation();
+  const normalizedSlug = slug.trim();
+  const slugValid = isValidWorkspaceSlug(normalizedSlug);
 
   useEffect(() => {
     if (open) {
-      setName("");
-      setSlug("");
-      setSlugTouched(false);
-      setDescription("");
-      setError("");
+      const frame = window.requestAnimationFrame(() => {
+        setName("");
+        setSlug("");
+        setSlugTouched(false);
+        setDescription("");
+        setError("");
+      });
+      return () => window.cancelAnimationFrame(frame);
     }
   }, [open]);
 
+  useEffect(() => () => {
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = null;
+    creatingRef.current = false;
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (creatingRef.current) return;
     if (!name.trim()) return;
+    if (!slug.trim()) {
+      setError(t("createWorkspace.slugRequired"));
+      return;
+    }
+    if (!slugValid) {
+      setError(t("createWorkspace.slugInvalid"));
+      return;
+    }
 
+    creatingRef.current = true;
     setCreating(true);
     setError("");
+    const requestController = new AbortController();
+    requestControllerRef.current = requestController;
+    const requestTimeout = window.setTimeout(() => requestController.abort(), 15_000);
 
     try {
       const res = await fetch(apiUrl("/api/servers"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: requestController.signal,
         body: JSON.stringify({
           name: name.trim(),
-          slug: slug.trim() || undefined,
+          slug: normalizedSlug,
           description: description.trim() || null,
         }),
       });
 
+      const data = (await res.json().catch(() => null)) as {
+        server?: { slug?: unknown };
+        error?: unknown;
+      } | null;
       if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Failed to create workspace");
+        if (res.status === 409) {
+          throw new Error(t("createWorkspace.slugInUse"));
+        }
+        throw new Error(
+          typeof data?.error === "string"
+            ? data.error
+            : t("createWorkspace.failed"),
+        );
+      }
+      if (typeof data?.server?.slug !== "string") {
+        throw new Error(t("createWorkspace.invalidResponse"));
       }
 
-      const { server } = await res.json();
       onClose();
-      router.push(`/s/${server.slug}`);
+      navigate(`/s/${data.server.slug}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create workspace");
+      setError(
+        err instanceof DOMException && err.name === "AbortError"
+          ? t("createWorkspace.failed")
+          : err instanceof Error
+            ? err.message
+            : t("createWorkspace.failed"),
+      );
     } finally {
+      window.clearTimeout(requestTimeout);
+      if (requestControllerRef.current === requestController) {
+        requestControllerRef.current = null;
+      }
+      creatingRef.current = false;
       setCreating(false);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !creating) onClose(); }}>
       <DialogPopup>
         <DialogHeader>
-          <DialogTitle>Create Workspace</DialogTitle>
-          <DialogDescription>Set up a new workspace for your team and agents.</DialogDescription>
+          <DialogTitle>{t("createWorkspace.title")}</DialogTitle>
+          <DialogDescription>{t("createWorkspace.description")}</DialogDescription>
         </DialogHeader>
         <form className="contents" onSubmit={handleSubmit}>
           <DialogPanel>
             <div className="space-y-4">
               <Field>
-                <FieldLabel>Workspace Name</FieldLabel>
+                <FieldLabel>{t("createWorkspace.name")}</FieldLabel>
                 <Input
                   type="text"
                   value={name}
                   onChange={(e) => {
                     const val = (e.target as HTMLInputElement).value;
                     setName(val);
+                    setError("");
                     if (!slugTouched) {
-                      setSlug(
-                        val
-                          .trim()
-                          .toLowerCase()
-                          .replace(/[^a-z0-9]+/g, "-")
-                          .replace(/^-|-$/g, "")
-                      );
+                      setSlug(workspaceSlugFromName(val));
                     }
                   }}
-                  placeholder="e.g. My Workspace, Acme Inc..."
+                  placeholder={t("createWorkspace.namePlaceholder")}
+                  maxLength={80}
                   required
                   autoFocus
                 />
               </Field>
 
               <Field>
-                <FieldLabel>URL Slug</FieldLabel>
+                <FieldLabel>{t("createWorkspace.slug")}</FieldLabel>
                 <div className="flex items-center gap-0 rounded-lg border border-input bg-background shadow-xs/5 transition-shadow focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24">
                   <span className="pl-3 text-sm text-muted-foreground select-none">/s/</span>
                   <input
+                    aria-label={t("createWorkspace.slug")}
+                    aria-invalid={slugTouched && !slugValid}
                     value={slug}
                     onChange={(e) => {
                       setSlugTouched(true);
-                      setSlug(
-                        e.target.value
-                          .toLowerCase()
-                          .replace(/[^a-z0-9-]/g, "")
-                      );
+                      setError("");
+                      setSlug(normalizeWorkspaceSlug(e.target.value));
                     }}
-                    placeholder="my-workspace"
+                    placeholder={t("createWorkspace.slugPlaceholder")}
+                    maxLength={64}
                     className="flex-1 bg-transparent px-1 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
                   />
                 </div>
-                <FieldDescription>
-                  Use lowercase letters, numbers, and hyphens.
+                <FieldDescription className={slugTouched && !slugValid ? "text-destructive" : undefined}>
+                  {t(slugTouched && !slugValid ? "createWorkspace.slugInvalid" : "createWorkspace.slugHint")}
                 </FieldDescription>
               </Field>
 
               <Field>
                 <FieldLabel>
-                  Description <span className="text-muted-foreground font-normal">(optional)</span>
+                  {t("createWorkspace.descriptionField")} <span className="text-muted-foreground font-normal">({t("createWorkspace.optional")})</span>
                 </FieldLabel>
                 <Input
                   type="text"
                   value={description}
-                  onChange={(e) => setDescription((e.target as HTMLInputElement).value)}
-                  placeholder="What's this workspace for?"
+                  onChange={(e) => {
+                    setDescription((e.target as HTMLInputElement).value);
+                    setError("");
+                  }}
+                  placeholder={t("createWorkspace.descriptionPlaceholder")}
+                  maxLength={500}
                 />
               </Field>
 
-              {error && <p className="text-sm text-destructive">{error}</p>}
+              {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
             </div>
           </DialogPanel>
           <DialogFooter>
-            <DialogClose render={<Button variant="ghost" type="button" />}>
-              Cancel
+            <DialogClose render={<Button variant="ghost" type="button" disabled={creating} />}>
+              {t("createWorkspace.cancel")}
             </DialogClose>
-            <Button type="submit" loading={creating} disabled={!name.trim()}>
-              Create
+            <Button type="submit" loading={creating} disabled={!name.trim() || !slugValid}>
+              {t("createWorkspace.create")}
             </Button>
           </DialogFooter>
         </form>

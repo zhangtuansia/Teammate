@@ -2,46 +2,62 @@
 
 ## Reporting a vulnerability
 
-If you discover a security vulnerability in Zano, **please do not open a public GitHub issue.** Instead, report it privately so it can be triaged and patched before details become public.
+Please do not open a public issue for a security vulnerability. Use [GitHub private vulnerability reporting](https://github.com/zhangtuansia/Teammate/security/advisories/new) so maintainers can triage and patch the issue before public disclosure.
 
-**Preferred channel:** [GitHub private vulnerability reporting](https://github.com/EryouHao/zano/security/advisories/new)
+Include:
 
-**Or by email:** `zaynhaodev@gmail.com` — please include `[zano security]` in the subject so it doesn't get lost.
-
-When reporting, please include:
-
-- A clear description of the vulnerability and its impact
-- Steps to reproduce (proof-of-concept code is helpful but not required)
-- The affected component (`apps/web`, `apps/bridge`, `packages/cli`, etc.) and version/commit
-- Any suggested mitigation, if you have one
-
-## What to expect
-
-- I aim to **acknowledge reports within 72 hours**.
-- For valid issues, I'll work on a fix and coordinate disclosure with you.
-- Zano is a small project maintained in personal time, so timelines for fixes will vary by severity. Critical issues take priority.
-- I'll credit you in the security advisory unless you'd rather stay anonymous.
+- a clear description and expected impact;
+- reproduction steps or a minimal proof of concept;
+- the affected component and commit/version;
+- a suggested mitigation, if you have one.
 
 ## Scope
 
-In-scope:
+In scope:
 
-- The Zano web application (`apps/web`)
-- The Zano bridge published as `@fehey/zano-bridge` on npm
-- The `@fehey/zano-cli` package
-- Database schema, RLS policies, and triggers in `packages/db`
+- the Tauri desktop app and packaged sidecars;
+- the local Node/SQLite service;
+- the Teammate web application;
+- the `@teammate/runtime` and `@teammate/cli` packages;
+- database schema, RLS policies, and authentication routes.
 
-Out of scope:
+Third-party dependency vulnerabilities should normally be reported upstream, but please notify this project when a Teammate update or mitigation is also required.
 
-- Vulnerabilities in third-party dependencies (please report those upstream — though feel free to ping me too if Zano needs a version bump)
-- Issues in the hosted infrastructure at `zano.fehey.com` that are *not* caused by application code (e.g. Supabase platform issues)
-- Social-engineering attacks, physical attacks, or anything requiring access to a victim's already-unlocked device
+## Local trust model
 
-## Hardening notes for self-hosters
+AI runtimes can read and modify files that the operating-system user can access. Treat every enabled agent and connected model provider as code running with the same trust level as your local account.
 
-If you're running Zano on your own infrastructure:
+- Keep agent workspaces scoped to the intended files.
+- Review custom model endpoints and skills before enabling them.
+- Keep API keys and OAuth tokens out of logs, screenshots, and SQLite.
+- Rotate a Supabase service-role key or runtime access key immediately if it is exposed.
+- Review RLS policies after any hosted schema change.
+- Pin runtime package versions in production remote deployments.
 
-- **Rotate the Supabase service role key** if it ever lands in a place it shouldn't (logs, error reports, screenshots).
-- **Keep RLS policies reviewed** when you change the schema — Zano relies on Supabase RLS to enforce channel/server isolation.
-- **The bridge runs Claude Code with your local credentials.** Treat any machine running the bridge as having the same trust level as the agents you let into it.
-- Pin the bridge to a specific version in production (`npx @fehey/zano-bridge@x.y.z`) rather than tracking `latest`.
+Hosted runtime JWTs are live-key- and workspace-scoped, but currently not
+per-agent. A runtime process can act as any agent owned by the same human in its
+claimed workspace. Use separate workspace owners/runtime keys when agents need
+mutual isolation, and never treat two agents under one runtime owner as separate
+security principals.
+
+Hosted workspace owners can remove another human through **Settings → Workspace
+members**. The owner-only, human-session `remove_server_human_member` RPC revokes
+that person's runtime keys and atomically removes their agents, direct messages,
+workspace/channel memberships, deliveries, and task assignments in the selected
+workspace. Direct owner deletes on `server_members` are intentionally rejected;
+shared-channel message history is preserved, and other workspaces are not
+touched. Supabase can cache authorization for an already-open private Realtime
+channel, so also stop the removed member's runtime when its existing WebSocket
+must be terminated immediately.
+
+Hosted runtime keys can only be provisioned by a human session through
+`create_current_user_machine_key`; direct table inserts and Bridge-session key
+minting are rejected. Workspace/member validation and the hash insert share the
+same transaction and lock order as member removal, so eviction cannot race with
+key creation and leave usable credentials behind. The full secret remains in
+the HTTPS response only and is never persisted in `machine_keys`. Removing a
+human membership also deletes that person's keys for the workspace in the same
+transaction, including self-leave, so later rejoining cannot reactivate an old
+credential.
+
+Teammate encrypts stored model credentials in a machine-bound credential file, but encryption does not protect a machine that is already unlocked and compromised.

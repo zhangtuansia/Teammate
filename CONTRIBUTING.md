@@ -1,6 +1,6 @@
 # Contributing to Teammate
 
-Thanks for your interest in Teammate. Teammate is a local-first derivative of Zano and is currently in an early refactoring stage.
+Thanks for your interest in Teammate. It is a local-first workspace where humans and AI teammates collaborate through chat, documents, and tasks.
 
 - **Issues and discussion are welcome any time.** Bug reports, feature ideas, "is this how I'm supposed to use it?" — all useful.
 - **Small focused PRs are the easiest to land.** Bug fixes, doc improvements, dependency bumps, small UX polish — go for it.
@@ -14,19 +14,19 @@ pnpm install
 pnpm dev:local
 ```
 
-Requirements: Node >= 22.5 and pnpm 10. Claude Code is currently required only when exercising real agent replies. Supabase is optional.
+Requirements: Node >= 22.5 and pnpm 10. Codex is the default local agent runtime. Supabase is optional.
 
 ## Project layout
 
 See the [README](README.md#repository-layout) for the monorepo overview. The most useful files when getting oriented:
 
 - `apps/local-server/src/index.ts` — local Node/SQLite message service and seed data.
-- `packages/local-client/src/index.ts` — compatibility client used by web, bridge, and CLI in local mode.
+- `packages/local-client/src/index.ts` — compatibility client used by web, runtime, and CLI in local mode.
 - `packages/db/src/schema.sql` — Supabase database schema retained for hosted mode.
-- `apps/bridge/src/bridge.ts` — main bridge loop. Subscribes to messages, spawns agents, and routes messages.
-- `apps/bridge/src/system-prompt.ts` — the prompt every Claude Code agent gets on startup. Defines how agents behave inside Zano.
+- `apps/bridge/src/bridge.ts` — main agent runtime loop. Subscribes to messages, starts agents, and routes messages.
+- `apps/bridge/src/system-prompt.ts` — the prompt that defines how agents behave inside Teammate.
 - `apps/web/src/app` — Next.js App Router routes, including the chat UI under `(chat)`.
-- `packages/cli/src/index.ts` — the `zano` CLI agents use to talk to the platform.
+- `packages/cli/src/index.ts` — the `teammate` CLI agents use to talk to the platform.
 
 ## Coding conventions
 
@@ -37,7 +37,7 @@ See the [README](README.md#repository-layout) for the monorepo overview. The mos
 
 ## Testing
 
-There are no automated tests yet — the codebase is small enough that manual testing has been sufficient. If you're adding non-trivial logic (especially in the bridge or CLI), consider adding tests with whatever framework feels appropriate; Vitest is a reasonable default.
+There are no automated tests yet. If you're adding non-trivial logic, especially in the agent runtime or CLI, consider adding focused tests; Vitest is a reasonable default.
 
 For UI changes, please test in a browser before submitting and call out anything that needs visual verification in the PR description.
 

@@ -4,7 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
-  if (process.env.NEXT_PUBLIC_ZANO_LOCAL_MODE === "true") {
+  if (process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === "true") {
     if (
       request.nextUrl.pathname.startsWith("/login") ||
       request.nextUrl.pathname.startsWith("/signup")

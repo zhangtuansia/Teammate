@@ -1,4 +1,5 @@
 import { apiUrl } from "@/lib/api-url";
+import { isAuthenticatedLocalAssetPath } from "@/lib/local-auth";
 
 export const AGENT_AVATAR_PRESETS = [
   "teammate-sun",
@@ -38,7 +39,9 @@ export function getAgentAvatarSeed(agentId: string, avatarUrl?: string | null) {
 
 export function resolveAgentAvatarImageUrl(avatarUrl?: string | null) {
   if (!avatarUrl || isGeneratedAgentAvatar(avatarUrl)) return null;
-  if (avatarUrl.startsWith("/")) return apiUrl(avatarUrl);
+  if (avatarUrl.startsWith("/")) {
+    return isAuthenticatedLocalAssetPath(avatarUrl) ? null : apiUrl(avatarUrl);
+  }
   if (/^(?:https:|data:|blob:)/i.test(avatarUrl)) return avatarUrl;
   return null;
 }

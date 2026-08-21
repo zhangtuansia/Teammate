@@ -10,11 +10,18 @@ export interface ActivityState {
   activity: AgentActivity;
   /** Human-readable label: "Thinking", "Reading file", "Sending message", etc. */
   label: string;
-  /** Specific detail: file path, command, message target, or agent text output */
+  /** Optional sanitized, user-facing detail. Never contains reasoning, commands, or paths. */
   detail: string;
+  /** Channel where the current turn is running. Null for workspace-wide idle state. */
+  channelId: string | null;
+  /** Terminal outcome for the most recent turn. */
+  terminal: "success" | "failure" | "timeout" | null;
+  /** Local receipt time used to ignore terminal events from an earlier turn. */
+  receivedAt: number;
 }
 
 type ActivitiesMap = Map<string, ActivityState>;
+const EMPTY_ACTIVITIES: ActivitiesMap = new Map();
 
 const AgentActivityContext = createContext<ActivitiesMap>(new Map());
 
@@ -23,63 +30,123 @@ const AgentActivityContext = createContext<ActivitiesMap>(new Map());
  * for agent activity. Mount once in a shared layout so all consumers
  * share the same subscription — no channel conflicts on unmount.
  */
-export function AgentActivityProvider({ children }: { children: ReactNode }) {
-  const [activities, setActivities] = useState<ActivitiesMap>(new Map());
+export function AgentActivityProvider({
+  children,
+  serverId,
+}: {
+  children: ReactNode;
+  serverId: string;
+}) {
+  const [snapshot, setSnapshot] = useState<{
+    serverId: string;
+    activities: ActivitiesMap;
+  }>({ serverId, activities: new Map() });
   const timeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const activities = snapshot.serverId === serverId ? snapshot.activities : EMPTY_ACTIVITIES;
 
   useEffect(() => {
     const supabase = createClient();
-    const channel = supabase.channel("agent-activity", {
-      config: { broadcast: { self: false } },
+    const timeouts = new Map<string, ReturnType<typeof setTimeout>>();
+    timeoutsRef.current = timeouts;
+    const channel = supabase.channel(`agent-activity:${serverId}`, {
+      config: { private: true, broadcast: { self: false } },
     });
 
     channel
       .on("broadcast", { event: "activity" }, (msg: { payload: Record<string, unknown> }) => {
-        const { agentId, activity, label, detail } = msg.payload as {
+        const { agentId, activity, label, detail, channelId, serverId: payloadServerId } = msg.payload as {
           agentId: string;
           activity: AgentActivity;
           label?: string;
           detail?: string;
+          channelId?: string | null;
+          serverId?: string;
         };
+        if (
+          payloadServerId !== serverId ||
+          typeof agentId !== "string" ||
+          !["idle", "thinking", "working", "error"].includes(activity)
+        ) {
+          return;
+        }
 
-        setActivities((prev) => {
-          const next = new Map(prev);
-          next.set(agentId, {
+        setSnapshot((currentSnapshot) => {
+          const currentActivities = currentSnapshot.serverId === serverId
+            ? currentSnapshot.activities
+            : EMPTY_ACTIVITIES;
+          const nextState: ActivityState = {
             activity,
-            label: label || "",
-            detail: detail || "",
-          });
-          return next;
+            label: typeof label === "string" ? label : "",
+            detail: typeof detail === "string" ? detail : "",
+            channelId: typeof channelId === "string" ? channelId : null,
+            terminal: activity === "idle"
+              ? "success"
+              : activity === "error"
+                ? "failure"
+                : null,
+            receivedAt: Date.now(),
+          };
+          const currentState = currentActivities.get(agentId);
+          if (
+            currentSnapshot.serverId === serverId &&
+            currentState?.activity === nextState.activity &&
+            currentState.label === nextState.label &&
+            currentState.detail === nextState.detail &&
+            currentState.channelId === nextState.channelId &&
+            currentState.terminal === nextState.terminal
+          ) {
+            return currentSnapshot;
+          }
+          const nextActivities = new Map(currentActivities);
+          nextActivities.set(agentId, nextState);
+          return { serverId, activities: nextActivities };
         });
 
-        // Set a timeout: if no update within 90s, fall back to idle
-        const existing = timeoutsRef.current.get(agentId);
+        // A lost terminal event must not leave the conversation in Thinking forever.
+        const existing = timeouts.get(agentId);
         if (existing) clearTimeout(existing);
 
         if (activity === "thinking" || activity === "working") {
-          timeoutsRef.current.set(
+          timeouts.set(
             agentId,
             setTimeout(() => {
-              setActivities((prev) => {
-                const next = new Map(prev);
-                next.set(agentId, { activity: "idle", label: "Idle", detail: "" });
-                return next;
+              setSnapshot((currentSnapshot) => {
+                if (currentSnapshot.serverId !== serverId) return currentSnapshot;
+                const currentState = currentSnapshot.activities.get(agentId);
+                if (
+                  currentState?.activity !== "thinking" &&
+                  currentState?.activity !== "working"
+                ) return currentSnapshot;
+                const nextActivities = new Map(currentSnapshot.activities);
+                nextActivities.set(agentId, {
+                  activity: "error",
+                  label: "Response timed out",
+                  detail: "",
+                  channelId: currentState.channelId,
+                  terminal: "timeout",
+                  receivedAt: Date.now(),
+                });
+                return { serverId, activities: nextActivities };
               });
-              timeoutsRef.current.delete(agentId);
+              timeouts.delete(agentId);
             }, 90_000)
           );
         } else {
-          timeoutsRef.current.delete(agentId);
+          timeouts.delete(agentId);
         }
       })
-      .subscribe();
+      .subscribe((status: string, error?: Error) => {
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("Agent activity subscription failed", { status, error, serverId });
+        }
+      });
 
     return () => {
       supabase.removeChannel(channel);
-      for (const t of timeoutsRef.current.values()) clearTimeout(t);
-      timeoutsRef.current.clear();
+      for (const timeout of timeouts.values()) clearTimeout(timeout);
+      timeouts.clear();
     };
-  }, []);
+  }, [serverId]);
 
   return React.createElement(AgentActivityContext.Provider, { value: activities }, children);
 }

@@ -1,13 +1,17 @@
 {
-  "name": "@zano/local-server",
+  "name": "@teammate/local-server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@mariozechner/pi-ai": "0.66.1"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -15,6 +19,6 @@
     "typescript": "^5.8.0"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.20"
   }
 }

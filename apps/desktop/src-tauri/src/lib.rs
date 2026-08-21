@@ -1,67 +1,153 @@
 use std::{
-    io::{Read, Write},
-    net::{SocketAddr, TcpStream},
-    sync::Mutex,
+    fmt::Write as _,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
     time::Duration,
 };
 use tauri::Manager;
 use tauri_plugin_shell::{process::CommandChild, process::CommandEvent, ShellExt};
 
-struct RuntimeProcess(Mutex<Option<CommandChild>>);
+const SIDECAR_SHUTDOWN_COMMAND: &[u8] = b"teammate:shutdown\n";
+const SIDECAR_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SIDECAR_SHUTDOWN_POLL_ATTEMPTS: usize = 120;
+#[cfg(debug_assertions)]
+const LOCAL_SERVER_PORT: &str = "8788";
+#[cfg(not(debug_assertions))]
+const LOCAL_SERVER_PORT: &str = "8787";
 
-fn local_runtime_available() -> bool {
-    let address = SocketAddr::from(([127, 0, 0, 1], 8787));
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(150)) else {
-        return false;
-    };
+struct RuntimeProcess {
+    child: Mutex<Option<CommandChild>>,
+    terminated: Arc<AtomicBool>,
+}
+struct LocalControllerCredential(String);
+struct AppLifecycle {
+    setup_complete: AtomicBool,
+}
 
-    let timeout = Some(Duration::from_millis(300));
-    let _ = stream.set_read_timeout(timeout);
-    let _ = stream.set_write_timeout(timeout);
+fn focus_or_create_main_window(app: &tauri::AppHandle) {
+    let window = app.get_webview_window("main").or_else(|| {
+        let lifecycle = app.try_state::<AppLifecycle>()?;
+        if !lifecycle.setup_complete.load(Ordering::Acquire) {
+            return None;
+        }
+        let config = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|config| config.label == "main")?;
+        match tauri::WebviewWindowBuilder::from_config(app, config)
+            .and_then(|builder| builder.build())
+        {
+            Ok(window) => {
+                configure_main_window_close(&window);
+                Some(window)
+            }
+            Err(error) => {
+                eprintln!("Could not restore the Teammate window: {error}");
+                None
+            }
+        }
+    });
 
-    if stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
+    if let Some(window) = window {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
     }
+}
 
-    let mut response = String::new();
-    stream.read_to_string(&mut response).is_ok()
-        && response.contains("\"ok\":true")
-        && response.contains("\"mode\":\"local\"")
+#[cfg(target_os = "macos")]
+fn configure_main_window_close(window: &tauri::WebviewWindow) {
+    let window_to_hide = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window_to_hide.hide();
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configure_main_window_close(_window: &tauri::WebviewWindow) {}
+
+fn generate_controller_credential() -> String {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).expect("operating system randomness is unavailable");
+    let mut credential = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut credential, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    credential
+}
+
+#[tauri::command]
+fn local_controller_credential(credential: tauri::State<'_, LocalControllerCredential>) -> String {
+    credential.0.clone()
 }
 
 impl Drop for RuntimeProcess {
     fn drop(&mut self) {
-        if let Ok(mut process) = self.0.lock() {
-            if let Some(child) = process.take() {
-                let _ = child.kill();
+        let Ok(mut process) = self.child.lock() else {
+            return;
+        };
+        let Some(mut child) = process.take() else {
+            return;
+        };
+        drop(process);
+
+        if child.write(SIDECAR_SHUTDOWN_COMMAND).is_ok() {
+            for _ in 0..SIDECAR_SHUTDOWN_POLL_ATTEMPTS {
+                if self.terminated.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(SIDECAR_SHUTDOWN_POLL_INTERVAL);
             }
         }
+        let _ = child.kill();
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let controller_credential = generate_controller_credential();
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            focus_or_create_main_window(app);
+        }));
+    }
+
+    builder
+        .manage(AppLifecycle {
+            setup_complete: AtomicBool::new(false),
+        })
+        .manage(LocalControllerCredential(controller_credential))
+        .invoke_handler(tauri::generate_handler![local_controller_credential])
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            if local_runtime_available() {
-                eprintln!("[runtime] reusing local service on 127.0.0.1:8787");
-                app.manage(RuntimeProcess(Mutex::new(None)));
-                return Ok(());
-            }
-
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            let controller_credential = app.state::<LocalControllerCredential>().0.clone();
 
             let data_dir_arg = data_dir.to_string_lossy().into_owned();
             let command = app
                 .shell()
                 .sidecar("teammate-runtime")?
-                .args(["--data-dir".to_string(), data_dir_arg]);
+                .args([
+                    "--data-dir".to_string(),
+                    data_dir_arg,
+                    "--port".to_string(),
+                    LOCAL_SERVER_PORT.to_string(),
+                ])
+                .env("TEAMMATE_LOCAL_CONTROLLER_TOKEN", controller_credential);
             let (mut events, child) = command.spawn()?;
+            let runtime_terminated = Arc::new(AtomicBool::new(false));
+            let event_terminated = Arc::clone(&runtime_terminated);
 
             tauri::async_runtime::spawn(async move {
                 while let Some(event) = events.recv().await {
@@ -76,16 +162,37 @@ pub fn run() {
                             eprintln!("[runtime] {error}");
                         }
                         CommandEvent::Terminated(payload) => {
+                            event_terminated.store(true, Ordering::Release);
                             eprintln!("[runtime] exited: {:?}", payload.code);
                         }
                         _ => {}
                     }
                 }
+                event_terminated.store(true, Ordering::Release);
             });
 
-            app.manage(RuntimeProcess(Mutex::new(Some(child))));
+            app.manage(RuntimeProcess {
+                child: Mutex::new(Some(child)),
+                terminated: runtime_terminated,
+            });
+            if let Some(window) = app.get_webview_window("main") {
+                configure_main_window_close(&window);
+            }
+            app.state::<AppLifecycle>()
+                .setup_complete
+                .store(true, Ordering::Release);
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Teammate desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building Teammate desktop")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                focus_or_create_main_window(app);
+            }
+        });
 }

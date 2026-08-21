@@ -1,6 +1,6 @@
 # Code of Conduct
 
-Zano follows the [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). The full text and translations live at the link above.
+Teammate follows the [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). The full text and translations live at the link above.
 
 ## In short
 
@@ -15,4 +15,4 @@ This applies to all project spaces — issues, pull requests, discussions, code 
 
 ## Reporting
 
-If you experience or witness behavior that violates this code, please report it to **`zaynhaodev@gmail.com`** with `[zano conduct]` in the subject. Reports are kept confidential. I'll review and respond as quickly as I can.
+If you experience or witness behavior that violates this code, contact the maintainers privately through the repository security contact. Reports are kept confidential and will be reviewed as quickly as possible.

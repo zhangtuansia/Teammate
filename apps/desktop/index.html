@@ -3,7 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f3ef" />
+    <meta name="theme-color" content="#f6f4f0" />
+    <style>
+      html, body { background: #f6f4f0; }
+      html.dark, html.dark body { background: #111110; }
+    </style>
+    <script>
+      (() => {
+        try {
+          const cached = JSON.parse(localStorage.getItem("teammate:desktop-settings") || "null");
+          const theme = cached?.theme === "light" || cached?.theme === "dark"
+            ? cached.theme
+            : "system";
+          const dark = theme === "dark" || (
+            theme === "system" && matchMedia("(prefers-color-scheme: dark)").matches
+          );
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+          if (cached?.language === "en-US" || cached?.language === "zh-CN") {
+            document.documentElement.lang = cached.language;
+          }
+          document.querySelector('meta[name="theme-color"]')?.setAttribute(
+            "content",
+            dark ? "#111110" : "#f6f4f0",
+          );
+        } catch {
+          // The React settings provider will apply the authoritative value.
+        }
+      })();
+    </script>
     <link rel="icon" href="/src-tauri/icons/32x32.png" />
     <title>Teammate</title>
   </head>

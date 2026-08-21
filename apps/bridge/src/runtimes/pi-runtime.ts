@@ -19,8 +19,8 @@ type WorkerMessage =
   | { type: "fatal"; error: string };
 
 function workerCommand(config: RuntimeLaunchConfig) {
-  const packagedPath = config.env.ZANO_PI_PATH;
-  const packagedWorker = config.env.ZANO_PI_WORKER;
+  const packagedPath = config.env.TEAMMATE_PI_PATH;
+  const packagedWorker = config.env.TEAMMATE_PI_WORKER;
   if (
     packagedPath &&
     packagedWorker &&
@@ -82,6 +82,7 @@ class PiRuntimeHandle implements AgentRuntimeHandle {
         workDir: config.workDir,
         systemPrompt: config.systemPrompt,
         model: config.model,
+        thinkingLevel: config.thinkingLevel,
         connection: config.connection,
       },
     });

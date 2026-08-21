@@ -25,17 +25,17 @@ function describeCodexItem(item: CodexJsonEvent["item"]) {
   if (!item) return null;
   switch (item.type) {
     case "reasoning":
-      return { activity: "thinking" as const, label: "Thinking", detail: item.text || "" };
+      return { activity: "thinking" as const, label: "Thinking", detail: "" };
     case "agent_message":
-      return { activity: "thinking" as const, label: "", detail: item.text || "" };
+      return { activity: "thinking" as const, label: "Preparing response", detail: "" };
     case "command_execution":
-      return { activity: "working" as const, label: "Running command", detail: item.command || "" };
+      return { activity: "working" as const, label: "Running command", detail: "" };
     case "file_change":
       return { activity: "working" as const, label: "Editing files", detail: "" };
     case "mcp_tool_call":
-      return { activity: "working" as const, label: "Using MCP", detail: item.name || "" };
+      return { activity: "working" as const, label: "Using a tool", detail: "" };
     case "web_search":
-      return { activity: "working" as const, label: "Searching web", detail: item.query || "" };
+      return { activity: "working" as const, label: "Searching web", detail: "" };
     case "todo_list":
       return { activity: "working" as const, label: "Updating plan", detail: "" };
     default:
@@ -47,6 +47,7 @@ class CodexHandle implements AgentRuntimeHandle {
   readonly runtimeId = "codex" as const;
   private currentSessionId: string | null;
   private activeChild: ChildProcess | null = null;
+  private finalOutput = "";
   private stopped = false;
 
   constructor(
@@ -67,6 +68,7 @@ class CodexHandle implements AgentRuntimeHandle {
   async send(message: string) {
     if (this.stopped) throw new Error("Codex runtime has stopped");
     if (this.activeChild) throw new Error("Codex is already processing a turn");
+    this.finalOutput = "";
 
     const prompt = `${this.config.systemPrompt}\n\n## Incoming Teammate message\n\n${message}`;
     const args = [
@@ -81,6 +83,7 @@ class CodexHandle implements AgentRuntimeHandle {
       "-c",
       "shell_environment_policy.inherit=all",
     ];
+    args.push("-c", `model_reasoning_effort=\"${this.config.thinkingLevel}\"`);
     if (this.config.model && this.config.model !== "default") {
       args.push("--model", this.config.model);
     }
@@ -127,6 +130,10 @@ class CodexHandle implements AgentRuntimeHandle {
       });
       child.on("close", (code) => {
         this.activeChild = null;
+        if (stdoutBuffer.trim()) {
+          this.handleLine(stdoutBuffer.trim());
+          stdoutBuffer = "";
+        }
         if (this.stopped) {
           resolve();
           return;
@@ -136,6 +143,9 @@ class CodexHandle implements AgentRuntimeHandle {
           this.onEvent({ type: "turn-failed", message: message.substring(0, 500) });
           reject(new Error(message));
           return;
+        }
+        if (this.finalOutput.trim()) {
+          this.onEvent({ type: "output", text: this.finalOutput.trim() });
         }
         this.onEvent({
           type: "turn-complete",
@@ -179,6 +189,13 @@ class CodexHandle implements AgentRuntimeHandle {
     }
 
     if (event.type === "item.started" || event.type === "item.completed") {
+      if (
+        event.type === "item.completed" &&
+        event.item?.type === "agent_message" &&
+        event.item.text?.trim()
+      ) {
+        this.finalOutput = event.item.text;
+      }
       const activity = describeCodexItem(event.item);
       if (activity) this.onEvent({ type: "activity", ...activity });
       return;

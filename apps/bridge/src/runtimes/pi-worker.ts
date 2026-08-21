@@ -10,14 +10,16 @@ import {
   type AgentTool,
   type StreamFn,
 } from "@mariozechner/pi-agent-core";
+import {
+  streamSimple,
+  type Api,
+  type Model,
+} from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
-import { streamSimpleAnthropic } from "../../node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js";
-import { streamSimpleOpenAICodexResponses } from "../../node_modules/@mariozechner/pi-ai/dist/providers/openai-codex-responses.js";
-import { streamSimpleOpenAICompletions } from "../../node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js";
-import type { Api, Model } from "@mariozechner/pi-ai";
 import type {
   RuntimeConnectionConfig,
   RuntimeEvent,
+  RuntimeThinkingLevel,
 } from "./types.js";
 
 
@@ -25,6 +27,7 @@ interface WorkerConfig {
   workDir: string;
   systemPrompt: string;
   model: string;
+  thinkingLevel: RuntimeThinkingLevel;
   connection: RuntimeConnectionConfig;
 }
 
@@ -57,9 +60,18 @@ function modelForConnection(
   requested: string,
 ): Model<Api> {
   const id = requested === "default" ? connection.defaultModel : requested;
+  const definition = connection.models.find((model) => model.id === id);
+  if (!definition) {
+    throw new Error("The selected model is no longer available for this connection");
+  }
+  const input = definition.input?.length
+    ? definition.input
+    : definition.supportsImages
+      ? ["text", "image"] as const
+      : ["text"] as const;
   return {
     id,
-    name: id,
+    name: definition.name || id,
     api: connection.apiFormat,
     provider: connection.provider === "openai-codex"
       ? "openai-codex"
@@ -67,11 +79,20 @@ function modelForConnection(
     baseUrl: connection.provider === "openai-codex"
       ? "https://chatgpt.com/backend-api"
       : connection.baseUrl || "",
-    reasoning: true,
-    input: ["text", "image"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
-    maxTokens: 16_384,
+    reasoning: definition.reasoning === true,
+    input: [...input],
+    cost: {
+      input: definition.cost?.input ?? 0,
+      output: definition.cost?.output ?? 0,
+      cacheRead: definition.cost?.cacheRead ?? 0,
+      cacheWrite: definition.cost?.cacheWrite ?? 0,
+    },
+    contextWindow: definition.contextWindow && definition.contextWindow > 0
+      ? definition.contextWindow
+      : 32_000,
+    maxTokens: definition.maxTokens && definition.maxTokens > 0
+      ? definition.maxTokens
+      : 4_096,
   };
 }
 
@@ -79,28 +100,11 @@ function streamForConnection(connection: RuntimeConnectionConfig): StreamFn {
   const apiKey = connection.credential.type === "oauth"
     ? connection.credential.access
     : connection.credential.key;
-  return (model, context, options) => {
-    const configured = { ...options, apiKey };
-    if (connection.apiFormat === "anthropic-messages") {
-      return streamSimpleAnthropic(
-        model as Model<"anthropic-messages">,
-        context,
-        configured,
-      );
-    }
-    if (connection.apiFormat === "openai-codex-responses") {
-      return streamSimpleOpenAICodexResponses(
-        model as Model<"openai-codex-responses">,
-        context,
-        configured,
-      );
-    }
-    return streamSimpleOpenAICompletions(
-      model as Model<"openai-completions">,
-      context,
-      configured,
-    );
-  };
+  return (model, context, options) => streamSimple(
+    model,
+    context,
+    { ...options, apiKey },
+  );
 }
 
 function readStoredSession(path: string): StoredSession | null {
@@ -132,7 +136,7 @@ function createBashTool(workDir: string): AgentTool<typeof BashParameters, { exi
   return {
     name: "bash",
     label: "Shell",
-    description: "Run a shell command in the agent workspace. Use the zano CLI to send messages.",
+    description: "Run a shell command in the agent workspace. Use the teammate CLI to send messages.",
     parameters: BashParameters,
     async execute(_toolCallId, parameters, signal) {
       return new Promise((resolve, reject) => {
@@ -163,6 +167,20 @@ function createBashTool(workDir: string): AgentTool<typeof BashParameters, { exi
   };
 }
 
+function latestAssistantText(messages: AgentMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    const text = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 function handleAgentEvent(event: AgentEvent) {
   switch (event.type) {
     case "agent_start":
@@ -182,6 +200,8 @@ function handleAgentEvent(event: AgentEvent) {
         turnFailureSent = true;
         sendEvent({ type: "turn-failed", message: agent.state.errorMessage });
       } else {
+        const output = latestAssistantText(event.messages);
+        if (output) sendEvent({ type: "output", text: output });
         sendEvent({ type: "turn-complete", sessionId });
       }
       break;
@@ -195,12 +215,13 @@ async function initialize(nextConfig: WorkerConfig) {
   sessionFile = join(sessionDir, "session.json");
   const stored = readStoredSession(sessionFile);
   sessionId = stored?.id || randomUUID();
+  const selectedModel = modelForConnection(config.connection, config.model);
   agent = new Agent({
     sessionId,
     initialState: {
       systemPrompt: config.systemPrompt,
-      model: modelForConnection(config.connection, config.model),
-      thinkingLevel: "medium",
+      model: selectedModel,
+      thinkingLevel: selectedModel.reasoning ? config.thinkingLevel : "off",
       tools: [createBashTool(config.workDir)],
       messages: stored?.messages || [],
     },

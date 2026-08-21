@@ -1,215 +1,145 @@
-# Self-hosting Zano
+# Self-hosting Teammate
 
-This guide walks you through running your own Zano server end-to-end: Supabase project, schema, web app deployment, and pointing the bridge at your own server.
-
-## What you'll end up with
-
-- A Supabase project (Postgres + Auth + Realtime) holding all your data.
-- The Zano web app running on a host of your choice (Vercel works out of the box; anything that runs Next.js 16 will do).
-- The bridge running on each machine where you want agents to live, talking to your own server instead of `zano.fehey.com`.
-
-Total time: about 30–45 minutes for a first run.
+The Tauri desktop app and `pnpm dev:local` do not require self-hosting. Use this guide only when you want a remote workspace backed by Supabase so multiple machines can share channels and tasks.
 
 ## Prerequisites
 
-- Node ≥ 20 and pnpm 10 locally
-- A Supabase account (free tier is fine to start)
-- A Vercel account (or any Next.js host of your choice)
-- The repo cloned: `git clone https://github.com/EryouHao/zano.git && cd zano && pnpm install`
-
----
-
-## 1. Create a Supabase project
-
-1. Go to [supabase.com](https://supabase.com) and create a new project.
-2. Pick a strong database password and save it somewhere safe.
-3. Once the project is provisioned, head to **Project Settings → API** and grab:
-   - **Project URL** (looks like `https://abcdefg.supabase.co`)
-   - **`anon` public key** (a long JWT)
-   - **`service_role` secret key** (a long JWT — treat this like a password)
-
-You'll use these in the next steps.
-
-## 2. Apply the database schema
-
-Open the **SQL Editor** in your Supabase dashboard. Run the following files **in order** (copy the contents of each file from `packages/db/src/`, paste into the SQL editor, run, then move to the next):
-
-1. `schema.sql` — first run will fail at the `agents` table because it references `servers`. That's expected. Run it once to create `profiles` + the `handle_new_user` trigger, then continue.
-2. `servers.sql` — creates `servers` and `server_members`.
-3. `schema.sql` — run it again now that `servers` exists. The `profiles` block will skip (it's idempotent enough — or wrap your re-run with `DROP TABLE IF EXISTS` for the failed tables first). The remaining tables (`agents`, `channels`, `messages`, `tasks`) will create successfully.
-4. `machine-keys.sql` — adds the `machine_keys` table for bridge auth.
-5. `onboarding-trigger.sql` — installs the trigger that auto-creates an Onboarding Agent for every new user.
-6. `fix-rls.sql` — adjusts a few RLS policies to avoid circular dependencies.
-
-> **Note**: the schema isn't packaged as a single ordered migration yet — that's an open improvement (PRs welcome). If you hit an error mid-way, the message usually tells you exactly which table is missing.
-
-After applying all files, verify in **Database → Tables** that you see at least: `profiles`, `servers`, `server_members`, `agents`, `channels`, `channel_members`, `messages`, `tasks`, `machine_keys`.
-
-## 3. Configure Supabase Auth
-
-1. **Authentication → URL Configuration**:
-   - Set **Site URL** to wherever your web app will live (e.g. `https://zano.example.com` for production, `http://localhost:3000` for local dev).
-   - Add the same URL to **Redirect URLs**.
-2. **Authentication → Providers**:
-   - **Email** is enabled by default. Decide whether you want to require email confirmation (recommended for production).
-   - Optionally enable Google / GitHub / etc. if you want OAuth — Zano works with whatever Supabase Auth supports.
-
-## 4. Run the web app locally (smoke test)
+- Node >= 22.5 and pnpm 10+
+- a Supabase project
+- a Next.js host such as Vercel
+- this repository cloned locally
 
 ```bash
-cp apps/web/.env.local.example apps/web/.env.local
+git clone https://github.com/zhangtuansia/Teammate.git
+cd Teammate
+pnpm install
 ```
 
-Edit `apps/web/.env.local`:
+## 1. Create and configure Supabase
+
+Create a Supabase project and record its project URL, anon key, and service-role key. Treat the service-role key as a password.
+
+Apply the SQL files in `packages/db/src/` in this order:
+
+1. `schema.sql`
+2. `machine-keys.sql`
+3. `onboarding-trigger.sql` (removes the legacy profile trigger on upgrades)
+4. `fix-rls.sql`
+
+`servers.sql` is retained only for upgrading older installations whose workspace tables predate the consolidated schema; do not run it for a new project.
+
+For an existing populated project, back up the database and do **not** rerun
+`schema.sql`: it is the fresh-install source of truth, not an idempotent
+migration. Review the changes since your deployed version, apply
+`machine-keys.sql` when its table or helpers are missing, then apply
+`onboarding-trigger.sql` and finish with `fix-rls.sql`. The final script is the
+idempotent compatibility layer: it replaces legacy permissive policies and
+installs the current security helpers and integrity triggers. During that
+upgrade it takes short write locks on workspace/channel memberships and removes
+only legacy rows whose referenced human/agent is not a registered member of the
+same workspace; back up the database and review the emitted repair notice.
+
+Deploy the SQL and application changes as one maintenance update. Current
+clients use atomic RPCs for channel creation/member replacement, task creation,
+assignment/status/claim changes, runtime-key provisioning, agent and
+workspace-member teardown, mention discovery, and runtime heartbeats. Direct
+membership/channel/task/key writes that would bypass those transactions are
+intentionally rejected. Always finish with `fix-rls.sql`, then reload the
+PostgREST schema cache (or restart the Supabase API service) before starting the
+new web app and runtimes.
+
+The key upgrade clears legacy plaintext values from `machine_keys.key_value`.
+Existing runtime keys keep working because authentication uses `key_hash`, but
+their full value can no longer be recovered from the UI; create a replacement
+key if the original was not saved. New keys are created through the human-only
+`create_current_user_machine_key` RPC, which locks the workspace and live human
+membership before inserting the hash. This uses the same lock order as member
+removal, so a concurrent removal cannot leave a new key behind. The membership
+deletion trigger also revokes that human's keys for the workspace during a
+self-leave; adding the person again later never revives the old credentials.
+
+Verify that `profiles`, `servers`, `server_members`, `agents`, `channels`, `channel_members`, `messages`, `message_deliveries`, `tasks`, and `machine_keys` exist. Review every RLS policy before exposing the project publicly.
+
+In **Realtime → Settings**, turn off **Allow public access**. Teammate's agent activity and runtime RPC use private Broadcast channels authorized by the `realtime.messages` policies in `schema.sql`/`fix-rls.sql`. Do not replace those policies with a broad `USING (true)` or `WITH CHECK (true)` policy; PostgreSQL combines permissive policies with OR, which would reopen every topic.
+
+In Supabase Auth, set the site URL and redirect URLs to your deployed web origin. Email auth works by default; OAuth providers are optional.
+
+## 2. Run the web app
+
+Create `apps/web/.env.local`:
 
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_JWT_SECRET=your-project-jwt-secret
+NEXT_PUBLIC_TEAMMATE_SERVER_URL=http://localhost:3000
 ```
 
-Then:
+Then run:
 
 ```bash
 pnpm dev:web
 ```
 
-Open `http://localhost:3000`, sign up with an email, and confirm the onboarding trigger fires (you should see an "Onboarding Assistant" agent and channel appear automatically). If sign-up works and the agent appears, your DB is wired up correctly.
+Open <http://localhost:3000>, create an account, and verify that the onboarding workspace appears.
 
-## 5. Deploy the web app
+For production, configure the same variables on your Next.js host and set `NEXT_PUBLIC_TEAMMATE_SERVER_URL` to the deployed origin. Never expose `SUPABASE_SERVICE_ROLE_KEY` or `SUPABASE_JWT_SECRET` through a `NEXT_PUBLIC_*` variable. The runtime receives only a short-lived, workspace- and machine-scoped JWT; it never receives the service-role key.
 
-### Option A — Vercel (recommended)
+## 3. Connect an agent runtime
 
-1. Push your fork to GitHub, then import the repo into Vercel.
-2. **Root directory**: leave as repo root.
-3. **Framework preset**: Next.js (auto-detected).
-4. **Build command**: `cd ../.. && pnpm build --filter=@zano/web` (Vercel detects pnpm workspaces, but the explicit command is the most reliable).
-5. **Environment variables**:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `SUPABASE_SERVICE_ROLE_KEY` (used by `/api/bridge/connect` to mint session JWTs — keep it secret)
-6. Deploy. Update Supabase **Site URL** + **Redirect URLs** to match your Vercel deployment URL once it's live.
-
-### Option B — anywhere else
-
-The web app is a standard Next.js 16 app. Anything that runs Node 20+ and supports App Router will work: Render, Fly, Railway, your own VPS with `pnpm build && pnpm start`. Set the same env vars listed above.
-
-## 6. Connect the bridge to your server
-
-The bridge runs on each machine where you want agents to live (typically your own laptop).
-
-### From npm (recommended)
+In the hosted web UI, create a runtime access key for the workspace. Build and start the runtime from source:
 
 ```bash
-npx @fehey/zano-bridge \
-  --api-key zk_your_machine_key_here \
-  --server-url https://zano.example.com
-```
-
-To get a machine API key, log into your web app, go to **Settings → Machines**, and create a new key. Copy the `npx` command shown there — it's pre-filled with your key and (if you set `NEXT_PUBLIC_SERVER_URL` accordingly) your server URL.
-
-### From source
-
-If you're hacking on the bridge:
-
-```bash
-cp apps/bridge/.env.example apps/bridge/.env
-# fill in SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ZANO_USER_ID
-pnpm dev:bridge
-```
-
-This bypasses the `--api-key` flow and connects directly with the service role key (only do this for local development — never in production).
-
-## Bridge trust model — pick your level
-
-The bridge is the most security-sensitive piece because it runs Claude Code on your machine with full local access. There are three ways to run it; pick based on how much you trust the published npm package.
-
-### Option 1 — Use the published `@fehey/zano-bridge` (recommended)
-
-This is what most self-hosters should do. Zero setup overhead, automatic bug fixes, works out of the box.
-
-```bash
-export ZANO_SERVER_URL=https://zano.example.com
-npx @fehey/zano-bridge --api-key zk_your_key_here
-```
-
-**Important**: pin a specific version in production rather than tracking `latest`. This protects you against supply-chain attacks if the maintainer's npm credentials are ever compromised:
-
-```bash
-npx @fehey/zano-bridge@0.1.5 --api-key zk_your_key_here
-```
-
-You can find the latest version on [npm](https://www.npmjs.com/package/@fehey/zano-bridge).
-
-### Option 2 — Build from source
-
-For high-trust environments (regulated workloads, security audits, air-gapped networks) or if you simply prefer running only code you've inspected. You get full source visibility and never pull binaries from npm.
-
-```bash
-git clone https://github.com/EryouHao/zano.git
-cd zano && pnpm install
-pnpm --filter @fehey/zano-bridge build
+pnpm --filter @teammate/runtime build
 node apps/bridge/dist/index.js \
-  --api-key zk_your_key_here \
-  --server-url https://zano.example.com
+  --api-key tm_your_machine_key \
+  --server-url https://teammate.example.com
 ```
 
-You can wrap the last command in a shell alias or a systemd unit. This is also the path to take if you want to **fork the bridge** — change `apps/bridge/package.json`'s `name` to your own scope (e.g. `@yourorg/zano-bridge`), then `npm publish` from your fork. Nothing in the server requires the bridge to be the upstream package; it's a generic client.
+The source directory is still named `apps/bridge` because the remote compatibility protocol retains its original API paths. The product and package are called the Teammate agent runtime.
 
-### Option 3 — Vendor it into your infra
+Deleting a runtime key or removing its user from the workspace blocks the next connection immediately. Supabase Realtime caches private-channel authorization for an existing WebSocket connection, so Teammate refreshes the scoped JWT and rebuilds those channels about every 30 minutes; each token expires after about one hour. Stop the runtime process as well when an already-connected machine must lose access immediately.
 
-For larger deployments, mirror the npm tarball into your own private registry (Verdaccio, JFrog, GitHub Packages, etc.) and install from there. Same `--server-url` flag, just a different install source. This also gives you reproducible installs even if the upstream package goes away.
+A runtime key is scoped to one workspace and every database access rechecks the
+live key and workspace membership. It is not a per-agent credential: one runtime
+process can manage all agents owned by that user in the scoped workspace. Do not
+use agents owned by the same human/runtime as a hard security boundary from one
+another.
 
-### Why the bridge isn't bundled with the server
+Workspace owners can remove another human from **Settings → Workspace members**.
+The `remove_server_human_member` RPC atomically revokes that person's keys and
+removes their agents, direct messages, channel memberships, deliveries, and task
+assignments only in the selected workspace. Existing shared-channel messages are
+preserved. Because Supabase can cache authorization for an already-open private
+Realtime channel, stop the removed member's runtime too when its current
+WebSocket must be terminated immediately.
 
-A natural question: why not just have each Zano server host its own bridge installer (`curl my-zano.com/install.sh`)? Two reasons:
+For development:
 
-1. The bridge is a **client tool** — it runs on the user's machine, not the server. Distributing it via npm means it gets the standard Node.js install/update story instead of a custom one.
-2. Self-hosters don't need to maintain a build pipeline just to give their users a bridge. The same `@fehey/zano-bridge` works against any compatible Zano server.
+```bash
+TEAMMATE_API_KEY=tm_your_machine_key \
+TEAMMATE_SERVER_URL=https://teammate.example.com \
+pnpm dev:runtime
+```
 
-If you'd rather not depend on the upstream package long-term, Option 2 (fork & republish) is the migration path. The server has no opinion about which bridge connects to it as long as it speaks the `/api/bridge/connect` protocol.
+## 4. Verify
 
-## 7. Verify end-to-end
-
-1. In the web UI, your machine should appear with a green "online" dot within a few seconds of starting the bridge.
-2. Your default Onboarding Agent should also show as online.
-3. Send the agent a DM. It should reply within a few seconds.
-4. Try creating a task in a channel and have the agent claim it (`zano task claim` runs inside the agent's Claude Code process).
-
-If any of those steps don't work, check:
-
-- Bridge logs (the `npx` command stays in the foreground and prints connection status)
-- Supabase **Logs → Realtime** to confirm the bridge is subscribed
-- Browser console for the web app
+1. Confirm the connected machine/runtime appears online.
+2. Send a direct message to a Codex-backed test agent.
+3. Create a channel, invite the agent, and mention it.
+4. Create a task, assign it to the agent, and move it through `todo`, `in_progress`, `in_review`, and `done`.
 
 ## Updating
 
-When you pull new commits from upstream:
+After pulling changes:
 
-1. `pnpm install` to pick up dependency changes.
-2. Check `packages/db/src/` for new SQL files — if any were added or changed, apply them in your Supabase project. There's no migration tooling yet; check the diff manually.
-3. Redeploy the web app.
-4. The published `@fehey/zano-bridge` is updated separately on npm. If you've forked the bridge, build and deploy your fork.
+1. run `pnpm install`;
+2. stop older connected runtimes and review/apply the changed SQL files;
+3. rebuild and redeploy the web app;
+4. rebuild/restart `@teammate/runtime` on every connected machine;
+5. verify **Allow public access** remains disabled.
 
-## Cost notes
+The private Realtime protocol uses directional, owner-scoped RPC topics. Old runtimes that still use the public `bridge-rpc:${serverId}` topic are intentionally incompatible and must be upgraded; keeping a public compatibility channel would expose local agent workspace files. Private and public channels with the same topic also do not exchange messages, so deploy the web and runtime updates together.
 
-For a small team (< 10 humans, < 20 agents, casual usage):
-
-- **Supabase free tier** typically suffices for the database and Realtime.
-- **Vercel hobby tier** is fine for the web app.
-- **Anthropic API** (used by Claude Code) is the main variable cost — it scales with how much your agents talk and work.
-
-For larger usage, expect to upgrade Supabase to Pro mainly for Realtime quotas.
-
-## Troubleshooting
-
-**"Invalid API key" when starting the bridge** — confirm the key was copied in full (they're long), and confirm `--server-url` points at the same server where you generated the key.
-
-**Agent shows online but doesn't respond** — check that Claude Code is installed on the machine running the bridge (`which claude`) and that the bridge has access to your `~/.claude/` config.
-
-**RLS errors in the web app** — if you customized the schema, double-check `fix-rls.sql` was the last thing applied. The helper function in that file is what avoids the most common circular-dependency errors.
-
-**Onboarding agent didn't appear after signup** — the `on_profile_created` trigger from `onboarding-trigger.sql` may not have run. Check **Database → Triggers** in Supabase to confirm it exists.
-
----
-
-Stuck? Open a [discussion](https://github.com/EryouHao/zano/discussions) — please include your Supabase region, deployment target, and any relevant error messages.
+For security guidance, see [SECURITY.md](../SECURITY.md).

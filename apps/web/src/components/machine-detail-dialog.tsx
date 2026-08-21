@@ -47,7 +47,7 @@ export function MachineDetailDialog({
   const nameChanged = name.trim() !== machine.name;
 
   const apiKeyDisplay = keyValue || `${machine.key_prefix}...`;
-  const npxCommand = `npx @fehey/zano-bridge --api-key ${apiKeyDisplay}`;
+  const npxCommand = `npx @teammate/runtime --api-key ${apiKeyDisplay}`;
 
   async function handleSaveName() {
     if (!nameChanged) return;
@@ -105,7 +105,7 @@ export function MachineDetailDialog({
           </div>
           <DialogTitle className="text-center">Machine Details</DialogTitle>
           <DialogDescription className="text-center">
-            Manage this machine connection and get the bridge command.
+            Manage this machine connection and get the agent runtime command.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -133,7 +133,7 @@ export function MachineDetailDialog({
             </Field>
 
             <Field>
-              <FieldLabel>Bridge Command</FieldLabel>
+              <FieldLabel>Agent runtime command</FieldLabel>
               <div className="relative">
                 <div className="rounded-lg border bg-muted/50 p-3 pr-10 font-mono text-xs break-all select-all leading-relaxed">
                   {npxCommand}

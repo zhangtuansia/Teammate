@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 const root = process.cwd();
-const localUrl = process.env.ZANO_LOCAL_SERVER_URL || "http://127.0.0.1:8787";
+const localUrl = process.env.TEAMMATE_LOCAL_SERVER_URL || "http://127.0.0.1:8787";
+const controllerCredential = randomBytes(32).toString("base64url");
 const children = [];
 let shuttingDown = false;
 
@@ -50,21 +52,23 @@ process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
 try {
-  start("local-server", ["--filter", "@zano/local-server", "dev"], {
-    ZANO_LOCAL_SERVER_URL: localUrl,
+  start("local-server", ["--filter", "@teammate/local-server", "dev"], {
+    TEAMMATE_LOCAL_SERVER_URL: localUrl,
+    TEAMMATE_LOCAL_CONTROLLER_TOKEN: controllerCredential,
   });
   await waitForHealth();
 
-  start("web", ["--filter", "@zano/web", "dev"], {
-    NEXT_PUBLIC_ZANO_LOCAL_MODE: "true",
-    NEXT_PUBLIC_ZANO_LOCAL_SERVER_URL: localUrl,
+  start("web", ["--filter", "@teammate/web", "dev"], {
+    NEXT_PUBLIC_TEAMMATE_LOCAL_MODE: "true",
+    NEXT_PUBLIC_TEAMMATE_LOCAL_SERVER_URL: localUrl,
+    NEXT_PUBLIC_TEAMMATE_LOCAL_CONTROLLER_TOKEN: controllerCredential,
   });
 
-  start("bridge", ["--filter", "@fehey/zano-bridge", "dev"], {
-    ZANO_API_KEY: "zk_local",
-    ZANO_SERVER_URL: localUrl,
-    ZANO_LOCAL_SERVER_URL: localUrl,
-    ZANO_AGENTS_DIR: join(root, ".zano", "agents"),
+  start("agent-runtime", ["--filter", "@teammate/runtime", "dev"], {
+    TEAMMATE_API_KEY: controllerCredential,
+    TEAMMATE_SERVER_URL: localUrl,
+    TEAMMATE_LOCAL_SERVER_URL: localUrl,
+    TEAMMATE_AGENTS_DIR: join(root, ".teammate", "agents"),
   });
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);

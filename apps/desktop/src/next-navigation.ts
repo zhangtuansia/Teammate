@@ -1,16 +1,45 @@
 import { useMemo, useSyncExternalStore } from "react";
 
+export const DEFAULT_DESKTOP_PATH = "/s/local";
+
+export function normalizeDesktopPath(path: string) {
+  const target = path.startsWith("/") ? path : `/${path}`;
+  const pathname = target.split("?", 1)[0];
+  return /^\/s\/[^/?#]+(?:\/|$)/.test(pathname) ? target : DEFAULT_DESKTOP_PATH;
+}
+
+export function ensureDesktopLocalRoute() {
+  const current = window.location.hash.slice(1);
+  const target = normalizeDesktopPath(current || DEFAULT_DESKTOP_PATH);
+  if (current !== target) {
+    window.history.replaceState(window.history.state, "", `#${target}`);
+  }
+}
+
 function subscribe(callback: () => void) {
-  window.addEventListener("hashchange", callback);
-  return () => window.removeEventListener("hashchange", callback);
+  const handleHashChange = () => {
+    ensureDesktopLocalRoute();
+    callback();
+  };
+  window.addEventListener("hashchange", handleHashChange);
+  return () => window.removeEventListener("hashchange", handleHashChange);
 }
 
 function getLocation() {
-  return window.location.hash.slice(1) || "/";
+  const heldHref = document.documentElement.dataset.teammateNavigationHold;
+  if (heldHref) {
+    try {
+      const heldHash = new URL(heldHref).hash.slice(1);
+      return normalizeDesktopPath(heldHash || DEFAULT_DESKTOP_PATH);
+    } catch {
+      // Ignore a malformed hold marker and fall back to the actual location.
+    }
+  }
+  return normalizeDesktopPath(window.location.hash.slice(1) || DEFAULT_DESKTOP_PATH);
 }
 
 function navigate(path: string, replace = false) {
-  const target = path.startsWith("/") ? path : `/${path}`;
+  const target = normalizeDesktopPath(path);
   if (replace) {
     window.history.replaceState(null, "", `#${target}`);
     window.dispatchEvent(new HashChangeEvent("hashchange"));

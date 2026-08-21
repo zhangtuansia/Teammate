@@ -2,156 +2,132 @@
 
 # Teammate
 
-**A local-first collaborative workspace where humans and AI teammates work together in shared channels.**
+**A local-first workspace where people and AI teammates share conversations, documents, and tasks.**
 
-<img src="docs/images/cover.jpeg" alt="Teammate — humans and AI agents working together in shared channels" width="100%" />
+<img src="docs/images/cover.jpeg" alt="Teammate — people and AI teammates working together" width="100%" />
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-0d9488.svg)](LICENSE)
 
 </div>
 
----
+Teammate is a Tauri desktop app with a local Node/SQLite core. It works without an account or cloud database: conversations, agent workspaces, documents, and tasks stay on the computer by default.
 
-Teammate is based on [Zano](https://github.com/EryouHao/zano) and is being refactored into a local-first, cross-platform AI team workspace. It now includes a Tauri 2 desktop app with an embedded Node/SQLite message service, so the main chat flow runs without Supabase or a login. Each agent has its own working directory and `MEMORY.md`, and communicates over chat, DMs, threads, and a built-in task board (`todo` → `in_progress` → `in_review` → `done`).
+The product is intentionally small:
 
-## Desktop quickstart (Tauri 2)
+- shared channels and direct conversations with AI teammates;
+- editable workspace documents for generated and active artifacts;
+- a Linear-style task list with status, assignee, and parent/subtask relationships;
+- persistent agent workspaces with `MEMORY.md`;
+- Codex as the default runtime, with Claude Code and custom API connections available as optional engines.
 
-Requirements for development: Node >= 22.5, pnpm 10, and the Rust stable toolchain. To run an agent, use an installed/authenticated Claude Code or Codex CLI, sign in with ChatGPT Plus/Pro, or add an OpenAI/Anthropic-compatible API connection in Settings.
+## Desktop quickstart
+
+Requirements: macOS 13+, Node >= 22.20, pnpm 10+, the Rust stable toolchain,
+and the Bun version pinned in `.bun-version` (used to package the built-in Pi runtime).
 
 ```bash
 pnpm install
 pnpm desktop:dev
 ```
 
-`pnpm desktop:dev` is the normal UI development loop: it opens the native Tauri
-window and keeps Vite hot reload enabled, so React and CSS changes appear without
-building an app or DMG. If a Teammate local runtime is already running, the dev
-window reuses it instead of starting a second SQLite service.
+This opens the native Tauri window directly in `/s/local`. The desktop app starts its own local service and agent runtime; there is no Teammate login or registration step, and no Supabase account or separate server command is required.
 
-The desktop app starts its own local runtime. Node, the SQLite service, bridge, workspace CLI, and the embedded Pi worker runtime are bundled as sidecars; there is no separate server command and no Supabase account. Build a native installer with:
+The development app is isolated from an installed Teammate release: it uses the `com.teammate.desktop.dev` identifier, port `8788`, and a separate application-data directory. This prevents `tauri dev` from migrating or writing the installed app's SQLite database.
+
+Build a native installer with:
 
 ```bash
 pnpm desktop:build
 ```
 
-Artifacts are written below `apps/desktop/src-tauri/target/release/bundle/`. The current validated target is macOS `.app`/DMG; Windows packaging remains configured but is not part of the current acceptance pass.
+Artifacts are written below `apps/desktop/src-tauri/target/release/bundle/`.
+Local and pull-request builds are unsigned test artifacts. Public macOS or Windows
+releases must be signed (and macOS releases notarized) with the publisher's own
+credentials.
 
-Application settings are available from the gear in the lower-left corner. Language (Simplified Chinese/English), appearance (system/light/dark), default runtime/model, and model connections are managed there. Teammate supports native Claude Code and Codex CLI sessions, plus a Pi-based runtime for ChatGPT OAuth and OpenAI/Anthropic-compatible APIs. API keys and OAuth tokens are encrypted in a machine-bound credential file with mode `0600`; they are not stored in SQLite or returned to the UI.
-
-## Local quickstart (no Supabase)
-
-Requirements: Node >= 22.5, pnpm 10, and an installed/authenticated Claude Code CLI if you want an AI agent to reply.
+## Browser-based local development
 
 ```bash
 pnpm install
 pnpm dev:local
 ```
 
-Open <http://localhost:3000>. Local mode has no login screen or account password. It seeds a `Local Workspace`, `Local User`, and `Local Assistant`; runtime data is stored in `.zano/local.db` and is intentionally ignored by Git.
+Open <http://localhost:3000/s/local>. Local mode seeds a `Local Workspace`, `Local User`, and Codex-backed `Local Assistant`. Runtime data is stored under `.teammate/` and ignored by Git.
 
-`pnpm dev:local` starts three local processes:
+`pnpm dev:local` starts:
 
-- the Node/SQLite message service on `127.0.0.1:8787`;
-- the Next.js web UI on `localhost:3000`;
-- the bridge that starts agent runner processes and connects them to local messages.
+- the local Node/SQLite service on `127.0.0.1:8787`;
+- the Next.js UI on `localhost:3000`;
+- the Teammate agent runtime that starts and manages local agents.
 
-Supabase-backed hosting remains available for compatibility, but it is no longer required for local development.
+## Architecture
 
-## How it works
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     Tauri 2 desktop app                      │
-│  ┌──────────────────┐       ┌─────────────────────────────┐  │
-│  │ Static React UI  │ ◄───► │ Packaged Node runtime       │  │
-│  │ shared with web  │ events│ SQLite API + local Bridge   │  │
-│  └──────────────────┘       └──────────────┬──────────────┘  │
-└────────────────────────────────────────────┼─────────────────┘
-                                             │ spawn
-                                             ▼
-                              ┌──────────────────────────────┐
-                              │ Claude Code · Codex · Pi/API │
-                              └──────────────────────────────┘
+```text
+Tauri / React UI
+       │ local queries + events
+       ▼
+Node + SQLite local core
+       │ messages, tasks, activity
+       ▼
+Teammate agent runtime
+       │
+       ├── Codex CLI
+       ├── Claude Code (optional)
+       └── Pi / custom API connections
 ```
 
-- **Desktop**: Tauri 2 + Vite/React, reusing the existing chat UI without a Next.js server.
-- **Web**: Next.js 16. Channels, DMs, threads, tasks, and agent management; preserved for hosted mode.
-- **Local service**: Node.js + built-in SQLite. It provides a small Supabase-compatible query/event surface for the existing web, bridge, and CLI code.
-- **Settings**: App-level language, appearance, default runtime/model, encrypted credentials, and per-agent avatar preferences persist locally.
-- **Bridge**: Subscribes to local messages, starts the selected runtime, and injects the workspace CLI.
-- **Agents**: Claude Code and Codex use the installed CLI and existing login state. Pi handles ChatGPT OAuth and custom OpenAI/Anthropic-compatible connections.
-- **Memory**: Each agent maintains a persistent `MEMORY.md` and `notes/` directory in its workspace, so it accumulates expertise over time.
+The desktop product treats this as one local core. The runtime is not a separate user-facing “bridge.” The existing `/api/bridge/*` endpoints and realtime topic names remain compatibility protocol details for optional remote workspaces.
 
-## Desktop roadmap
+## Settings and data
 
-The Tauri 2 shell, local runtime packaging, encrypted model connections, and multi-runtime agent layer are implemented. The next desktop milestone is release signing/notarization and broader end-to-end provider coverage.
+Settings include profile, language, appearance, models and connections, runtimes, chat feedback, and diagnostics. API keys and OAuth tokens are encrypted in a machine-bound credential file with mode `0600`; they are not stored in SQLite or returned to the UI.
 
-## Original hosted Zano mode
-
-The upstream hosted version remains available at [zano.fehey.com](https://zano.fehey.com):
-
-1. Sign up and create a server.
-2. Generate a machine API key (Settings → Machines → New key).
-3. On your local machine, run:
-   ```bash
-   npx @fehey/zano-bridge --api-key zk_your_key_here
-   ```
-4. Your agents will appear online in the web UI. Send them a DM and they'll respond.
-
-The bridge is what gives agents access to your local machine — files, tools, the network. Anything Claude Code can do, your agents can do.
-
-## Supabase self-hosting
-
-The original Supabase deployment path is preserved for compatibility.
-
-See [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md) for a step-by-step guide covering Supabase setup, schema migration, env config, Vercel deployment, and pointing the bridge at your own server.
+Each workspace isolates its channels, documents, tasks, and agents. Each agent also owns a persistent working directory under `.teammate/agents/`.
 
 ## Repository layout
 
-This is a pnpm + Turborepo monorepo:
-
-```
+```text
 teammate/
 ├── apps/
-│   ├── web/           Next.js web app (chat UI, agent management, auth)
-│   ├── bridge/        Local Node bridge and agent process manager
-│   ├── local-server/  Local Node/SQLite message service
-│   └── desktop/       Tauri 2 shell, static React entry, and packaged sidecars
+│   ├── web/           Shared Next.js web UI and hosted-mode routes
+│   ├── bridge/        Agent runtime source (`@teammate/runtime`)
+│   ├── local-server/  Local Node/SQLite core
+│   └── desktop/       Tauri shell and packaged sidecars
 ├── packages/
-│   ├── cli/           The `zano` CLI agents use to chat & manage tasks
-│   ├── db/            SQL schema, RLS policies, triggers, TS types
-│   ├── local-client/  Client adapter for local queries and events
-│   └── shared/        Shared types between web/bridge/cli
-└── supabase/          Supabase project config
+│   ├── cli/           `teammate` CLI used by agents
+│   ├── db/            SQL schema, RLS policies, and triggers
+│   ├── execution-core/ Provider-neutral agent execution state machine
+│   ├── local-client/  Local query and realtime adapter
+│   └── shared/        Shared protocol and domain types
+└── supabase/          Optional hosted-workspace configuration
 ```
 
-## Development
-
-Requirements for Supabase mode: Node >= 20, pnpm 10, and a Supabase project.
+## Useful commands
 
 ```bash
-pnpm install
-cp apps/web/.env.local.example apps/web/.env.local      # fill in Supabase URL + anon key
-cp apps/bridge/.env.example    apps/bridge/.env         # fill in for local bridge dev
-
-pnpm dev:web        # Next.js dev server on :3000
-pnpm dev:bridge     # Bridge in watch mode (uses .env)
+pnpm dev:local
+pnpm desktop:dev
+pnpm desktop:build
+pnpm dev:web
+pnpm dev:runtime
+pnpm build
+pnpm lint
 ```
 
-For database setup, see [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md).
+For optional Supabase hosting, see [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
 ## Status
 
-Teammate is **early and experimental**. Local Node/SQLite mode, Tauri 2 packaging, Claude Code, Codex, ChatGPT OAuth, and custom model connections are implemented; macOS is the currently validated desktop target.
+Teammate is early and experimental. Local Node/SQLite mode, Tauri packaging, multi-runtime agents, profile settings, editable documents, channel agent membership, and task assignment are implemented. macOS is the currently validated desktop target.
 
-## Contributing
+## Contributing and security
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). Bug reports and discussion in [GitHub Issues](https://github.com/EryouHao/zano/issues) are the easiest ways to help.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE). Teammate is derived from Zano; the original copyright and license notices are retained.
-
-## Security
-
-Found a security issue? Please report it privately — see [`SECURITY.md`](SECURITY.md). Do not open public issues for vulnerabilities.
+Most Teammate code is distributed under the [MIT License](LICENSE). The
+Apache-derived `@teammate/execution-core` package is distributed under the
+[Apache License 2.0](packages/execution-core/LICENSE). See
+[Third-party notices](THIRD_PARTY_NOTICES.md) for retained attributions and
+license details.

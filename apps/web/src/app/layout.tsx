@@ -10,7 +10,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Zano",
+  title: "Teammate",
   description: "Human-AI collaboration platform",
 };
 

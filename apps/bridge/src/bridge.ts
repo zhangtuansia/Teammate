@@ -1,14 +1,62 @@
 import { createClient, SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
-import { createLocalClient } from "@zano/local-client";
-import { readdir, readFile, stat, lstat } from "fs/promises";
-import { join, resolve } from "path";
+import { createLocalClient } from "@teammate/local-client";
+import { randomUUID } from "node:crypto";
+import { readdir, readFile, realpath, lstat } from "fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "path";
 import { homedir } from "os";
 import { AgentManager } from "./agent-manager.js";
+
+const MAX_WORKSPACE_FILE_BYTES = 1024 * 1024;
+const BINARY_SAMPLE_BYTES = 8192;
+const DELIVERY_BATCH_SIZE = 50;
+const DELIVERY_MAX_ATTEMPTS = 3;
+const DELIVERY_LEASE_MS = 5 * 60_000;
+const DELIVERY_LEASE_RENEW_MS = 30_000;
+const DELIVERY_POLL_MS = 2_000;
+const MAX_LOCAL_DELIVERY_GUARDS = 10_000;
+
+function hasHiddenPathSegment(filePath: string) {
+  return filePath
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .some((segment) => segment.startsWith("."));
+}
+
+function isWithinRoot(rootPath: string, candidatePath: string) {
+  const relativePath = relative(rootPath, candidatePath);
+  return (
+    relativePath === "" ||
+    (!isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${sep}`))
+  );
+}
+
+function isLikelyBinary(content: Buffer) {
+  const sample = content.subarray(0, BINARY_SAMPLE_BYTES);
+  if (sample.includes(0)) return true;
+
+  let controlBytes = 0;
+  for (const byte of sample) {
+    if ((byte < 32 && byte !== 8 && byte !== 9 && byte !== 10 && byte !== 12 && byte !== 13) || byte === 127) {
+      controlBytes += 1;
+    }
+  }
+  return sample.length > 0 && controlBytes / sample.length > 0.1;
+}
+
+function decodeWorkspaceText(content: Buffer) {
+  if (isLikelyBinary(content)) throw new Error("Binary files are not supported");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    throw new Error("Binary files are not supported");
+  }
+}
 
 interface BridgeConfig {
   supabaseUrl: string;
   supabaseKey: string;    // anon key
   authToken: string;       // JWT for authenticated Supabase operations
+  agentAuthTokens?: Record<string, string>;
   userId: string;
   serverId: string;
   agentsDir: string;
@@ -17,6 +65,8 @@ interface BridgeConfig {
   arch?: string;
   localMode?: boolean;
   localServerUrl?: string;
+  apiKey?: string;
+  refreshAgentAuthTokens?: () => Promise<Record<string, string>>;
 }
 
 interface DbMessage {
@@ -38,12 +88,33 @@ interface DbAgent {
   runtime?: string | null;
   model: string;
   status: string;
+  owner_id?: string;
+  server_id?: string;
 }
 
 interface DbChannelMember {
   channel_id: string;
   member_id: string;
   member_type: string;
+}
+
+type DeliveryStatus = "pending" | "processing" | "completed" | "skipped" | "failed";
+
+interface DbMessageDelivery {
+  message_id: string;
+  agent_id: string;
+  server_id: string;
+  channel_id: string;
+  status: DeliveryStatus;
+  attempts: number;
+  claim_token: string | null;
+  claimed_by: string | null;
+  lease_expires_at: string | null;
+  next_attempt_at: string;
+  last_error: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export class Bridge {
@@ -58,17 +129,30 @@ export class Bridge {
   private channelNames = new Map<string, string>();
   // Maps agent_id -> agent DB record
   private agentRecords = new Map<string, DbAgent>();
-  // Realtime channel for workspace file RPC (web UI ↔ bridge)
-  private workspaceRpcChannel: RealtimeChannel | null = null;
-  // Presence channel for online status (auto-offline on disconnect)
-  private presenceChannel: RealtimeChannel | null = null;
+  // Core database subscriptions are retained so client rotation can replace them atomically.
+  private deliveriesChannel: RealtimeChannel | null = null;
+  private agentChangesChannel: RealtimeChannel | null = null;
+  // Directional private channels for workspace file RPC (web UI ↔ runtime).
+  private workspaceRpcRequestChannel: RealtimeChannel | null = null;
+  private workspaceRpcResponseChannel: RealtimeChannel | null = null;
   // Heartbeat timer for machine_keys.last_used_at (polling fallback for online status)
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private lastHeartbeatErrorLogAt = 0;
+  private deliveryPollInterval: ReturnType<typeof setInterval> | null = null;
+  private deliveryPumpPromise: Promise<void> | null = null;
+  private deliveryPumpRequested = false;
+  private readonly bridgeInstanceId = randomUUID();
+  private readonly locallyDelivered = new Set<string>();
+  private stopping = false;
+  private stopPromise: Promise<void> | null = null;
 
   constructor(config: BridgeConfig) {
     this.config = config;
     this.supabase = config.localMode
-      ? (createLocalClient(config.localServerUrl) as unknown as SupabaseClient)
+      ? (createLocalClient(
+          config.localServerUrl,
+          config.authToken,
+        ) as unknown as SupabaseClient)
       : createClient(config.supabaseUrl, config.supabaseKey, {
           auth: { autoRefreshToken: false, persistSession: false },
           global: {
@@ -83,36 +167,48 @@ export class Bridge {
       config.supabaseUrl,
       config.supabaseKey,
       config.authToken,
-      config.localServerUrl
+      config.localServerUrl,
+      config.serverId,
+      config.apiKey || "",
+      config.agentAuthTokens ?? {},
+      config.refreshAgentAuthTokens,
     );
   }
 
-  /** Update the auth token (called on periodic refresh) */
-  updateAuthToken(token: string) {
+  /** Update the auth token (called on periodic refresh). */
+  async updateAuthToken(token: string, agentAuthTokens: Record<string, string> = {}) {
+    if (this.stopping) return;
     this.config.authToken = token;
-    if (this.config.localMode) return;
-    // Remove old channels before recreating client
-    if (this.workspaceRpcChannel) {
-      this.supabase.removeChannel(this.workspaceRpcChannel);
-      this.workspaceRpcChannel = null;
+    this.config.agentAuthTokens = agentAuthTokens;
+    if (this.config.localMode) {
+      this.supabase.realtime.setAuth(token);
+      this.agentManager.updateAgentAuthTokens(agentAuthTokens);
+      return;
     }
-    if (this.presenceChannel) {
-      this.supabase.removeChannel(this.presenceChannel);
-      this.presenceChannel = null;
+
+    const previousClient = this.supabase;
+    await this.removeBridgeChannels(previousClient);
+    if (this.stopping) {
+      await previousClient.removeAllChannels();
+      return;
     }
-    // Recreate the Supabase client with the new token
-    this.supabase = createClient(this.config.supabaseUrl, this.config.supabaseKey, {
+
+    const nextClient = createClient(this.config.supabaseUrl, this.config.supabaseKey, {
       auth: { autoRefreshToken: false, persistSession: false },
       global: {
         headers: { Authorization: `Bearer ${token}` },
       },
     });
-    this.supabase.realtime.setAuth(token);
-    // Update agent manager's client too
-    this.agentManager.updateSupabaseClient(this.supabase, token);
-    // Re-subscribe workspace RPC and presence on new client
-    this.subscribeToWorkspaceRpc();
-    this.trackPresence();
+    nextClient.realtime.setAuth(token);
+    this.supabase = nextClient;
+    this.agentManager.updateSupabaseClient(nextClient, token, agentAuthTokens);
+    await previousClient.removeAllChannels();
+
+    if (this.stopping) {
+      await nextClient.removeAllChannels();
+      return;
+    }
+    this.subscribeBridgeChannels();
   }
 
   async start() {
@@ -136,23 +232,18 @@ export class Bridge {
         .in("id", agentIds);
     }
 
-    // 5. Subscribe to new messages in channels where agents are members
-    this.subscribeToMessages();
+    // 5. Subscribe to durable deliveries, membership changes, and workspace RPC.
+    this.subscribeBridgeChannels();
 
-    // 6. Subscribe to new agents and channel memberships (for agents created via UI)
-    this.subscribeToNewAgents();
+    // 6. Catch up work created while this Bridge was offline. Realtime is only
+    // a low-latency wake-up; polling also recovers missed events and expired leases.
+    this.startDeliveryPoll();
 
-    // 7. Subscribe to workspace file RPC (web UI requests files via Realtime)
-    this.subscribeToWorkspaceRpc();
-
-    // 8. Track presence (auto-offline on disconnect — no SIGINT needed)
-    this.trackPresence();
-
-    // 9. Start heartbeat (updates machine_keys.last_used_at every 30s for polling-based status)
+    // 7. Start heartbeat (updates machine_keys.last_used_at every 30s for polling-based status)
     this.startHeartbeat();
 
     console.log(
-      `  Bridge ready. Listening for messages across ${this.channelAgents.size} channel(s).`
+      `  Agent runtime ready. Listening for messages across ${this.channelAgents.size} channel(s).`
     );
     console.log(
       `  Managing ${this.agentRecords.size} agent(s): ${Array.from(this.agentRecords.values()).map((a) => a.display_name).join(", ")}`
@@ -163,7 +254,8 @@ export class Bridge {
     const { data: agents, error } = await this.supabase
       .from("agents")
       .select("*")
-      .eq("owner_id", this.config.userId);
+      .eq("owner_id", this.config.userId)
+      .eq("server_id", this.config.serverId);
 
     if (error) {
       console.error("  Failed to load agents:", error.message);
@@ -171,6 +263,11 @@ export class Bridge {
     }
 
     for (const agent of agents || []) {
+      if (
+        !this.config.agentAuthTokens?.[agent.id]
+      ) {
+        continue;
+      }
       this.agentRecords.set(agent.id, agent as DbAgent);
     }
 
@@ -216,51 +313,128 @@ export class Bridge {
     }
   }
 
-  private subscribeToMessages() {
-    const subscription = this.supabase
-      .channel("bridge-messages")
+  private subscribeBridgeChannels() {
+    this.subscribeToDeliveries();
+    this.subscribeToAgentChanges();
+    this.subscribeToWorkspaceRpc();
+  }
+
+  private async removeBridgeChannels(client: SupabaseClient) {
+    const channels = [
+      this.deliveriesChannel,
+      this.agentChangesChannel,
+      this.workspaceRpcRequestChannel,
+      this.workspaceRpcResponseChannel,
+    ].filter((channel): channel is RealtimeChannel => channel !== null);
+
+    this.deliveriesChannel = null;
+    this.agentChangesChannel = null;
+    this.workspaceRpcRequestChannel = null;
+    this.workspaceRpcResponseChannel = null;
+
+    await Promise.allSettled(channels.map((channel) => client.removeChannel(channel)));
+  }
+
+  private subscribeToDeliveries() {
+    this.deliveriesChannel = this.supabase
+      .channel(`bridge-deliveries:${this.config.serverId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
-          table: "messages",
+          table: "message_deliveries",
+          filter: `server_id=eq.${this.config.serverId}`,
         },
         (payload) => {
-          const msg = payload.new as DbMessage;
-          this.handleNewMessage(msg);
+          const delivery = payload.new as DbMessageDelivery;
+          if (
+            delivery.server_id === this.config.serverId &&
+            this.agentRecords.has(delivery.agent_id)
+          ) {
+            void this.requestDeliveryPump();
+          }
         }
       )
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
-          console.log("  Subscribed to Supabase Realtime.");
+          console.log("  Subscribed to durable agent deliveries.");
+          void this.requestDeliveryPump();
         } else if (status === "CHANNEL_ERROR") {
-          console.error("  Supabase Realtime subscription error.");
+          console.error("  Agent delivery subscription error; polling remains active.");
         }
       });
   }
 
   /**
    * Parse @mentions from message content.
-   * Matches @DisplayName (case-insensitive) against agents in the channel.
+   * Stable handles win; display names are compatibility aliases only when
+   * unique across the complete, current channel membership.
    */
   private parseMentionedAgents(
     content: string,
-    channelAgentIds: Set<string>
+    channelAgents: Map<string, Pick<DbAgent, "id" | "name" | "display_name">>,
   ): Set<string> {
     const mentioned = new Set<string>();
-    for (const agentId of channelAgentIds) {
-      const agent = this.agentRecords.get(agentId);
-      if (!agent) continue;
-      // Match @DisplayName followed by whitespace, punctuation, or end of string
-      // (don't use \b — it doesn't work with CJK characters)
-      const escaped = agent.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`@${escaped}(?=[\\s,.:!?，。！？、；]|$)`, "i");
-      if (pattern.test(content)) {
+    const stableNameOwners = new Map<string, Set<string>>();
+    const displayNameCounts = new Map<string, number>();
+    for (const [agentId, agent] of channelAgents) {
+      const stableKey = agent.name.toLocaleLowerCase();
+      const stableOwners = stableNameOwners.get(stableKey) || new Set<string>();
+      stableOwners.add(agentId);
+      stableNameOwners.set(stableKey, stableOwners);
+      const displayKey = agent.display_name.toLocaleLowerCase();
+      displayNameCounts.set(displayKey, (displayNameCounts.get(displayKey) || 0) + 1);
+    }
+    const hasMention = (name: string) => {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`@${escaped}(?=[\\s,.:!?，。！？、；]|$)`, "i").test(content);
+    };
+    for (const [agentId, agent] of channelAgents) {
+      const stableOwners = stableNameOwners.get(agent.name.toLocaleLowerCase());
+      if (stableOwners?.size === 1 && hasMention(agent.name)) {
+        mentioned.add(agentId);
+        continue;
+      }
+      const displayKey = agent.display_name.toLocaleLowerCase();
+      const displayStableOwners = stableNameOwners.get(displayKey);
+      if (
+        displayNameCounts.get(displayKey) === 1 &&
+        (!displayStableOwners ||
+          (displayStableOwners.size === 1 && displayStableOwners.has(agentId))) &&
+        hasMention(agent.display_name)
+      ) {
         mentioned.add(agentId);
       }
     }
     return mentioned;
+  }
+
+  private async loadCurrentChannelMentionAgents(channelId: string) {
+    const { data, error } = await this.supabase.rpc("list_channel_agent_mentions", {
+      channel_uuid: channelId,
+    });
+    if (error) throw new Error(error.message);
+    if (!Array.isArray(data)) throw new Error("Channel mention directory is invalid");
+    const mentions = new Map<string, Pick<DbAgent, "id" | "name" | "display_name">>();
+    for (const candidate of data) {
+      if (
+        !candidate ||
+        typeof candidate !== "object" ||
+        typeof candidate.id !== "string" ||
+        typeof candidate.name !== "string" ||
+        typeof candidate.display_name !== "string" ||
+        mentions.has(candidate.id)
+      ) {
+        throw new Error("Channel mention directory is invalid");
+      }
+      mentions.set(candidate.id, {
+        id: candidate.id,
+        name: candidate.name,
+        display_name: candidate.display_name,
+      });
+    }
+    return mentions;
   }
 
   /**
@@ -268,14 +442,18 @@ export class Bridge {
    */
   private async getChannelContext(
     channelId: string,
-    limit: number = 10
+    limit: number = 10,
+    excludeMessageId?: string,
+    channelAgents?: Map<string, Pick<DbAgent, "id" | "name" | "display_name">>,
   ): Promise<string> {
-    const { data: messages } = await this.supabase
+    let query = this.supabase
       .from("messages")
       .select("sender_id, sender_type, content, created_at")
       .eq("channel_id", channelId)
       .order("created_at", { ascending: false })
       .limit(limit);
+    if (excludeMessageId) query = query.neq("id", excludeMessageId);
+    const { data: messages } = await query;
 
     if (!messages || messages.length === 0) return "";
 
@@ -286,7 +464,7 @@ export class Bridge {
       } else if (m.sender_type === "system") {
         senderName = "System";
       } else {
-        const agent = this.agentRecords.get(m.sender_id);
+        const agent = channelAgents?.get(m.sender_id) || this.agentRecords.get(m.sender_id);
         senderName = agent?.display_name || "Agent";
       }
       return `[${senderName}]: ${m.content.substring(0, 300)}`;
@@ -300,10 +478,11 @@ export class Bridge {
    */
   private async resolveSenderName(
     senderId: string,
-    senderType: string
+    senderType: string,
+    channelAgents?: Map<string, Pick<DbAgent, "id" | "name" | "display_name">>,
   ): Promise<string> {
     if (senderType === "agent") {
-      const agent = this.agentRecords.get(senderId);
+      const agent = channelAgents?.get(senderId) || this.agentRecords.get(senderId);
       if (agent) return agent.display_name;
     }
 
@@ -331,84 +510,446 @@ export class Bridge {
     return channelId;
   }
 
-  private async handleNewMessage(msg: DbMessage) {
-    // Only respond to human messages
-    if (msg.sender_type !== "human") return;
+  private startDeliveryPoll() {
+    if (this.deliveryPollInterval) clearInterval(this.deliveryPollInterval);
+    this.deliveryPollInterval = setInterval(() => {
+      void this.requestDeliveryPump();
+    }, DELIVERY_POLL_MS);
+    void this.requestDeliveryPump();
+  }
 
-    // Check if any of our agents are in this channel
-    const agentIdsInChannel = this.channelAgents.get(msg.channel_id);
-    if (!agentIdsInChannel || agentIdsInChannel.size === 0) return;
+  /** Coalesce Realtime and polling wake-ups into one queue drain. */
+  private requestDeliveryPump(): Promise<void> {
+    if (this.stopping) return Promise.resolve();
+    this.deliveryPumpRequested = true;
+    if (this.deliveryPumpPromise) return this.deliveryPumpPromise;
 
-    const channelType = this.channelTypes.get(msg.channel_id);
-    const isDm = channelType === "dm";
-
-    // Determine which agents should respond
-    let respondingAgentIds: Set<string>;
-
-    if (isDm) {
-      // DM: always respond with the single agent
-      respondingAgentIds = agentIdsInChannel;
-    } else {
-      // Channel: only respond if @mentioned
-      const mentioned = this.parseMentionedAgents(
-        msg.content,
-        agentIdsInChannel
-      );
-      if (mentioned.size === 0) {
-        // No agents mentioned — don't respond
-        console.log(
-          `  [Bridge] No @mention in channel message, skipping.`
-        );
-        return;
-      }
-      respondingAgentIds = mentioned;
-    }
-
-    // Resolve sender name for message context
-    const senderName = await this.resolveSenderName(
-      msg.sender_id,
-      msg.sender_type
-    );
-
-    // Build channel target for MCP context
-    const channelTarget = this.buildChannelTarget(msg.channel_id, senderName);
-
-    // For channels (not DM), get conversation context
-    let contextPrefix = "";
-    if (!isDm) {
-      contextPrefix = await this.getChannelContext(msg.channel_id);
-    }
-
-    for (const agentId of respondingAgentIds) {
-      const agent = this.agentRecords.get(agentId);
-      if (!agent) continue;
-
-      console.log(
-        `  [${agent.display_name}] Received${isDm ? "" : " (@mention)"}: "${msg.content.substring(0, 60)}${msg.content.length > 60 ? "..." : ""}"`
-      );
-
-      try {
-        // Build prompt with message metadata
-        const msgHeader = `[target=${channelTarget} sender=@${senderName} type=${msg.sender_type}]`;
-        const prompt = contextPrefix
-          ? `${contextPrefix}\n\n${msgHeader} ${msg.content}`
-          : `${msgHeader} ${msg.content}`;
-
-        // Fire-and-forget: agent handles all responses via `zano` CLI
-        await this.agentManager.sendToAgent(agentId, prompt);
-      } catch (err) {
+    this.deliveryPumpPromise = this.runDeliveryPump()
+      .catch((error) => {
         console.error(
-          `  [${agent.display_name}] Error:`,
-          err instanceof Error ? err.message : err
+          "  Could not drain agent deliveries:",
+          error instanceof Error ? error.message : error,
         );
+      })
+      .finally(() => {
+        this.deliveryPumpPromise = null;
+        if (this.deliveryPumpRequested && !this.stopping) {
+          void this.requestDeliveryPump();
+        }
+      });
+    return this.deliveryPumpPromise;
+  }
+
+  private async runDeliveryPump() {
+    do {
+      this.deliveryPumpRequested = false;
+      await this.drainDeliveryQueue();
+    } while (this.deliveryPumpRequested && !this.stopping);
+  }
+
+  private async drainDeliveryQueue() {
+    while (!this.stopping) {
+      const candidates = await this.loadDeliveryCandidates();
+      if (candidates.length === 0) return;
+
+      const claimed: DbMessageDelivery[] = [];
+      for (const candidate of candidates) {
+        if (this.stopping) return;
+        if (candidate.attempts >= DELIVERY_MAX_ATTEMPTS) {
+          await this.markExhaustedDelivery(candidate);
+          continue;
+        }
+        const delivery = await this.claimDelivery(candidate);
+        if (delivery) claimed.push(delivery);
       }
+
+      if (claimed.length === 0) return;
+      await Promise.all(claimed.map((delivery) => this.processClaimedDelivery(delivery)));
     }
   }
 
-  private subscribeToNewAgents() {
-    // Watch for new agents belonging to this user
-    this.supabase
-      .channel("bridge-new-agents")
+  private async loadDeliveryCandidates(): Promise<DbMessageDelivery[]> {
+    const agentIds = Array.from(this.agentRecords.keys());
+    if (agentIds.length === 0) return [];
+    const now = new Date().toISOString();
+
+    const [pendingResult, expiredResult, unleasedResult] = await Promise.all([
+      this.supabase
+        .from("message_deliveries")
+        .select("*")
+        .eq("server_id", this.config.serverId)
+        .in("agent_id", agentIds)
+        .eq("status", "pending")
+        .lte("next_attempt_at", now)
+        .order("created_at", { ascending: true })
+        .limit(DELIVERY_BATCH_SIZE),
+      this.supabase
+        .from("message_deliveries")
+        .select("*")
+        .eq("server_id", this.config.serverId)
+        .in("agent_id", agentIds)
+        .eq("status", "processing")
+        .lte("lease_expires_at", now)
+        .order("created_at", { ascending: true })
+        .limit(DELIVERY_BATCH_SIZE),
+      this.supabase
+        .from("message_deliveries")
+        .select("*")
+        .eq("server_id", this.config.serverId)
+        .in("agent_id", agentIds)
+        .eq("status", "processing")
+        .is("lease_expires_at", null)
+        .order("created_at", { ascending: true })
+        .limit(DELIVERY_BATCH_SIZE),
+    ]);
+
+    if (pendingResult.error) throw new Error(pendingResult.error.message);
+    if (expiredResult.error) throw new Error(expiredResult.error.message);
+    if (unleasedResult.error) throw new Error(unleasedResult.error.message);
+
+    const byKey = new Map<string, DbMessageDelivery>();
+    for (const raw of [
+      ...(pendingResult.data || []),
+      ...(expiredResult.data || []),
+      ...(unleasedResult.data || []),
+    ]) {
+      const delivery = raw as DbMessageDelivery;
+      byKey.set(this.deliveryKey(delivery), delivery);
+    }
+    return Array.from(byKey.values())
+      .sort((left, right) => left.created_at.localeCompare(right.created_at))
+      .slice(0, DELIVERY_BATCH_SIZE);
+  }
+
+  /** Atomic compare-and-swap claim. Concurrent Bridges can only win once. */
+  private async claimDelivery(candidate: DbMessageDelivery): Promise<DbMessageDelivery | null> {
+    const claimToken = randomUUID();
+    const now = new Date();
+    let query = this.supabase
+      .from("message_deliveries")
+      .update({
+        status: "processing",
+        attempts: candidate.attempts + 1,
+        claim_token: claimToken,
+        claimed_by: this.bridgeInstanceId,
+        lease_expires_at: new Date(now.getTime() + DELIVERY_LEASE_MS).toISOString(),
+        next_attempt_at: now.toISOString(),
+        last_error: null,
+        updated_at: now.toISOString(),
+      })
+      .eq("message_id", candidate.message_id)
+      .eq("agent_id", candidate.agent_id)
+      .eq("server_id", this.config.serverId)
+      .eq("status", candidate.status)
+      .eq("attempts", candidate.attempts);
+    query = candidate.claim_token === null
+      ? query.is("claim_token", null)
+      : query.eq("claim_token", candidate.claim_token);
+    if (candidate.status === "processing") {
+      query = candidate.lease_expires_at === null
+        ? query.is("lease_expires_at", null)
+        : query.eq("lease_expires_at", candidate.lease_expires_at);
+    }
+    const { data, error } = await query.select("*").maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? data as DbMessageDelivery : null;
+  }
+
+  private async markExhaustedDelivery(candidate: DbMessageDelivery) {
+    const now = new Date().toISOString();
+    let query = this.supabase
+      .from("message_deliveries")
+      .update({
+        status: "failed",
+        claim_token: null,
+        claimed_by: null,
+        lease_expires_at: null,
+        last_error: candidate.last_error || "Delivery retry limit reached",
+        updated_at: now,
+      })
+      .eq("message_id", candidate.message_id)
+      .eq("agent_id", candidate.agent_id)
+      .eq("server_id", this.config.serverId)
+      .eq("status", candidate.status)
+      .eq("attempts", candidate.attempts);
+    query = candidate.claim_token === null
+      ? query.is("claim_token", null)
+      : query.eq("claim_token", candidate.claim_token);
+    if (candidate.status === "processing") {
+      query = candidate.lease_expires_at === null
+        ? query.is("lease_expires_at", null)
+        : query.eq("lease_expires_at", candidate.lease_expires_at);
+    }
+    const { error } = await query;
+    if (error) throw new Error(error.message);
+  }
+
+  private async processClaimedDelivery(delivery: DbMessageDelivery) {
+    let leaseValid = true;
+    const renewTimer = setInterval(() => {
+      void this.renewDeliveryLease(delivery).then((renewed) => {
+        if (!renewed) leaseValid = false;
+      }).catch(() => {
+        leaseValid = false;
+      });
+    }, DELIVERY_LEASE_RENEW_MS);
+
+    try {
+      await this.executeClaimedDelivery(delivery, async () => {
+        if (!leaseValid) return false;
+        leaseValid = await this.renewDeliveryLease(delivery);
+        return leaseValid;
+      });
+    } catch (error) {
+      try {
+        await this.failDelivery(delivery, error);
+      } catch (updateError) {
+        console.error(
+          `  Could not persist failed delivery ${this.deliveryKey(delivery)}:`,
+          updateError instanceof Error ? updateError.message : updateError,
+        );
+      }
+    } finally {
+      clearInterval(renewTimer);
+    }
+  }
+
+  private async executeClaimedDelivery(
+    delivery: DbMessageDelivery,
+    ensureLease: () => Promise<boolean>,
+  ) {
+    const key = this.deliveryKey(delivery);
+    if (this.locallyDelivered.has(key)) {
+      await this.finishDelivery(delivery, "completed");
+      return;
+    }
+    if (delivery.server_id !== this.config.serverId) {
+      await this.finishDelivery(delivery, "skipped", "Delivery belongs to another workspace");
+      return;
+    }
+
+    const agent = this.agentRecords.get(delivery.agent_id);
+    if (!agent || agent.server_id !== this.config.serverId) {
+      await this.finishDelivery(delivery, "skipped", "Agent is no longer managed by this Bridge");
+      return;
+    }
+
+    if (!(await this.isCurrentAgentMembership(delivery))) {
+      await this.finishDelivery(delivery, "skipped", "Agent is no longer a channel member");
+      return;
+    }
+
+    const [channelResult, messageResult] = await Promise.all([
+      this.supabase
+        .from("channels")
+        .select("id, name, type, server_id")
+        .eq("id", delivery.channel_id)
+        .maybeSingle(),
+      this.supabase
+        .from("messages")
+        .select("id, channel_id, sender_id, sender_type, content, thread_parent_id, created_at")
+        .eq("id", delivery.message_id)
+        .maybeSingle(),
+    ]);
+    if (channelResult.error) throw new Error(channelResult.error.message);
+    if (messageResult.error) throw new Error(messageResult.error.message);
+    if (!channelResult.data || channelResult.data.server_id !== this.config.serverId) {
+      await this.finishDelivery(delivery, "skipped", "Channel is missing or belongs to another workspace");
+      return;
+    }
+    const msg = messageResult.data as DbMessage | null;
+    if (
+      !msg ||
+      msg.channel_id !== delivery.channel_id ||
+      (msg.sender_type !== "human" && msg.sender_type !== "agent")
+    ) {
+      await this.finishDelivery(delivery, "skipped", "Message is missing or has an unsupported sender");
+      return;
+    }
+
+    const channel = channelResult.data as {
+      id: string;
+      name: string;
+      type: string;
+      server_id: string;
+    };
+    const isDm = channel.type === "dm";
+    const isAgentAssignment = msg.sender_type === "agent";
+    if (isAgentAssignment && msg.sender_id === delivery.agent_id) {
+      await this.finishDelivery(delivery, "skipped", "An agent cannot deliver a task mention to itself");
+      return;
+    }
+    if (
+      isAgentAssignment &&
+      !(await this.isCurrentChannelAgent(msg.sender_id, delivery.channel_id))
+    ) {
+      await this.finishDelivery(delivery, "skipped", "The sending agent is no longer a channel member");
+      return;
+    }
+    let channelAgents:
+      | Map<string, Pick<DbAgent, "id" | "name" | "display_name">>
+      | undefined;
+    if (isAgentAssignment || !isDm) {
+      channelAgents = await this.loadCurrentChannelMentionAgents(delivery.channel_id);
+      if (!this.parseMentionedAgents(msg.content, channelAgents).has(delivery.agent_id)) {
+        await this.finishDelivery(delivery, "skipped", "Agent was not mentioned");
+        return;
+      }
+    }
+
+    this.channelTypes.set(channel.id, channel.type);
+    this.channelNames.set(channel.id, channel.name);
+    const senderName = await this.resolveSenderName(
+      msg.sender_id,
+      msg.sender_type,
+      channelAgents,
+    );
+    const channelTarget = this.buildChannelTarget(msg.channel_id, senderName);
+    const contextPrefix = isDm
+      ? ""
+      : await this.getChannelContext(msg.channel_id, 10, msg.id, channelAgents);
+
+    // Recheck membership immediately before handing work to a runtime. A stale
+    // Realtime membership map is never sufficient authorization to execute.
+    if (!(await this.isCurrentAgentMembership(delivery))) {
+      await this.finishDelivery(delivery, "skipped", "Agent was removed before delivery");
+      return;
+    }
+    if (!(await ensureLease())) throw new Error("Delivery lease was lost before runtime hand-off");
+
+    console.log(
+      `  [${agent.display_name}] Received${isDm ? "" : " (@mention)"}: "${msg.content.substring(0, 60)}${msg.content.length > 60 ? "..." : ""}"`,
+    );
+    const threadTarget = msg.thread_parent_id
+      ? `${channelTarget}:${msg.thread_parent_id.substring(0, 8)}`
+      : channelTarget;
+    const msgHeader = `[target=${threadTarget} msg=${msg.id.substring(0, 8)} time=${msg.created_at} sender=@${senderName} type=${msg.sender_type}]`;
+    const prompt = contextPrefix
+      ? `${contextPrefix}\n\n${msgHeader} ${msg.content}`
+      : `${msgHeader} ${msg.content}`;
+
+    await this.agentManager.sendToAgent(delivery.agent_id, prompt, msg.channel_id);
+    // Record this before the completion update. If that update fails, this
+    // process can reclaim the row without sending the same prompt twice.
+    this.rememberLocalDelivery(key);
+    await this.finishDelivery(delivery, "completed");
+  }
+
+  private async isCurrentAgentMembership(delivery: DbMessageDelivery) {
+    const { data, error } = await this.supabase
+      .from("channel_members")
+      .select("channel_id")
+      .eq("channel_id", delivery.channel_id)
+      .eq("member_id", delivery.agent_id)
+      .eq("member_type", "agent")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return Boolean(data);
+  }
+
+  private async isCurrentChannelAgent(agentId: string, channelId: string) {
+    const { data, error } = await this.supabase
+      .from("channel_members")
+      .select("member_id")
+      .eq("channel_id", channelId)
+      .eq("member_id", agentId)
+      .eq("member_type", "agent")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return Boolean(data);
+  }
+
+  private async renewDeliveryLease(delivery: DbMessageDelivery) {
+    const now = new Date();
+    const { data, error } = await this.supabase
+      .from("message_deliveries")
+      .update({
+        lease_expires_at: new Date(now.getTime() + DELIVERY_LEASE_MS).toISOString(),
+        updated_at: now.toISOString(),
+      })
+      .eq("message_id", delivery.message_id)
+      .eq("agent_id", delivery.agent_id)
+      .eq("server_id", this.config.serverId)
+      .eq("status", "processing")
+      .eq("claim_token", delivery.claim_token)
+      .select("message_id")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return Boolean(data);
+  }
+
+  private async finishDelivery(
+    delivery: DbMessageDelivery,
+    status: "completed" | "skipped",
+    reason: string | null = null,
+  ) {
+    const now = new Date().toISOString();
+    const { data, error } = await this.supabase
+      .from("message_deliveries")
+      .update({
+        status,
+        claim_token: null,
+        claimed_by: null,
+        lease_expires_at: null,
+        last_error: reason,
+        completed_at: now,
+        updated_at: now,
+      })
+      .eq("message_id", delivery.message_id)
+      .eq("agent_id", delivery.agent_id)
+      .eq("server_id", this.config.serverId)
+      .eq("status", "processing")
+      .eq("claim_token", delivery.claim_token)
+      .select("message_id")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new Error("Delivery claim was lost before completion");
+  }
+
+  private async failDelivery(delivery: DbMessageDelivery, error: unknown) {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+    const terminal = delivery.attempts >= DELIVERY_MAX_ATTEMPTS;
+    const now = new Date();
+    const retryDelay = Math.min(60_000, 1_000 * (2 ** Math.max(0, delivery.attempts - 1)));
+    const { data, error: updateError } = await this.supabase
+      .from("message_deliveries")
+      .update({
+        status: terminal ? "failed" : "pending",
+        claim_token: null,
+        claimed_by: null,
+        lease_expires_at: null,
+        next_attempt_at: new Date(now.getTime() + retryDelay).toISOString(),
+        last_error: message || "Unknown delivery error",
+        updated_at: now.toISOString(),
+      })
+      .eq("message_id", delivery.message_id)
+      .eq("agent_id", delivery.agent_id)
+      .eq("server_id", this.config.serverId)
+      .eq("status", "processing")
+      .eq("claim_token", delivery.claim_token)
+      .select("message_id")
+      .maybeSingle();
+    if (updateError) throw new Error(updateError.message);
+    if (!data) throw new Error("Delivery claim was lost while recording failure");
+  }
+
+  private deliveryKey(delivery: Pick<DbMessageDelivery, "message_id" | "agent_id">) {
+    return `${delivery.message_id}:${delivery.agent_id}`;
+  }
+
+  private rememberLocalDelivery(key: string) {
+    this.locallyDelivered.delete(key);
+    this.locallyDelivered.add(key);
+    while (this.locallyDelivered.size > MAX_LOCAL_DELIVERY_GUARDS) {
+      const oldest = this.locallyDelivered.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.locallyDelivered.delete(oldest);
+    }
+  }
+
+  private subscribeToAgentChanges() {
+    this.agentChangesChannel = this.supabase
+      .channel("bridge-agent-changes")
       .on(
         "postgres_changes",
         {
@@ -417,25 +958,41 @@ export class Bridge {
           table: "agents",
           filter: `owner_id=eq.${this.config.userId}`,
         },
-        async (payload) => {
-          const agent = payload.new as DbAgent;
-          if (this.agentRecords.has(agent.id)) return;
-
-          console.log(
-            `  [Bridge] New agent detected: ${agent.display_name}`
-          );
-          this.agentRecords.set(agent.id, agent);
-          await this.agentManager.initAgent(agent.id, agent);
-
-          // Mark as active (best-effort DB backup)
-          await this.supabase
-            .from("agents")
-            .update({ status: "online" })
-            .eq("id", agent.id);
-
-          // Update presence with new agent list
-          this.updatePresence();
+        (payload) => {
+          void this.handleAgentInserted(payload.new as DbAgent).catch((error) => {
+            console.error(
+              "  Could not initialize new agent:",
+              error instanceof Error ? error.message : error,
+            );
+          });
         }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "agents" },
+        (payload) => {
+          const updated = payload.new as DbAgent;
+          const current = this.agentRecords.get(updated.id);
+          if (!current) return;
+          if (
+            (updated.owner_id && updated.owner_id !== this.config.userId) ||
+            (updated.server_id && updated.server_id !== this.config.serverId)
+          ) {
+            this.removeManagedAgent(updated.id);
+            return;
+          }
+          this.agentRecords.set(updated.id, { ...current, ...updated });
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "agents" },
+        (payload) => {
+          const deleted = payload.old as Partial<DbAgent>;
+          if (deleted.id && this.agentRecords.has(deleted.id)) {
+            this.removeManagedAgent(deleted.id);
+          }
+        },
       )
       .on(
         "postgres_changes",
@@ -444,54 +1001,125 @@ export class Bridge {
           schema: "public",
           table: "channel_members",
         },
-        async (payload) => {
-          const member = payload.new as DbChannelMember;
-          // Only track agent memberships for our agents
-          if (
-            member.member_type !== "agent" ||
-            !this.agentRecords.has(member.member_id)
-          )
-            return;
-
-          console.log(
-            `  [Bridge] Agent ${this.agentRecords.get(member.member_id)?.display_name} joined channel ${member.channel_id}`
-          );
-          if (!this.channelAgents.has(member.channel_id)) {
-            this.channelAgents.set(member.channel_id, new Set());
-          }
-          this.channelAgents.get(member.channel_id)!.add(member.member_id);
-
-          // Load channel type and name if not known
-          if (!this.channelTypes.has(member.channel_id)) {
-            const { data: ch } = await this.supabase
-              .from("channels")
-              .select("name, type")
-              .eq("id", member.channel_id)
-              .single();
-            if (ch) {
-              this.channelTypes.set(member.channel_id, ch.type);
-              this.channelNames.set(member.channel_id, ch.name);
-            }
-          }
+        (payload) => {
+          void this.handleMembershipInserted(payload.new as DbChannelMember).catch((error) => {
+            console.error(
+              "  Could not add agent channel membership:",
+              error instanceof Error ? error.message : error,
+            );
+          });
         }
       )
-      .subscribe();
-  }
-
-  /**
-   * Track this bridge's presence. Supabase automatically removes presence
-   * when the WebSocket disconnects (crash, network loss, terminal close).
-   */
-  private trackPresence() {
-    const channelName = `bridge-presence:${this.config.serverId}`;
-    this.presenceChannel = this.supabase
-      .channel(channelName)
-      .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") {
-          await this.updatePresence();
-          console.log("  Bridge presence tracked.");
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "channel_members" },
+        (payload) => {
+          const member = payload.old as Partial<DbChannelMember>;
+          if (member.channel_id && member.member_id) {
+            this.removeChannelMembership(member.channel_id, member.member_id);
+          }
+        },
+      )
+      .subscribe((status) => {
+        if (status === "CHANNEL_ERROR") {
+          console.error("  Agent and channel membership subscription error.");
         }
       });
+  }
+
+  private async handleAgentInserted(agent: DbAgent) {
+    if (
+      this.agentRecords.has(agent.id) ||
+      (agent.owner_id && agent.owner_id !== this.config.userId) ||
+      (agent.server_id && agent.server_id !== this.config.serverId)
+    ) {
+      return;
+    }
+
+    if (!(await this.ensureAgentCredential(agent.id))) {
+      console.error(
+        `  [Agent runtime] Ignoring ${agent.display_name}: no live scoped agent credential was issued.`,
+      );
+      return;
+    }
+
+    console.log(`  [Agent runtime] New agent detected: ${agent.display_name}`);
+    this.agentRecords.set(agent.id, agent);
+    try {
+      await this.agentManager.initAgent(agent.id, agent);
+    } catch (error) {
+      this.agentRecords.delete(agent.id);
+      throw error;
+    }
+
+    await this.supabase
+      .from("agents")
+      .update({ status: "online" })
+      .eq("id", agent.id);
+    void this.requestDeliveryPump();
+  }
+
+  private async ensureAgentCredential(agentId: string) {
+    if (this.config.agentAuthTokens?.[agentId]) return true;
+    if (!this.config.refreshAgentAuthTokens) return false;
+
+    const refreshed = await this.config.refreshAgentAuthTokens();
+    this.config.agentAuthTokens = refreshed;
+    this.agentManager.updateAgentAuthTokens(refreshed);
+    return Boolean(refreshed[agentId]);
+  }
+
+  private removeManagedAgent(agentId: string) {
+    const agent = this.agentRecords.get(agentId);
+    if (!agent) return;
+
+    this.agentRecords.delete(agentId);
+    for (const channelId of Array.from(this.channelAgents.keys())) {
+      this.removeChannelMembership(channelId, agentId);
+    }
+    this.agentManager.removeAgent(agentId);
+    console.log(`  [Agent runtime] Agent removed: ${agent.display_name}`);
+  }
+
+  private async handleMembershipInserted(member: DbChannelMember) {
+    if (
+      member.member_type !== "agent" ||
+      !this.agentRecords.has(member.member_id)
+    ) {
+      return;
+    }
+
+    console.log(
+      `  [Agent runtime] Agent ${this.agentRecords.get(member.member_id)?.display_name} joined channel ${member.channel_id}`,
+    );
+    const agents = this.channelAgents.get(member.channel_id) || new Set<string>();
+    agents.add(member.member_id);
+    this.channelAgents.set(member.channel_id, agents);
+
+    if (!this.channelTypes.has(member.channel_id)) {
+      const { data: channel } = await this.supabase
+        .from("channels")
+        .select("name, type")
+        .eq("id", member.channel_id)
+        .single();
+      if (channel) {
+        this.channelTypes.set(member.channel_id, channel.type);
+        this.channelNames.set(member.channel_id, channel.name);
+      }
+    }
+    void this.requestDeliveryPump();
+  }
+
+  private removeChannelMembership(channelId: string, memberId: string) {
+    const agents = this.channelAgents.get(channelId);
+    if (!agents?.delete(memberId)) return;
+
+    if (agents.size === 0) {
+      this.channelAgents.delete(channelId);
+      this.channelTypes.delete(channelId);
+      this.channelNames.delete(channelId);
+    }
+    console.log(`  [Agent runtime] Agent ${memberId} left channel ${channelId}`);
   }
 
   /** Periodically update machine_keys.last_used_at as a heartbeat for polling-based status. */
@@ -500,13 +1128,18 @@ export class Bridge {
 
     const sendHeartbeat = async () => {
       try {
-        await this.supabase
-          .from("machine_keys")
-          .update({ last_used_at: new Date().toISOString() })
-          .eq("user_id", this.config.userId)
-          .eq("server_id", this.config.serverId);
-      } catch {
-        // Ignore heartbeat errors
+        const { error } = await this.supabase.rpc("touch_current_bridge_machine_key", {});
+        if (error) throw new Error(error.message);
+        this.lastHeartbeatErrorLogAt = 0;
+      } catch (error) {
+        const now = Date.now();
+        if (now - this.lastHeartbeatErrorLogAt >= 60_000) {
+          this.lastHeartbeatErrorLogAt = now;
+          console.error(
+            "  Agent runtime heartbeat failed:",
+            error instanceof Error ? error.message : error,
+          );
+        }
       }
     };
 
@@ -515,39 +1148,89 @@ export class Bridge {
     this.heartbeatInterval = setInterval(sendHeartbeat, 30_000);
   }
 
-  /** Update the presence payload (e.g. when new agents are added). */
-  private async updatePresence() {
-    if (!this.presenceChannel) return;
-    await this.presenceChannel.track({
-      hostname: this.config.hostname || "unknown",
-      platform: this.config.platform || "",
-      arch: this.config.arch || "",
-      agentIds: Array.from(this.agentRecords.keys()),
-    });
-  }
-
   /**
    * Subscribe to workspace file RPC requests from the web UI.
    * The web UI sends broadcast events; the bridge reads local files and responds.
    */
   private subscribeToWorkspaceRpc() {
-    this.workspaceRpcChannel = this.supabase
-      .channel("bridge-rpc")
+    const requestTopic = `bridge-rpc-request:${this.config.serverId}:${this.config.userId}`;
+    const responseTopic = `bridge-rpc-response:${this.config.serverId}:${this.config.userId}`;
+    const requestChannel = this.supabase.channel(requestTopic, {
+      config: { private: true, broadcast: { ack: true, self: false } },
+    });
+    const responseChannel = this.supabase.channel(responseTopic, {
+      config: { private: true, broadcast: { ack: true, self: false } },
+    });
+    this.workspaceRpcRequestChannel = requestChannel;
+    this.workspaceRpcResponseChannel = responseChannel;
+
+    let requestReady = false;
+    let responseReady = false;
+    const reportReady = () => {
+      if (requestReady && responseReady) {
+        console.log("  Agent runtime RPC channels ready.");
+      }
+    };
+    const sendResponse = async (
+      requestId: string,
+      responsePayload: Record<string, unknown>,
+    ) => {
+      try {
+        const status = await responseChannel.send({
+          type: "broadcast",
+          event: "rpc:response",
+          payload: {
+            ...responsePayload,
+            requestId,
+            serverId: this.config.serverId,
+            ownerId: this.config.userId,
+          },
+        });
+        if (status !== "ok") {
+          console.error("  Agent runtime RPC response failed:", status);
+        }
+      } catch (error) {
+        console.error(
+          "  Agent runtime RPC response failed:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    };
+
+    responseChannel.subscribe((status, error) => {
+      responseReady = status === "SUBSCRIBED";
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        console.error("  Agent runtime RPC response subscription failed:", status, error || "");
+      }
+      reportReady();
+    });
+
+    requestChannel
       .on(
         "broadcast",
         { event: "rpc:request" },
         async ({ payload }) => {
-          const { requestId, agentId, action, filePath, runtime } = payload;
-          if (!requestId) return;
+          const { requestId, agentId, action, filePath, runtime, serverId, ownerId } = payload;
+          if (
+            typeof requestId !== "string" ||
+            requestId.length === 0 ||
+            requestId.length > 128 ||
+            serverId !== this.config.serverId ||
+            ownerId !== this.config.userId
+          ) {
+            return;
+          }
 
           try {
             let responsePayload: Record<string, unknown>;
 
             if (action === "skills:list") {
               // Skills are machine-wide, no agentId needed
-              responsePayload = await this.listSkills(
-                runtime === "codex" ? "codex" : "claude-code",
-              );
+              if (runtime !== "codex" && runtime !== "claude-code" && runtime !== "pi") {
+                responsePayload = { error: "Unsupported agent runtime" };
+              } else {
+                responsePayload = await this.listSkills(runtime);
+              }
             } else if (agentId && this.agentRecords.has(agentId)) {
               const workDir = this.agentManager.getWorkspaceDir(agentId);
               if (!workDir) {
@@ -566,67 +1249,73 @@ export class Bridge {
               responsePayload = { error: "Unknown action or agent" };
             }
 
-            this.workspaceRpcChannel!.send({
-              type: "broadcast",
-              event: "rpc:response",
-              payload: { requestId, ...responsePayload },
-            });
+            await sendResponse(requestId, responsePayload);
           } catch (err) {
-            this.workspaceRpcChannel!.send({
-              type: "broadcast",
-              event: "rpc:response",
-              payload: {
-                requestId,
-                error:
-                  err instanceof Error ? err.message : "Unknown error",
-              },
+            await sendResponse(requestId, {
+              error: err instanceof Error ? err.message : "Unknown error",
             });
           }
         }
       )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          console.log("  Bridge RPC channel ready.");
+      .subscribe((status, error) => {
+        requestReady = status === "SUBSCRIBED";
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+          console.error("  Agent runtime RPC request subscription failed:", status, error || "");
         }
+        reportReady();
       });
   }
 
   private async listWorkspaceFiles(workDir: string) {
-    const files: Array<{
+    type WorkspaceFileEntry = {
       name: string;
       type: "file" | "directory";
       size: number;
       modified: string;
-    }> = [];
+    };
 
-    const entries = await readdir(workDir);
-    for (const entry of entries) {
-      if (entry.startsWith(".")) continue;
-      const entryPath = join(workDir, entry);
-      const entryStat = await stat(entryPath);
-      files.push({
-        name: entry,
-        type: entryStat.isDirectory() ? "directory" : "file",
-        size: entryStat.size,
-        modified: entryStat.mtime.toISOString(),
-      });
-    }
+    const rootPath = await realpath(workDir);
+    const rootStat = await lstat(rootPath);
+    if (!rootStat.isDirectory()) throw new Error("Agent workspace not found");
+
+    const listDirectory = async (directoryPath: string, prefix = "") => {
+      const files: WorkspaceFileEntry[] = [];
+      const entries = await readdir(directoryPath);
+      for (const entry of entries) {
+        if (entry.startsWith(".")) continue;
+        const entryPath = join(directoryPath, entry);
+        try {
+          const entryStat = await lstat(entryPath);
+          if (entryStat.isSymbolicLink() || (!entryStat.isFile() && !entryStat.isDirectory())) {
+            continue;
+          }
+          const resolvedEntryPath = await realpath(entryPath);
+          if (!isWithinRoot(rootPath, resolvedEntryPath)) continue;
+          files.push({
+            name: `${prefix}${entry}`,
+            type: entryStat.isDirectory() ? "directory" : "file",
+            size: entryStat.size,
+            modified: entryStat.mtime.toISOString(),
+          });
+        } catch {
+          // An entry can disappear between readdir and lstat.
+        }
+      }
+      return files;
+    };
+
+    const files = await listDirectory(rootPath);
 
     // Also list files inside notes/
-    const notesDir = join(workDir, "notes");
-    const notesFiles: typeof files = [];
+    const notesDir = join(rootPath, "notes");
+    let notesFiles: WorkspaceFileEntry[] = [];
     try {
-      const notesEntries = await readdir(notesDir);
-      for (const entry of notesEntries) {
-        if (entry.startsWith(".")) continue;
-        const entryPath = join(notesDir, entry);
-        const entryStat = await stat(entryPath);
-        notesFiles.push({
-          name: `notes/${entry}`,
-          type: entryStat.isDirectory() ? "directory" : "file",
-          size: entryStat.size,
-          modified: entryStat.mtime.toISOString(),
-        });
+      const notesStat = await lstat(notesDir);
+      if (!notesStat.isSymbolicLink() && notesStat.isDirectory()) {
+        const resolvedNotesDir = await realpath(notesDir);
+        if (isWithinRoot(rootPath, resolvedNotesDir)) {
+          notesFiles = await listDirectory(resolvedNotesDir, "notes/");
+        }
       }
     } catch {
       // notes/ may not exist yet
@@ -636,20 +1325,46 @@ export class Bridge {
   }
 
   private async readWorkspaceFile(workDir: string, filePath: string) {
-    // Security: prevent path traversal
-    const resolvedPath = join(workDir, filePath);
-    if (!resolvedPath.startsWith(workDir)) {
+    if (!filePath || isAbsolute(filePath) || hasHiddenPathSegment(filePath)) {
       throw new Error("Invalid file path");
     }
-    const content = await readFile(resolvedPath, "utf-8");
-    return { file: filePath, content };
+
+    const rootPath = await realpath(workDir);
+    const rootStat = await lstat(rootPath);
+    if (!rootStat.isDirectory()) throw new Error("Agent workspace not found");
+
+    const requestedPath = resolve(rootPath, filePath);
+    if (!isWithinRoot(rootPath, requestedPath)) throw new Error("Invalid file path");
+
+    const relativePath = relative(rootPath, requestedPath);
+    let currentPath = rootPath;
+    for (const segment of relativePath.split(sep).filter(Boolean)) {
+      currentPath = join(currentPath, segment);
+      const segmentStat = await lstat(currentPath);
+      if (segmentStat.isSymbolicLink()) throw new Error("Symbolic links are not allowed");
+    }
+
+    const resolvedPath = await realpath(requestedPath);
+    if (!isWithinRoot(rootPath, resolvedPath)) throw new Error("Invalid file path");
+
+    const fileStat = await lstat(resolvedPath);
+    if (!fileStat.isFile()) throw new Error("Only regular files can be read");
+    if (fileStat.size > MAX_WORKSPACE_FILE_BYTES) throw new Error("File is too large");
+
+    const content = await readFile(resolvedPath);
+    if (content.length > MAX_WORKSPACE_FILE_BYTES) throw new Error("File is too large");
+    return { file: filePath, content: decodeWorkspaceText(content) };
   }
 
-  private async listSkills(runtime: "claude-code" | "codex") {
+  private async listSkills(runtime: "claude-code" | "codex" | "pi") {
+    const runtimeDirectory = runtime === "codex"
+      ? [".codex", "skills"]
+      : runtime === "pi"
+        ? [".pi", "agent", "skills"]
+        : [".claude", "skills"];
     const skillsDir = join(
       homedir(),
-      runtime === "codex" ? ".codex" : ".claude",
-      "skills",
+      ...runtimeDirectory,
     );
     const skills: Array<{ name: string; description: string }> = [];
 
@@ -695,30 +1410,56 @@ export class Bridge {
     return { skills };
   }
 
-  async stop() {
+  stop() {
+    if (!this.stopPromise) {
+      this.stopping = true;
+      this.stopPromise = this.stopInternal();
+    }
+    return this.stopPromise;
+  }
+
+  private async stopInternal() {
+    if (this.deliveryPollInterval) {
+      clearInterval(this.deliveryPollInterval);
+      this.deliveryPollInterval = null;
+    }
+
     // Stop heartbeat
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
 
-    // Mark agents as offline
-    const agentIds = Array.from(this.agentRecords.keys());
-    if (agentIds.length > 0) {
-      await this.supabase
-        .from("agents")
-        .update({ status: "offline" })
-        .in("id", agentIds);
-    }
-
-    // Stop all agent sessions
+    // Stop child processes before any network operation can delay shutdown.
     this.agentManager.stopAll();
 
-    // Disconnect from Supabase (removes all channels including workspace RPC + presence)
-    this.workspaceRpcChannel = null;
-    this.presenceChannel = null;
+    // Mark agents as offline
+    const agentIds = Array.from(this.agentRecords.keys());
+    // The bundled local service persists this synchronously in its own signal
+    // handler before it stops accepting requests.
+    if (agentIds.length > 0 && process.env.TEAMMATE_EMBEDDED_SIDECAR !== "1") {
+      try {
+        const { error } = await this.supabase
+          .from("agents")
+          .update({ status: "offline" })
+          .in("id", agentIds);
+        if (error) {
+          console.error(
+            "  Could not mark agents offline during shutdown:",
+            error.message,
+          );
+        }
+      } catch (error) {
+        console.error(
+          "  Could not mark agents offline during shutdown:",
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+
+    await this.removeBridgeChannels(this.supabase);
     await this.supabase.removeAllChannels();
 
-    console.log("  Bridge stopped.");
+    console.log("  Agent runtime stopped.");
   }
 }

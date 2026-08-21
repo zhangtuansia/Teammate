@@ -15,6 +15,11 @@ const vite = spawn(pnpmExecutable, ["dev"], {
   cwd: desktopDir,
   stdio: "inherit",
   shell: process.platform === "win32",
+  env: {
+    ...process.env,
+    TEAMMATE_LOCAL_SERVER_URL:
+      process.env.TEAMMATE_LOCAL_SERVER_URL || "http://127.0.0.1:8788",
+  },
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {

@@ -1,5 +1,5 @@
 {
-  "name": "@zano/web",
+  "name": "@teammate/web",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,8 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@zano/local-client": "workspace:*",
-    "@base-ui/react": "^1.4.1",
+    "@teammate/local-client": "workspace:*",
+    "@base-ui/react": "^1.7.0",
     "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/colors": "^3.0.0",
     "@supabase/ssr": "^0.10.2",

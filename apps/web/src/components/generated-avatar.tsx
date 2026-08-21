@@ -1,12 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import NotionAvatar from "react-notion-avatar";
 import { getAvatarColor, getNotionAvatarConfig } from "@/lib/avatar";
 import {
   getAgentAvatarSeed,
   resolveAgentAvatarImageUrl,
 } from "@/lib/agent-avatar";
+import { apiUrl } from "@/lib/api-url";
+import { isAuthenticatedLocalAssetPath } from "@/lib/local-auth";
 
 import { cn } from "@/lib/utils";
 
@@ -34,7 +36,7 @@ const INITIALS_TEXT_SIZES = {
   lg: "text-sm",
 };
 
-export function GeneratedAvatar({
+export const GeneratedAvatar = memo(function GeneratedAvatar({
   id,
   name,
   size = "md",
@@ -45,11 +47,53 @@ export function GeneratedAvatar({
   const seed = getAgentAvatarSeed(id, avatarUrl);
   const color = useMemo(() => getAvatarColor(seed), [seed]);
   const config = useMemo(() => getNotionAvatarConfig(seed), [seed]);
-  const imageUrl = resolveAgentAvatarImageUrl(avatarUrl);
+  const authenticatedAvatarPath =
+    typeof avatarUrl === "string" && isAuthenticatedLocalAssetPath(avatarUrl)
+      ? avatarUrl
+      : null;
+  const [authenticatedImage, setAuthenticatedImage] = useState<{
+    path: string;
+    url: string;
+  } | null>(null);
+  const imageUrl = authenticatedAvatarPath
+    ? authenticatedImage?.path === authenticatedAvatarPath
+      ? authenticatedImage.url
+      : null
+    : resolveAgentAvatarImageUrl(avatarUrl);
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
   const imageFailed = Boolean(imageUrl && failedImageUrl === imageUrl);
 
   const showInitials = initials && name;
+
+  useEffect(() => {
+    if (!authenticatedAvatarPath) return;
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    void fetch(apiUrl(authenticatedAvatarPath), {
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Avatar request failed with HTTP ${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setAuthenticatedImage({ path: authenticatedAvatarPath, url: objectUrl });
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          console.error(
+            "Could not load the local avatar:",
+            error instanceof Error ? error.message : error,
+          );
+        }
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [authenticatedAvatarPath]);
 
   return (
     <div
@@ -84,4 +128,4 @@ export function GeneratedAvatar({
       )}
     </div>
   );
-}
+});

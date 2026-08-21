@@ -18,8 +18,8 @@ const COMMAND_CANDIDATES: Record<string, string[]> = {
 export function resolveRuntimeCommand(command: "claude" | "codex"): string {
   const override =
     command === "claude"
-      ? process.env.ZANO_CLAUDE_PATH
-      : process.env.ZANO_CODEX_PATH;
+      ? process.env.TEAMMATE_CLAUDE_PATH
+      : process.env.TEAMMATE_CODEX_PATH;
   if (override) return override;
 
   for (const candidate of COMMAND_CANDIDATES[command]) {

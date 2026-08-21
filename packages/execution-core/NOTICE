@@ -1,0 +1,14 @@
+Craft Agents
+Copyright 2026 Craft Docs Ltd.
+
+This product includes software developed by Craft Docs Ltd.
+https://craft.do
+
+---
+
+Teammate execution-core contains modified implementations and tests derived
+from Craft Agents queue, mid-stream delivery, cancellation, and terminal
+completion semantics. The adaptations isolate those concepts from Craft's
+Electron, workspace, persistence, sharing, and user-interface code.
+
+Modifications Copyright 2026 Teammate contributors.

@@ -5,6 +5,9 @@
 @import 'tailwindcss-radix-colors/dist/sand.css';
 @import 'tailwindcss-radix-colors/dist/sanda.css';
 
+/* Workspace views are shared with the Tauri app and live outside apps/web. */
+@source '../../../desktop/src';
+
 @custom-variant dark (&:is(.dark *));
 
 :root {
@@ -79,6 +82,10 @@
   --animate-toast-success-even: toast-success-even 0.32s cubic-bezier(0.5, 1, 0.89, 1);
   --animate-toast-error-odd: toast-error-odd 0.28s cubic-bezier(0.5, 1, 0.89, 1);
   --animate-toast-error-even: toast-error-even 0.28s cubic-bezier(0.5, 1, 0.89, 1);
+  --animate-message-send: message-send 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-message-receive: message-receive 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  --animate-response-label: response-label 0.3s ease-out;
+  --animate-tabs-panel-enter: tabs-panel-enter 0.14s cubic-bezier(0.22, 1, 0.36, 1);
   --font-sans: var(--font-sn-pro), 'SN Pro', 'BlinkMacSystemFont', 'Segoe UI',
     'Helvetica', 'Arial', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
     'Segoe UI Symbol';
@@ -209,6 +216,115 @@
     100% {
       translate: 0 0;
     }
+  }
+  @keyframes message-send {
+    from {
+      opacity: 0;
+      translate: 0 5px;
+      scale: 0.99;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+      scale: 1;
+    }
+  }
+  @keyframes message-receive {
+    from {
+      opacity: 0;
+      translate: -5px 0;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+  @keyframes response-label {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes tabs-panel-enter {
+    from {
+      opacity: 0.82;
+      translate: 0 2px;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+}
+
+.teammate-thinking-track {
+  opacity: 0.22;
+}
+
+.teammate-thinking-pulse {
+  stroke-dasharray: 11 48;
+  will-change: stroke-dashoffset;
+  animation: teammate-thinking-pulse 1.4s linear infinite;
+}
+
+.teammate-thinking-label {
+  color: transparent;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--muted-foreground) 68%, transparent) 0%,
+    var(--foreground) 50%,
+    color-mix(in srgb, var(--muted-foreground) 68%, transparent) 100%
+  );
+  background-size: 260% 100%;
+  background-clip: text;
+  animation: teammate-thinking-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes teammate-thinking-pulse {
+  to { stroke-dashoffset: -59; }
+}
+
+@keyframes teammate-thinking-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .teammate-thinking-pulse,
+  .teammate-thinking-label {
+    animation: none;
+  }
+
+  .teammate-thinking-pulse {
+    opacity: 0.55;
+    stroke-dasharray: none;
+    will-change: auto;
+  }
+
+  .teammate-thinking-label {
+    color: var(--foreground);
+    background: none;
+  }
+
+  .animate-message-send,
+  .animate-message-receive,
+  .animate-response-label,
+  .animate-tabs-panel-enter {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .teammate-thinking-label {
+    color: CanvasText;
+    background: none;
   }
 }
 

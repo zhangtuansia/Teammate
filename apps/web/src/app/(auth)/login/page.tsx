@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useEffect, useRef, useState } from "react";
+import { createAbortableClient } from "@/lib/supabase/client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, CardHeader, CardTitle, CardDescription, CardPanel, CardFooter } from "@/components/ui/card";
@@ -9,6 +9,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  isNetworkRequestError,
+  RequestDeadlineError,
+  withRequestDeadline,
+} from "@/lib/request-deadline";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -16,24 +21,69 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
+  const mountedRef = useRef(true);
+  const submittingRef = useRef(false);
+  const submitGenerationRef = useRef(0);
+  const submitControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      submittingRef.current = false;
+      submitControllerRef.current?.abort();
+      submitControllerRef.current = null;
+    };
+  }, []);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
+    if (submittingRef.current || !email.trim() || !password) return;
+    submittingRef.current = true;
+    const generation = ++submitGenerationRef.current;
+    const isCurrent = () => mountedRef.current && submitGenerationRef.current === generation;
     setLoading(true);
     setError(null);
+    const requestController = new AbortController();
+    submitControllerRef.current?.abort();
+    submitControllerRef.current = requestController;
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-    } else {
-      router.push("/");
+    let navigating = false;
+    try {
+      const supabase = createAbortableClient(requestController.signal);
+      const request = supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      const result = await withRequestDeadline<Awaited<typeof request>>(
+        request,
+        20_000,
+        () => requestController.abort(),
+      );
+      if (!isCurrent()) return;
+      if (result.error) throw result.error;
+      navigating = true;
+      router.replace("/");
       router.refresh();
+    } catch (loginError) {
+      if (!isCurrent()) return;
+      setError(
+        loginError instanceof RequestDeadlineError
+          ? "Sign in timed out. Check your connection and try again."
+          : isNetworkRequestError(loginError)
+            ? "Could not reach Teammate. Check your connection and try again."
+          : loginError instanceof Error
+            ? loginError.message
+            : "Could not sign in. Please try again.",
+      );
+    } finally {
+      if (isCurrent() && !navigating) {
+        submittingRef.current = false;
+        setLoading(false);
+      }
+      if (submitControllerRef.current === requestController) {
+        submitControllerRef.current = null;
+      }
     }
   }
 
@@ -42,7 +92,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm mx-4">
         <Card>
           <CardHeader className="text-center">
-            <CardTitle className="text-2xl">Zano</CardTitle>
+            <CardTitle className="text-2xl">Teammate</CardTitle>
             <CardDescription>Sign in to your workspace</CardDescription>
           </CardHeader>
           <form onSubmit={handleLogin}>
@@ -53,7 +103,12 @@ export default function LoginPage() {
                   <Input
                     type="email"
                     value={email}
-                    onChange={(e) => setEmail((e.target as HTMLInputElement).value)}
+                    disabled={loading}
+                    autoComplete="email"
+                    onChange={(e) => {
+                      setEmail((e.target as HTMLInputElement).value);
+                      setError(null);
+                    }}
                     required
                     placeholder="you@example.com"
                   />
@@ -64,7 +119,12 @@ export default function LoginPage() {
                   <Input
                     type="password"
                     value={password}
-                    onChange={(e) => setPassword((e.target as HTMLInputElement).value)}
+                    disabled={loading}
+                    autoComplete="current-password"
+                    onChange={(e) => {
+                      setPassword((e.target as HTMLInputElement).value);
+                      setError(null);
+                    }}
                     required
                     placeholder="Your password"
                   />
@@ -78,7 +138,7 @@ export default function LoginPage() {
               </div>
             </CardPanel>
             <CardFooter className="flex-col gap-4">
-              <Button type="submit" loading={loading} className="w-full">
+              <Button type="submit" loading={loading} disabled={!email.trim() || !password} className="w-full">
                 Sign in
               </Button>
               <p className="text-center text-sm text-muted-foreground">

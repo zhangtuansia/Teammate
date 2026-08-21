@@ -7,6 +7,8 @@ const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const REDIRECT_URI = "http://localhost:1455/auth/callback";
 const SCOPE = "openid profile email offline_access";
 const ACCOUNT_CLAIM = "https://api.openai.com/auth";
+const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
+const TOKEN_REFRESH_WINDOW_MS = 5 * 60_000;
 
 export interface CodexOAuthCredential {
   access: string;
@@ -14,6 +16,17 @@ export interface CodexOAuthCredential {
   expires: number;
   accountId?: string;
 }
+
+export interface CodexOAuthTokenResult {
+  access: string;
+  refresh?: string;
+  expires: number;
+  accountId?: string;
+}
+
+type ReadCodexOAuthCredential = () => Promise<CodexOAuthCredential | undefined>;
+type WriteCodexOAuthCredential = (credential: CodexOAuthCredential) => Promise<void>;
+type RefreshCodexOAuthCredential = (refreshToken: string) => Promise<CodexOAuthTokenResult>;
 
 interface LoginOptions {
   originator?: string;
@@ -50,14 +63,26 @@ function authorizationInput(value: string) {
 }
 
 async function tokenRequest(parameters: URLSearchParams) {
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json",
-    },
-    body: parameters.toString(),
-  });
+  let response: Response;
+  try {
+    response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: parameters.toString(),
+      signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof Error && (
+      error.name === "AbortError" ||
+      error.name === "TimeoutError"
+    )) {
+      throw new Error("ChatGPT token request timed out. Try again.", { cause: error });
+    }
+    throw error;
+  }
   if (!response.ok) {
     throw new Error(`ChatGPT token request failed with HTTP ${response.status}`);
   }
@@ -66,7 +91,7 @@ async function tokenRequest(parameters: URLSearchParams) {
     refresh_token?: string;
     expires_in?: number;
   };
-  if (!result.access_token || !result.refresh_token || !result.expires_in) {
+  if (!result.access_token || !result.expires_in) {
     throw new Error("ChatGPT token response is incomplete");
   }
   return {
@@ -151,13 +176,15 @@ export async function loginOpenAICodex(
     ]);
     if (!result.code) throw new Error("OAuth login was canceled");
     if (result.state && result.state !== state) throw new Error("OAuth state mismatch");
-    return tokenRequest(new URLSearchParams({
+    const tokens = await tokenRequest(new URLSearchParams({
       grant_type: "authorization_code",
       client_id: CLIENT_ID,
       code: result.code,
       code_verifier: verifier,
       redirect_uri: REDIRECT_URI,
     }));
+    if (!tokens.refresh) throw new Error("ChatGPT token response is incomplete");
+    return { ...tokens, refresh: tokens.refresh };
   } finally {
     server.close();
   }
@@ -169,4 +196,60 @@ export async function refreshOpenAICodexToken(refreshToken: string) {
     client_id: CLIENT_ID,
     refresh_token: refreshToken,
   }));
+}
+
+/** Coalesces refreshes per connection and re-reads the credential after winning the lock. */
+export class CodexOAuthRefreshCoordinator {
+  private readonly pending = new Map<string, Promise<CodexOAuthCredential | undefined>>();
+
+  constructor(
+    private readonly refresh: RefreshCodexOAuthCredential = refreshOpenAICodexToken,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async resolve(
+    connectionId: string,
+    read: ReadCodexOAuthCredential,
+    write: WriteCodexOAuthCredential,
+  ) {
+    const current = await read();
+    if (!this.needsRefresh(current)) return current;
+
+    const existing = this.pending.get(connectionId);
+    if (existing) return existing;
+
+    const refresh = this.refreshAfterLock(read, write);
+    this.pending.set(connectionId, refresh);
+    try {
+      return await refresh;
+    } finally {
+      if (this.pending.get(connectionId) === refresh) {
+        this.pending.delete(connectionId);
+      }
+    }
+  }
+
+  private needsRefresh(
+    credential: CodexOAuthCredential | undefined,
+  ): credential is CodexOAuthCredential {
+    return Boolean(credential && credential.expires < this.now() + TOKEN_REFRESH_WINDOW_MS);
+  }
+
+  private async refreshAfterLock(
+    read: ReadCodexOAuthCredential,
+    write: WriteCodexOAuthCredential,
+  ) {
+    const current = await read();
+    if (!this.needsRefresh(current)) return current;
+
+    const refreshed = await this.refresh(current.refresh);
+    const credential: CodexOAuthCredential = {
+      access: refreshed.access,
+      refresh: refreshed.refresh || current.refresh,
+      expires: refreshed.expires,
+      accountId: refreshed.accountId || current.accountId,
+    };
+    await write(credential);
+    return credential;
+  }
 }

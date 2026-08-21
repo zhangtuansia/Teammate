@@ -8,6 +8,7 @@ export interface LocalUser {
 
 interface QueryError {
   message: string;
+  code?: string;
 }
 
 interface QueryResult {
@@ -45,10 +46,12 @@ class LocalQueryBuilder implements PromiseLike<QueryResult> {
   private countMode?: "exact";
   private headOnly = false;
   private singleRow = false;
+  private signal?: AbortSignal;
 
   constructor(
     private readonly baseUrl: string,
-    private readonly table: string
+    private readonly table: string,
+    private readonly accessToken: string,
   ) {}
 
   select(
@@ -139,6 +142,11 @@ class LocalQueryBuilder implements PromiseLike<QueryResult> {
     return this;
   }
 
+  abortSignal(signal: AbortSignal) {
+    this.signal = signal;
+    return this;
+  }
+
   then<TResult1 = QueryResult, TResult2 = never>(
     onfulfilled?: ((value: QueryResult) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
@@ -167,8 +175,12 @@ class LocalQueryBuilder implements PromiseLike<QueryResult> {
     try {
       const response = await fetch(`${this.baseUrl}/api/query`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.accessToken}`,
+        },
         body: JSON.stringify(request),
+        signal: this.signal,
       });
       const result = (await response.json()) as QueryResult;
       if (!response.ok && !result.error) {
@@ -185,6 +197,63 @@ class LocalQueryBuilder implements PromiseLike<QueryResult> {
         error: {
           message:
             error instanceof Error ? error.message : "Local service unavailable",
+        },
+        count: null,
+      };
+    }
+  }
+}
+
+class LocalRpcBuilder implements PromiseLike<QueryResult> {
+  private signal?: AbortSignal;
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly functionName: string,
+    private readonly args: Record<string, unknown>,
+    private readonly accessToken: string,
+  ) {}
+
+  abortSignal(signal: AbortSignal) {
+    this.signal = signal;
+    return this;
+  }
+
+  then<TResult1 = QueryResult, TResult2 = never>(
+    onfulfilled?: ((value: QueryResult) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): PromiseLike<TResult1 | TResult2> {
+    return this.execute().then(onfulfilled, onrejected);
+  }
+
+  private async execute(): Promise<QueryResult> {
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/api/rpc/${encodeURIComponent(this.functionName)}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.accessToken}`,
+          },
+          body: JSON.stringify(this.args),
+          signal: this.signal,
+        },
+      );
+      const result = (await response.json()) as QueryResult;
+      if (!response.ok && !result.error) {
+        return {
+          data: null,
+          error: { message: `Local service returned HTTP ${response.status}` },
+          count: null,
+        };
+      }
+      return result;
+    } catch (error) {
+      return {
+        data: null,
+        error: {
+          message: error instanceof Error ? error.message : "Local service unavailable",
         },
         count: null,
       };
@@ -247,16 +316,19 @@ export class LocalRealtimeChannel {
     event: string;
     payload: Record<string, unknown>;
   }) {
-    await fetch(`${this.client.baseUrl}/api/broadcast`, {
+    const response = await fetch(`${this.client.baseUrl}/api/broadcast`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...this.client.authorizationHeaders(),
+      },
       body: JSON.stringify({
         topic: this.topic,
         event: message.event,
         payload: message.payload,
       }),
     });
-    return "ok";
+    return response.ok ? "ok" : "error";
   }
 
   async track(payload: Record<string, unknown>) {
@@ -328,11 +400,11 @@ function matchesRealtimeFilter(
 
 export class LocalClient {
   readonly isLocal = true;
-  readonly realtime = { setAuth: (_token: string) => undefined };
+  readonly realtime = { setAuth: (token: string) => { this.accessToken = token; } };
   readonly auth = {
     getUser: async () => ({ data: { user: this.localUser }, error: null }),
     getSession: async () => ({
-      data: { session: { user: this.localUser, access_token: "local" } },
+      data: { session: { user: this.localUser, access_token: this.accessToken } },
       error: null,
     }),
     signInWithPassword: async (_credentials: {
@@ -350,19 +422,40 @@ export class LocalClient {
   private channels = new Set<LocalRealtimeChannel>();
   private cursor: number | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollAbortController: AbortController | null = null;
   private polling = false;
   private readonly localUser: LocalUser = {
     id: LOCAL_USER_ID,
-    email: "local@zano.dev",
+    email: "local@teammate.dev",
     user_metadata: { display_name: "Local User" },
   };
+  private accessToken: string;
 
-  constructor(readonly baseUrl: string) {
+  constructor(readonly baseUrl: string, accessToken: string) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.accessToken = accessToken;
   }
 
   from(table: string) {
-    return new LocalQueryBuilder(this.baseUrl, table);
+    return new LocalQueryBuilder(this.baseUrl, table, this.accessToken);
+  }
+
+  rpc(
+    functionName: string,
+    args: Record<string, unknown> = {},
+  ): LocalRpcBuilder | Promise<QueryResult> {
+    if (!/^[a-z][a-z0-9_]*$/.test(functionName)) {
+      return Promise.resolve({
+        data: null,
+        error: { message: "Invalid local RPC name" },
+        count: null,
+      });
+    }
+    return new LocalRpcBuilder(this.baseUrl, functionName, args, this.accessToken);
+  }
+
+  authorizationHeaders() {
+    return { Authorization: `Bearer ${this.accessToken}` };
   }
 
   channel(topic: string, _options?: unknown) {
@@ -380,6 +473,10 @@ export class LocalClient {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.channels.size === 0) {
+      this.pollAbortController?.abort();
+      this.pollAbortController = null;
+    }
     return Promise.resolve("ok");
   }
 
@@ -387,6 +484,8 @@ export class LocalClient {
     this.channels.clear();
     if (this.pollTimer) clearTimeout(this.pollTimer);
     this.pollTimer = null;
+    this.pollAbortController?.abort();
+    this.pollAbortController = null;
     return "ok";
   }
 
@@ -401,9 +500,16 @@ export class LocalClient {
   private async pollEvents() {
     if (this.polling || this.channels.size === 0) return;
     this.polling = true;
+    let retryDelay = 500;
+    const controller = new AbortController();
+    this.pollAbortController = controller;
     try {
-      const suffix = this.cursor === null ? "" : `?after=${this.cursor}`;
-      const response = await fetch(`${this.baseUrl}/api/events${suffix}`);
+      const search = new URLSearchParams({ wait: "20000" });
+      if (this.cursor !== null) search.set("after", String(this.cursor));
+      const response = await fetch(`${this.baseUrl}/api/events?${search}`, {
+        headers: this.authorizationHeaders(),
+        signal: controller.signal,
+      });
       if (response.ok) {
         const result = (await response.json()) as {
           cursor: number;
@@ -413,16 +519,21 @@ export class LocalClient {
         for (const event of result.events) {
           for (const channel of this.channels) channel.dispatch(event);
         }
+        retryDelay = 0;
       }
     } catch {
       // The service may be starting. Keep polling while channels are subscribed.
     } finally {
+      if (this.pollAbortController === controller) this.pollAbortController = null;
       this.polling = false;
-      this.schedulePoll(500);
+      this.schedulePoll(retryDelay);
     }
   }
 }
 
-export function createLocalClient(baseUrl = "http://127.0.0.1:8787") {
-  return new LocalClient(baseUrl);
+export function createLocalClient(
+  baseUrl = "http://127.0.0.1:8787",
+  accessToken = "",
+) {
+  return new LocalClient(baseUrl, accessToken);
 }

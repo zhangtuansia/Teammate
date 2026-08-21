@@ -3,10 +3,13 @@ import { createClient } from "@/lib/supabase/server";
 import {
   defaultModelForRuntime,
   isAgentRuntime,
-  isValidAgentModel,
   normalizeAgentRuntime,
+  resolveAgentRuntimeSelection,
 } from "@/lib/agent-runtime";
 import { isValidAgentAvatarUrl } from "@/lib/agent-avatar";
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // GET /api/agents/[id] — get a single agent
 export async function GET(
@@ -14,6 +17,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (!UUID_PATTERN.test(id)) {
+    return NextResponse.json({ error: "Invalid agent id" }, { status: 400 });
+  }
   const supabase = await createClient();
   const {
     data: { user },
@@ -28,9 +34,12 @@ export async function GET(
     .select("*")
     .eq("id", id)
     .eq("owner_id", user.id)
-    .single();
+    .maybeSingle();
 
-  if (error || !agent) {
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  if (!agent) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
@@ -43,6 +52,9 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (!UUID_PATTERN.test(id)) {
+    return NextResponse.json({ error: "Invalid agent id" }, { status: 400 });
+  }
   const supabase = await createClient();
   const {
     data: { user },
@@ -53,52 +65,88 @@ export async function PUT(
   }
 
   // Verify ownership
-  const { data: existing } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from("agents")
-    .select("id, runtime")
+    .select("*")
     .eq("id", id)
     .eq("owner_id", user.id)
-    .single();
+    .maybeSingle();
+
+  if (existingError) {
+    return NextResponse.json({ error: existingError.message }, { status: 500 });
+  }
 
   if (!existing) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
-  const body = await request.json();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "JSON body required" }, { status: 400 });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "JSON object required" }, { status: 400 });
+  }
+  const payload = body as Record<string, unknown>;
   const updates: Record<string, unknown> = {};
 
-  if (body.display_name !== undefined) {
-    if (!body.display_name?.trim()) {
+  if (payload.display_name !== undefined) {
+    if (typeof payload.display_name !== "string") {
       return NextResponse.json(
-        { error: "display_name cannot be empty" },
+        { error: "display_name must be a string" },
+        { status: 400 },
+      );
+    }
+    const displayName = payload.display_name.trim();
+    if (!displayName || displayName.length > 100) {
+      return NextResponse.json(
+        { error: "display_name must be between 1 and 100 characters" },
         { status: 400 }
       );
     }
-    updates.display_name = body.display_name.trim();
+    updates.display_name = displayName;
   }
-  if (body.description !== undefined) {
-    updates.description = body.description?.trim() || null;
+  if (payload.description !== undefined) {
+    if (
+      payload.description !== null &&
+      (typeof payload.description !== "string" || payload.description.length > 2000)
+    ) {
+      return NextResponse.json({ error: "Invalid description" }, { status: 400 });
+    }
+    updates.description = typeof payload.description === "string"
+      ? payload.description.trim() || null
+      : null;
   }
-  if (body.system_prompt !== undefined) {
-    updates.system_prompt = body.system_prompt?.trim() || null;
+  if (payload.system_prompt !== undefined) {
+    if (
+      payload.system_prompt !== null &&
+      (typeof payload.system_prompt !== "string" || payload.system_prompt.length > 50000)
+    ) {
+      return NextResponse.json({ error: "Invalid system_prompt" }, { status: 400 });
+    }
+    updates.system_prompt = typeof payload.system_prompt === "string"
+      ? payload.system_prompt.trim() || null
+      : null;
   }
-  if (body.avatar_data !== undefined) {
+  if (payload.avatar_data !== undefined) {
     return NextResponse.json(
       { error: "Custom avatar uploads are currently available in the local desktop app" },
       { status: 400 },
     );
   }
-  if (body.avatar_url !== undefined) {
-    if (!isValidAgentAvatarUrl(body.avatar_url)) {
+  if (payload.avatar_url !== undefined) {
+    if (!isValidAgentAvatarUrl(payload.avatar_url)) {
       return NextResponse.json({ error: "Unsupported avatar URL" }, { status: 400 });
     }
-    updates.avatar_url = body.avatar_url;
+    updates.avatar_url = payload.avatar_url;
   }
   const currentRuntime = normalizeAgentRuntime(existing.runtime);
-  const nextRuntime = body.runtime === undefined
+  const nextRuntime = payload.runtime === undefined
     ? currentRuntime
-    : normalizeAgentRuntime(body.runtime);
-  if (body.runtime !== undefined && !isAgentRuntime(body.runtime)) {
+    : normalizeAgentRuntime(payload.runtime);
+  if (payload.runtime !== undefined && !isAgentRuntime(payload.runtime)) {
     return NextResponse.json({ error: "Unsupported agent runtime" }, { status: 400 });
   }
   if (nextRuntime === "pi") {
@@ -107,7 +155,7 @@ export async function PUT(
       { status: 400 },
     );
   }
-  if (body.runtime !== undefined) {
+  if (payload.runtime !== undefined) {
     updates.runtime = nextRuntime;
     if (nextRuntime !== currentRuntime) {
       updates.session_id = null;
@@ -115,38 +163,53 @@ export async function PUT(
       updates.runtime_session_runtime = null;
     }
   }
-  if (body.model !== undefined) {
-    if (!isValidAgentModel(nextRuntime, body.model)) {
+  if (payload.model !== undefined) {
+    const resolvedSelection = resolveAgentRuntimeSelection({
+      runtime: nextRuntime,
+      model: payload.model,
+    });
+    if (resolvedSelection.issue) {
       return NextResponse.json(
         { error: "Unsupported runtime model" },
         { status: 400 }
       );
     }
-    updates.model = body.model;
+    updates.model = resolvedSelection.selection.model;
   } else if (nextRuntime !== currentRuntime) {
     updates.model = defaultModelForRuntime(nextRuntime);
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return NextResponse.json({ agent: existing });
   }
 
   const { data: agent, error } = await supabase
     .from("agents")
     .update(updates)
     .eq("id", id)
+    .eq("owner_id", user.id)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  if (!agent) {
+    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
   return NextResponse.json({ agent });
 }
 
-// DELETE /api/agents/[id] — delete agent + associated DM channel
+// DELETE /api/agents/[id] — atomically delete an owned agent and memberships
 export async function DELETE(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (!UUID_PATTERN.test(id)) {
+    return NextResponse.json({ error: "Invalid agent id" }, { status: 400 });
+  }
   const supabase = await createClient();
   const {
     data: { user },
@@ -156,57 +219,14 @@ export async function DELETE(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Verify ownership
-  const { data: existing } = await supabase
-    .from("agents")
-    .select("id")
-    .eq("id", id)
-    .eq("owner_id", user.id)
-    .single();
-
-  if (!existing) {
-    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
-  }
-
-  // Find and delete the DM channel (messages cascade via FK)
-  const { data: dmMembership } = await supabase
-    .from("channel_members")
-    .select("channel_id")
-    .eq("member_id", id)
-    .eq("member_type", "agent");
-
-  if (dmMembership) {
-    for (const m of dmMembership) {
-      const { data: ch } = await supabase
-        .from("channels")
-        .select("id, type")
-        .eq("id", m.channel_id)
-        .eq("type", "dm")
-        .single();
-
-      if (ch) {
-        // Delete messages in this DM channel
-        await supabase.from("messages").delete().eq("channel_id", ch.id);
-        // Delete channel members
-        await supabase.from("channel_members").delete().eq("channel_id", ch.id);
-        // Delete channel
-        await supabase.from("channels").delete().eq("id", ch.id);
-      }
-    }
-  }
-
-  // Remove agent from any group channels
-  await supabase
-    .from("channel_members")
-    .delete()
-    .eq("member_id", id)
-    .eq("member_type", "agent");
-
-  // Delete the agent
-  const { error } = await supabase.from("agents").delete().eq("id", id);
-
+  const { data: deleted, error } = await supabase.rpc("delete_owned_agent", {
+    agent_uuid: id,
+  });
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+  if (deleted !== true) {
+    return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
   return NextResponse.json({ success: true });

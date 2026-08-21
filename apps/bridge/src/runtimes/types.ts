@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 
 export type AgentRuntimeId = "claude-code" | "codex" | "pi";
+export type RuntimeThinkingLevel = "low" | "medium" | "high";
 export type RuntimeActivity = "idle" | "thinking" | "working" | "error";
 
 export type RuntimeEvent =
@@ -11,6 +12,7 @@ export type RuntimeEvent =
       label: string;
       detail?: string;
     }
+  | { type: "output"; text: string }
   | { type: "context-compacting" }
   | { type: "turn-complete"; sessionId?: string }
   | { type: "turn-failed"; message: string };
@@ -21,6 +23,7 @@ export interface RuntimeLaunchConfig {
   workDir: string;
   systemPrompt: string;
   model: string;
+  thinkingLevel: RuntimeThinkingLevel;
   sessionId: string | null;
   env: NodeJS.ProcessEnv;
   connection?: RuntimeConnectionConfig;
@@ -33,6 +36,7 @@ export interface RuntimeConnectionConfig {
   baseUrl: string | null;
   apiFormat: "openai-codex-responses" | "openai-completions" | "anthropic-messages";
   defaultModel: string;
+  models: RuntimeModelDefinition[];
   credential:
     | { type: "api_key"; key: string }
     | {
@@ -42,6 +46,22 @@ export interface RuntimeConnectionConfig {
         expires: number;
         accountId?: string;
       };
+}
+
+export interface RuntimeModelDefinition {
+  id: string;
+  name: string;
+  reasoning?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
+  input?: Array<"text" | "image">;
+  supportsImages?: boolean;
+  cost?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+  };
 }
 
 export interface AgentRuntimeHandle {

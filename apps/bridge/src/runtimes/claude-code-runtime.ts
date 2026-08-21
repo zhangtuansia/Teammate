@@ -11,6 +11,7 @@ interface ClaudeStreamEvent {
   type?: string;
   subtype?: string;
   session_id?: string;
+  result?: string;
   message?: {
     content?: Array<{
       type?: string;
@@ -26,43 +27,28 @@ function describeToolUse(contentBlock: {
   input?: Record<string, unknown>;
 }): { label: string; detail: string } {
   const toolName = contentBlock.name || "tool";
-  const input = contentBlock.input || {};
-  const stringValue = (key: string) =>
-    typeof input[key] === "string" ? input[key] : "";
 
   switch (toolName) {
     case "Read":
-      return { label: "Reading file", detail: stringValue("file_path") };
+      return { label: "Reading file", detail: "" };
     case "Write":
-      return { label: "Writing file", detail: stringValue("file_path") };
+      return { label: "Writing file", detail: "" };
     case "Edit":
-      return { label: "Editing file", detail: stringValue("file_path") };
-    case "Bash": {
-      const command = stringValue("command");
-      const messageTarget = command.match(
-        /(?:zano|slock)\s+message\s+send\s+--target\s+"?([^"]+)"?/,
-      );
-      if (messageTarget) {
-        return { label: "Sending message", detail: messageTarget[1] };
-      }
-      return {
-        label: "Running command",
-        detail:
-          command.length > 120 ? `${command.substring(0, 120)}…` : command,
-      };
-    }
+      return { label: "Editing file", detail: "" };
+    case "Bash":
+      return { label: "Running command", detail: "" };
     case "Grep":
-      return { label: "Searching", detail: stringValue("pattern") };
+      return { label: "Searching", detail: "" };
     case "Glob":
-      return { label: "Finding files", detail: stringValue("pattern") };
+      return { label: "Finding files", detail: "" };
     case "Agent":
-      return { label: "Running agent", detail: stringValue("description") };
+      return { label: "Running agent", detail: "" };
     case "WebSearch":
-      return { label: "Searching web", detail: stringValue("query") };
+      return { label: "Searching web", detail: "" };
     case "WebFetch":
-      return { label: "Fetching URL", detail: stringValue("url") };
+      return { label: "Fetching URL", detail: "" };
     case "Skill":
-      return { label: "Running skill", detail: stringValue("skill") };
+      return { label: "Running skill", detail: "" };
     case "TodoWrite":
       return { label: "Updating tasks", detail: "" };
     default:
@@ -75,6 +61,7 @@ class ClaudeCodeHandle implements AgentRuntimeHandle {
   private currentSessionId: string | null;
   private stdoutBuffer = "";
   private pendingText = "";
+  private finalOutput = "";
   private stopped = false;
 
   constructor(
@@ -99,6 +86,8 @@ class ClaudeCodeHandle implements AgentRuntimeHandle {
     if (!this.isRunning() || !this.proc.stdin) {
       throw new Error("Claude Code process is not running");
     }
+    this.pendingText = "";
+    this.finalOutput = "";
 
     const payload = JSON.stringify({
       type: "user",
@@ -157,15 +146,8 @@ class ClaudeCodeHandle implements AgentRuntimeHandle {
   }
 
   private flushText() {
-    const detail = this.pendingText.trim();
-    if (detail) {
-      this.onEvent({
-        type: "activity",
-        activity: "thinking",
-        label: "",
-        detail,
-      });
-    }
+    const text = this.pendingText.trim();
+    if (text) this.finalOutput = text;
     this.pendingText = "";
   }
 
@@ -190,30 +172,34 @@ class ClaudeCodeHandle implements AgentRuntimeHandle {
     }
 
     if (event.type === "assistant") {
-      const block = event.message?.content?.[0];
-      if (!block) return;
-      if (block.type === "thinking") {
-        this.flushText();
-        this.onEvent({
-          type: "activity",
-          activity: "thinking",
-          label: "Thinking",
-        });
-      } else if (block.type === "text") {
-        this.pendingText = block.text || "";
-      } else if (block.type === "tool_use") {
-        this.flushText();
-        const { label, detail } = describeToolUse(block);
-        this.onEvent({ type: "activity", activity: "working", label, detail });
+      for (const block of event.message?.content || []) {
+        if (block.type === "thinking") {
+          this.flushText();
+          this.onEvent({
+            type: "activity",
+            activity: "thinking",
+            label: "Thinking",
+          });
+        } else if (block.type === "text") {
+          this.pendingText = block.text || "";
+        } else if (block.type === "tool_use") {
+          this.flushText();
+          const { label, detail } = describeToolUse(block);
+          this.onEvent({ type: "activity", activity: "working", label, detail });
+        }
       }
       return;
     }
 
     if (event.type === "result") {
       this.flushText();
+      if (event.result?.trim()) this.finalOutput = event.result.trim();
       if (event.session_id) {
         this.currentSessionId = event.session_id;
         this.onEvent({ type: "session", sessionId: event.session_id });
+      }
+      if (this.finalOutput) {
+        this.onEvent({ type: "output", text: this.finalOutput });
       }
       this.onEvent({
         type: "turn-complete",
