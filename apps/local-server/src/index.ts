@@ -1505,6 +1505,24 @@ async function dispatchLocalRequest(
       );
     }
 
+    // Metadata only, so a file chip can render its name, type, and size
+    // without pulling the bytes down just to draw itself.
+    const attachmentMetaRoute = url.pathname.match(
+      /^\/api\/attachments\/([a-f0-9-]{36}\.[a-z0-9]{1,5})\/meta$/i,
+    );
+    if (request.method === "GET" && attachmentMetaRoute) {
+      requireHumanPrincipal(authenticateLocalRequest(request));
+      const stored = db
+        .prepare(
+          "SELECT display_name, mime_type, byte_size FROM attachments WHERE file_name = ?",
+        )
+        .get(attachmentMetaRoute[1]) as
+          | { display_name: string; mime_type: string; byte_size: number }
+          | undefined;
+      if (!stored) return sendJson(response, 404, { error: "Attachment not found" });
+      return sendJson(response, 200, { attachment: stored });
+    }
+
     const attachmentRoute = url.pathname.match(
       /^\/api\/attachments\/([a-f0-9-]{36}\.[a-z0-9]{1,5})$/i,
     );

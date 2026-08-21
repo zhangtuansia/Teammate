@@ -216,20 +216,9 @@ const MessageRow = memo(function MessageRow({
           ) : message.sender_type === 'agent' ? (
             <SafeMarkdown>{message.content}</SafeMarkdown>
           ) : (
-            <span className="whitespace-pre-wrap">
-              {message.content.split(/(@[^\s,.:!?，。！？]+)/g).map((part, index) =>
-                part.startsWith('@') ? (
-                  <span
-                    key={index}
-                    className="rounded bg-primary/10 px-0.5 font-medium text-primary"
-                  >
-                    {part}
-                  </span>
-                ) : (
-                  part
-                ),
-              )}
-            </span>
+            // People write Markdown too now — the composer produces it for
+            // formatting and for every attachment reference.
+            <SafeMarkdown mentions>{message.content}</SafeMarkdown>
           )}
         </div>
         {message.delivery && (
