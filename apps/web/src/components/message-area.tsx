@@ -240,7 +240,7 @@ const ThreadIndicator = memo(function ThreadIndicator({
 }) {
   return (
     <button
-      className="group/thread -ml-1 mt-0.5 mb-1 flex max-w-full items-center gap-1 rounded-md p-1 text-left transition-colors hover:bg-background hover:shadow-[0_0_0_1px_var(--border)]"
+      className="group/thread -ml-1 -mt-1 mb-1 flex max-w-full items-center gap-1 rounded-md p-1 text-left hover:bg-accent"
       onClick={onOpen}
       type="button"
     >
@@ -324,24 +324,24 @@ const ReactionBar = memo(function ReactionBar({
       {reactions.map((reaction) => (
         <button
           aria-pressed={reaction.mine}
-          className={`flex h-[22px] items-center gap-1 rounded-full border px-2 text-xs transition-colors ${
+          className={`flex h-6 items-center gap-1 rounded-full border px-2 text-xs font-bold tabular-nums ${
             reaction.mine
               ? 'border-primary bg-primary/10 text-primary'
-              : 'border-border bg-accent/50 text-foreground hover:border-muted-foreground/40'
+              : 'border-border bg-accent/50 text-muted-foreground hover:border-muted-foreground/40'
           }`}
           key={reaction.emoji}
           onClick={() => onToggle(reaction.emoji)}
           title={reaction.actorNames.join(', ')}
           type="button"
         >
-          <span className="text-[13px] leading-none">{reaction.emoji}</span>
-          <span className="tabular-nums">{reaction.count}</span>
+          <span className="text-[15px] leading-none">{reaction.emoji}</span>
+          <span>{reaction.count}</span>
         </button>
       ))}
       <div className="group/add relative">
         <button
           aria-label={addLabel}
-          className="flex h-[22px] items-center rounded-full border border-dashed border-border px-2 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+          className="flex h-6 items-center rounded-full border border-dashed border-border px-2 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
           title={addLabel}
           type="button"
         >
@@ -428,7 +428,7 @@ const MessageRow = memo(function MessageRow({
       // The containment hint lives on the content column, not here: it implies
       // paint containment, which would clip the hover toolbar straddling the
       // row's top edge.
-      className={`group relative flex gap-2 rounded-lg px-2 py-0.5 transition-colors hover:bg-accent/40 ${
+      className={`group relative flex gap-2 rounded-lg px-2 py-0.5 hover:bg-accent/40 ${
         message.motion === 'send'
           ? 'animate-message-send'
           : message.motion === 'receive'
@@ -672,6 +672,8 @@ function MessageAreaContent({
     reactionsRef.current = reactions;
   }, [reactions]);
 
+
+
   const handleThreadRepliesChanged = useCallback(
     (parentId: string, replies: Array<{ created_at: string; sender_id: string }>) => {
       setThreads((current) => {
@@ -774,6 +776,81 @@ function MessageAreaContent({
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const messageRealtimeRef = useRef({ generation: 0, ready: false });
   const supabase = createClient();
+
+  // Threads and reactions hang off the transcript rather than living in it, so
+  // they load on their own schedule. They used to ride along inside the message
+  // request and were dropped whenever that generation was invalidated, which is
+  // why an indicator would appear on one load and not the next. Keying on the
+  // oldest loaded message re-runs this for the initial load and for "load
+  // older"; anything arriving at the tail comes in over realtime.
+  const oldestMessageId = messages[0]?.id;
+  const channelId = channel?.id;
+  useEffect(() => {
+    if (!channelId || !oldestMessageId) return;
+    const controller = new AbortController();
+    let active = true;
+
+    void (async () => {
+      // The local adapter has no `not` operator, so read the channel's rows and
+      // keep the threaded ones.
+      const threadRows = await supabase
+        .from('messages')
+        .select('id, thread_parent_id, sender_id, created_at')
+        .eq('channel_id', channelId)
+        .order('seq', { ascending: true })
+        .limit(500)
+        .abortSignal(controller.signal);
+      if (!active || threadRows.error || !threadRows.data) return;
+      const rows = threadRows.data as Array<{
+        id: string;
+        thread_parent_id: string | null;
+        sender_id: string;
+        created_at: string;
+      }>;
+
+      const summaries = new Map<string, ThreadSummary>();
+      for (const row of rows) {
+        if (!row.thread_parent_id) continue;
+        const existing = summaries.get(row.thread_parent_id);
+        if (!existing) {
+          summaries.set(row.thread_parent_id, {
+            lastReplyAt: row.created_at,
+            replyCount: 1,
+            senderIds: [row.sender_id],
+          });
+          continue;
+        }
+        existing.replyCount += 1;
+        existing.lastReplyAt = row.created_at;
+        if (!existing.senderIds.includes(row.sender_id)) {
+          existing.senderIds.push(row.sender_id);
+        }
+      }
+      setThreads(summaries);
+
+      const ids = rows.map((row) => row.id);
+      if (ids.length === 0) return;
+      const reactionRows = await supabase
+        .from('message_reactions')
+        .select('message_id, actor_id, actor_type, emoji')
+        .in('message_id', ids)
+        .abortSignal(controller.signal);
+      if (!active || reactionRows.error || !reactionRows.data) return;
+      const byMessage = new Map<string, ReactionRow[]>();
+      for (const row of reactionRows.data as Array<ReactionRow & { message_id: string }>) {
+        const entry = { actor_id: row.actor_id, actor_type: row.actor_type, emoji: row.emoji };
+        const list = byMessage.get(row.message_id);
+        if (list) list.push(entry);
+        else byMessage.set(row.message_id, [entry]);
+      }
+      setReactions(byMessage);
+    })();
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [channelId, oldestMessageId, supabase]);
 
   const toggleReaction = useCallback(
     (messageId: string, emoji: string) => {
@@ -1341,62 +1418,6 @@ function MessageAreaContent({
       void agentDirectoryRefresh.runNow();
     };
 
-    async function loadReactions(targetMessageIds: string[], controller: AbortController) {
-      if (targetMessageIds.length === 0) return;
-      const { data, error } = await supabase
-        .from('message_reactions')
-        .select('message_id, actor_id, actor_type, emoji')
-        .in('message_id', targetMessageIds)
-        .abortSignal(controller.signal);
-      if (error || !data || !isCurrent()) return;
-      const next = new Map<string, ReactionRow[]>();
-      for (const row of data as Array<ReactionRow & { message_id: string }>) {
-        const list = next.get(row.message_id);
-        const entry = { actor_id: row.actor_id, actor_type: row.actor_type, emoji: row.emoji };
-        if (list) list.push(entry);
-        else next.set(row.message_id, [entry]);
-      }
-      setReactions(next);
-    }
-
-    async function loadThreadSummaries(
-      targetChannelId: string,
-      controller: AbortController,
-    ) {
-      // The local adapter has no `not` operator, so read the channel's rows
-      // and keep the threaded ones.
-      const { data, error } = await supabase
-        .from('messages')
-        .select('thread_parent_id, sender_id, created_at')
-        .eq('channel_id', targetChannelId)
-        .order('seq', { ascending: true })
-        .limit(500)
-        .abortSignal(controller.signal);
-      if (error || !data || !isCurrent()) return;
-      const summaries = new Map<string, ThreadSummary>();
-      for (const row of (data as Array<{
-        thread_parent_id: string | null;
-        sender_id: string;
-        created_at: string;
-      }>).filter((candidate) => candidate.thread_parent_id)) {
-        const existing = summaries.get(row.thread_parent_id!);
-        if (!existing) {
-          summaries.set(row.thread_parent_id!, {
-            lastReplyAt: row.created_at,
-            replyCount: 1,
-            senderIds: [row.sender_id],
-          });
-          continue;
-        }
-        existing.replyCount += 1;
-        existing.lastReplyAt = row.created_at;
-        if (!existing.senderIds.includes(row.sender_id)) {
-          existing.senderIds.push(row.sender_id);
-        }
-      }
-      setThreads(summaries);
-    }
-
     async function loadMessages() {
       const controller = beginMessageRequest();
       try {
@@ -1438,8 +1459,6 @@ function MessageAreaContent({
             });
           });
           setHasMore(data.length === 50);
-          void loadThreadSummaries(channelId, controller);
-          void loadReactions(data.map((message: Message) => message.id), controller);
           requestAnimationFrame(() => {
             if (!isCurrent()) return;
             const scrollElement = scrollContainerRef.current;

@@ -106,7 +106,8 @@ export const GeneratedAvatar = memo(function GeneratedAvatar({
     <div
       className={cn(
         "relative inline-flex shrink-0 select-none items-center justify-center overflow-hidden",
-        shape === "rounded" ? "rounded-[10px]" : "rounded-full",
+        // Slack sizes the corner at 22.2% of the avatar, i.e. 8px at 36px.
+        shape === "rounded" ? "rounded-[22.2%]" : "rounded-full",
         showInitials ? "" : "border-[0.5px] border-border bg-background",
         SIZE_CLASSES[size],
         className,
