@@ -147,6 +147,18 @@ interface MessageTargets {
 }
 
 /** Today and yesterday read better as words; anything older needs the date. */
+/**
+ * The calendar day a message belongs to, or null when its timestamp is
+ * unusable. Callers key the divider off this, so a row that cannot be dated
+ * simply carries no divider instead of rendering "Invalid Date" and splitting
+ * the transcript at every neighbour.
+ */
+function dayKey(iso: string | null | undefined) {
+  if (!iso) return null;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date.toDateString();
+}
+
 function formatDayLabel(iso: string, t: (key: TranslationKey) => string) {
   const date = new Date(iso);
   const today = new Date();
@@ -180,7 +192,7 @@ const DayDivider = memo(function DayDivider({
     // -top-4 cancels the scroller's own top padding: sticky offsets resolve
     // against the padding edge, so top-0 would pin the band 16px down and leave
     // a sliver of half-scrolled text above it.
-    <div className="sticky -top-4 z-20 -mx-5 mt-4 flex justify-center bg-card px-5 pt-5 pb-1.5 first:mt-0">
+    <div className="sticky -top-4 z-20 mt-4 flex justify-center bg-card px-5 pt-5 pb-1.5 first:mt-0">
       <time
         className="h-7 rounded-full bg-card px-4 text-[13px] font-bold leading-7 text-foreground shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]"
         dateTime={date}
@@ -428,13 +440,13 @@ const MessageRow = memo(function MessageRow({
       // The containment hint lives on the content column, not here: it implies
       // paint containment, which would clip the hover toolbar straddling the
       // row's top edge.
-      className={`group relative flex gap-2 rounded-lg px-2 py-0.5 hover:bg-accent/40 ${
+      className={`group relative flex gap-2 px-5 py-2 hover:bg-accent/40 ${
         message.motion === 'send'
           ? 'animate-message-send'
           : message.motion === 'receive'
             ? 'animate-message-receive'
             : ''
-      } ${sameSender ? '' : 'mt-4 first:mt-0'}`}
+      }`}
     >
       <div className="w-9 shrink-0 pt-0.5">
         {sameSender ? (
@@ -459,7 +471,7 @@ const MessageRow = memo(function MessageRow({
         // Slack's hover affordance, and the only way to open a thread on a
         // message that has no replies yet. It straddles the row's top edge so
         // it never covers the first line of text.
-        <div className="absolute -top-3.5 right-3 z-10 hidden group-focus-within:flex group-hover:flex">
+        <div className="absolute -top-3.5 right-6 z-10 hidden group-focus-within:flex group-hover:flex">
           <div className="flex gap-0.5 rounded-xl bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
             {onToggleReaction && (
               <div className="group/pick relative">
@@ -503,7 +515,7 @@ const MessageRow = memo(function MessageRow({
       <div className="min-w-0 flex-1 [contain-intrinsic-size:auto_56px] [content-visibility:auto]">
         {!sameSender && (
           <div className="mb-0.5 flex items-baseline gap-2">
-            <span className="text-[15px] font-bold leading-[22px]">{senderName}</span>
+            <span className="text-[15px] font-black leading-[22px]">{senderName}</span>
             {message.sender_type === 'agent' && (
               <Badge variant="secondary" className="py-0 text-[10px]">
                 {agentBadgeLabel}
@@ -776,6 +788,18 @@ function MessageAreaContent({
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const messageRealtimeRef = useRef({ generation: 0, ready: false });
   const supabase = createClient();
+
+  // Several paths merge into this list — the initial load, the catch-up poll,
+  // realtime, and "load older". Sorting once here means none of them can leave
+  // the transcript jumping back and forth in time, which reads as a wall of
+  // repeated day dividers. Messages still in flight have no seq and belong at
+  // the end, where they were optimistically placed.
+  const orderedMessages = useMemo(() => {
+    const withSeq = messages.filter((message) => typeof message.seq === 'number');
+    const pending = messages.filter((message) => typeof message.seq !== 'number');
+    withSeq.sort((left, right) => (left.seq as number) - (right.seq as number));
+    return [...withSeq, ...pending];
+  }, [messages]);
 
   // Threads and reactions hang off the transcript rather than living in it, so
   // they load on their own schedule. They used to ride along inside the message
@@ -2451,7 +2475,7 @@ function MessageAreaContent({
       <div className="relative min-h-0 flex-1">
       <div
         aria-busy={messages.some((message) => message.delivery === 'pending')}
-        className="h-full space-y-1 overflow-y-auto px-5 py-4"
+        className="h-full overflow-y-auto py-4"
         onScroll={handleScroll}
         ref={scrollContainerRef}
       >
@@ -2482,17 +2506,19 @@ function MessageAreaContent({
             <span className="text-xs text-muted-foreground">{t('message.beginning')}</span>
           </div>
         )}
-        {messages.map((msg, i) => {
+        {orderedMessages.map((msg, i) => {
           const prevMsg = messages[i - 1];
-          const startsNewDay =
-            !prevMsg ||
-            new Date(msg.created_at).toDateString() !==
-              new Date(prevMsg.created_at).toDateString();
+          const messageDay = dayKey(msg.created_at);
+          const startsNewDay = messageDay !== null && messageDay !== dayKey(prevMsg?.created_at);
+          const elapsed =
+            new Date(msg.created_at).getTime() - new Date(prevMsg?.created_at ?? 0).getTime();
           const sameSender =
             prevMsg &&
             !startsNewDay &&
             prevMsg.sender_id === msg.sender_id &&
-            new Date(msg.created_at).getTime() - new Date(prevMsg.created_at).getTime() < 5 * 60 * 1000;
+            // An unusable timestamp gives NaN, which fails this test and simply
+            // leaves the row un-grouped rather than grouping it arbitrarily.
+            elapsed < 5 * 60 * 1000;
           const thread = threads.get(msg.id);
           const row = (
             <MessageRow

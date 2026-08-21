@@ -81,7 +81,7 @@ function ThreadRow({
       <div className="min-w-0 flex-1">
         {!sameSender && (
           <div className="flex items-baseline gap-2">
-            <span className="text-[15px] font-bold leading-[22px]">{who.name}</span>
+            <span className="text-[15px] font-black leading-[22px]">{who.name}</span>
             <span className="text-xs text-muted-foreground">{time}</span>
           </div>
         )}
