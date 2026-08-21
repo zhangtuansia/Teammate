@@ -5,6 +5,7 @@ import { XIcon } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAppSettings } from '@/hooks/use-app-settings';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { SafeMarkdown } from '@/components/ui/safe-markdown';
 import TiptapMessageInput, {
   type TiptapMessageInputHandle,
@@ -19,6 +20,7 @@ export interface ThreadMessage {
   sender_type: 'human' | 'agent' | 'system';
   created_at: string;
   thread_parent_id: string | null;
+  thread_broadcast?: boolean | number | null;
   profiles?: { display_name: string } | null;
   pending?: boolean;
 }
@@ -87,7 +89,7 @@ function ThreadRow({
           className="prose-message wrap-break-word text-[15px] subpixel-antialiased"
           style={{ lineHeight: '22px' }}
         >
-          <SafeMarkdown mentions={message.sender_type === 'human'}>
+          <SafeMarkdown mentions>
             {message.content}
           </SafeMarkdown>
         </div>
@@ -115,6 +117,7 @@ export function ThreadPanel({
   const [replies, setReplies] = useState<ThreadMessage[]>([]);
   const [loadError, setLoadError] = useState('');
   const [sendError, setSendError] = useState('');
+  const [alsoSend, setAlsoSend] = useState(false);
   const composerRef = useRef<TiptapMessageInputHandle>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const repliesRef = useRef<ThreadMessage[]>([]);
@@ -194,6 +197,7 @@ export function ThreadPanel({
     (markdown: string) => {
       const content = markdown.trim();
       if (!content || !userId) return false;
+      const broadcast = alsoSend;
       const optimistic: ThreadMessage = {
         id: globalThis.crypto.randomUUID(),
         channel_id: channelId,
@@ -202,6 +206,7 @@ export function ThreadPanel({
         pending: true,
         sender_id: userId,
         sender_type: 'human',
+        thread_broadcast: broadcast,
         thread_parent_id: parent.id,
       };
       setSendError('');
@@ -215,6 +220,7 @@ export function ThreadPanel({
             id: optimistic.id,
             sender_id: userId,
             sender_type: 'human',
+            thread_broadcast: broadcast,
             thread_parent_id: parent.id,
           })
           .select()
@@ -232,11 +238,13 @@ export function ThreadPanel({
       })();
       return true;
     },
-    [applyReplies, channelId, parent.id, supabase, t, userId],
+    [alsoSend, applyReplies, channelId, parent.id, supabase, t, userId],
   );
 
   return (
-    <aside className="flex w-[400px] shrink-0 flex-col border-l-[0.5px] bg-card">
+    // flex-1 rather than w-full below lg: two width utilities on one element
+    // race in the cascade, and flex-basis does not fight the fixed width above.
+    <aside className="flex flex-1 flex-col border-l-[0.5px] bg-card lg:w-[400px] lg:flex-none">
       <div className="flex items-center gap-2 border-b-[0.5px] px-3 py-2">
         <h2 className="text-[14px] font-semibold">{t('message.thread.title')}</h2>
         <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
@@ -296,6 +304,10 @@ export function ThreadPanel({
             ref={composerRef}
           />
         </div>
+        <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox checked={alsoSend} onCheckedChange={(next) => setAlsoSend(next === true)} />
+          {t('message.thread.alsoSend', { channel: channelLabel })}
+        </label>
         {sendError && (
           <p className="mt-1.5 text-xs text-destructive" role="alert">
             {sendError}

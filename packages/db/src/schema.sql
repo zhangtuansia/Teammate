@@ -133,6 +133,9 @@ create table public.messages (
   content text not null,
   seq bigint,
   thread_parent_id uuid references public.messages(id) on delete cascade,
+  -- A thread reply the author also wanted the channel to see. Slack renders it
+  -- in the main flow with the thread root quoted above it.
+  thread_broadcast boolean default false not null,
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
 );
@@ -191,6 +194,22 @@ for each row execute function public.validate_message_scope();
 create index idx_messages_channel on public.messages(channel_id, created_at desc);
 create unique index idx_messages_channel_seq on public.messages(channel_id, seq);
 create index idx_messages_thread on public.messages(thread_parent_id, created_at asc);
+
+-- -----------------------------------------------------------
+-- Reactions
+-- -----------------------------------------------------------
+-- A reaction is an edge, not a record: it is added and removed, never edited,
+-- so the natural key is the whole row.
+create table public.message_reactions (
+  message_id uuid references public.messages(id) on delete cascade not null,
+  actor_id uuid not null,
+  actor_type text not null check (actor_type in ('human', 'agent')),
+  emoji text not null check (char_length(emoji) between 1 and 16),
+  created_at timestamptz default now() not null,
+  primary key (message_id, actor_id, emoji)
+);
+
+create index idx_message_reactions_message on public.message_reactions(message_id);
 
 -- -----------------------------------------------------------
 -- Durable agent message inbox
@@ -895,6 +914,7 @@ alter table public.agents enable row level security;
 alter table public.channels enable row level security;
 alter table public.channel_members enable row level security;
 alter table public.messages enable row level security;
+alter table public.message_reactions enable row level security;
 alter table public.message_deliveries enable row level security;
 alter table public.tasks enable row level security;
 alter table public.documents enable row level security;
@@ -3041,6 +3061,47 @@ create policy "Channel members can send messages" on public.messages for insert 
   or (
     sender_type = 'agent'
     and public.user_owns_agent_in_channel(sender_id, channel_id)
+  )
+);
+
+-- Reactions inherit the message's channel: you can see and add one wherever
+-- you could have replied, and you can only take back your own.
+create policy "Channel members can view reactions" on public.message_reactions for select using (
+  exists (
+    select 1 from public.messages message
+    where message.id = message_id
+      and (
+        public.user_is_channel_member(message.channel_id)
+        or public.user_has_agent_in_channel(message.channel_id)
+      )
+  )
+);
+create policy "Channel members can add reactions" on public.message_reactions for insert with check (
+  exists (
+    select 1 from public.messages message
+    where message.id = message_id
+      and (
+        (
+          auth.uid() = actor_id
+          and actor_type = 'human'
+          and public.user_is_channel_member(message.channel_id)
+        )
+        or (
+          actor_type = 'agent'
+          and public.user_owns_agent_in_channel(actor_id, message.channel_id)
+        )
+      )
+  )
+);
+create policy "Actors can remove their own reactions" on public.message_reactions for delete using (
+  (actor_type = 'human' and auth.uid() = actor_id)
+  or (
+    actor_type = 'agent'
+    and exists (
+      select 1 from public.messages message
+      where message.id = message_id
+        and public.user_owns_agent_in_channel(actor_id, message.channel_id)
+    )
   )
 );
 

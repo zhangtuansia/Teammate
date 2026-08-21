@@ -118,6 +118,7 @@ interface DbMessage {
   content: string;
   seq: number;
   thread_parent_id: string | null;
+  thread_broadcast?: boolean | number | null;
   created_at: string;
 }
 
@@ -500,7 +501,7 @@ export class Bridge {
     }
     if (this.parseMentionedAgents(msg.content, channelAgents).size > 0) return null;
 
-    if (msg.thread_parent_id) {
+    if (this.threadScoped(msg)) {
       const [parentResult, replyResult] = await Promise.all([
         this.supabase
           .from("messages")
@@ -588,12 +589,21 @@ export class Bridge {
   }
 
   /**
+   * A reply the author also sent to the channel is addressed to the room, so
+   * every rule below treats it as if it had been posted at the top level.
+   */
+  private threadScoped(msg: DbMessage) {
+    if (!msg.thread_parent_id) return false;
+    return !(msg.thread_broadcast === true || msg.thread_broadcast === 1);
+  }
+
+  /**
    * True when a thread already belongs to some teammate — its root is theirs,
    * or one of them has spoken in it. Those threads are private conversations
    * and stay that way. A thread nobody has joined is still just a room.
    */
   private async threadHasTeammate(msg: DbMessage) {
-    if (!msg.thread_parent_id) return false;
+    if (!this.threadScoped(msg)) return false;
     const [parentResult, replyResult] = await Promise.all([
       this.supabase
         .from("messages")
@@ -1136,7 +1146,9 @@ export class Bridge {
         .maybeSingle(),
       this.supabase
         .from("messages")
-        .select("id, channel_id, sender_id, sender_type, content, seq, thread_parent_id, created_at")
+        .select(
+          "id, channel_id, sender_id, sender_type, content, seq, thread_parent_id, thread_broadcast, created_at",
+        )
         .eq("id", delivery.message_id)
         .maybeSingle(),
     ]);
@@ -1220,7 +1232,7 @@ export class Bridge {
           if (mine) {
             ambientReason = mine;
           } else if (
-            msg.thread_parent_id
+            this.threadScoped(msg)
               ? await this.threadHasTeammate(msg)
               : await this.exchangeIsUnderway(msg)
           ) {

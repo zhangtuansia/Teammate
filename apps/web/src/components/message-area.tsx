@@ -5,10 +5,12 @@ import { createClient } from '@/lib/supabase/client';
 import {
   AlertCircleIcon,
   ArrowDownIcon,
+  ArrowUpRightIcon,
   AtSignIcon,
   CheckIcon,
   LoaderCircleIcon,
   MessageSquareIcon,
+  SmilePlusIcon,
   PlusIcon,
   RotateCcwIcon,
   SettingsIcon,
@@ -65,10 +67,24 @@ interface Message {
   seq: number | null;
   created_at: string;
   thread_parent_id: string | null;
+  thread_broadcast?: boolean | number | null;
   profiles?: { display_name: string } | null;
   motion?: 'send' | 'receive';
   delivery?: 'pending' | 'sent' | 'failed';
   deliveryError?: string;
+}
+
+/** The first line of the thread root, for the "also sent to channel" line. */
+function threadRootExcerpt(messages: Array<{ id: string; content: string }>, parentId: string) {
+  const parent = messages.find((message) => message.id === parentId);
+  if (!parent) return '';
+  const firstLine = parent.content.split('\n').find((line) => line.trim().length > 0) ?? '';
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
+}
+
+/** SQLite stores the flag as 0/1; Postgres as a boolean. */
+function isBroadcast(message: { thread_broadcast?: boolean | number | null }) {
+  return message.thread_broadcast === true || message.thread_broadcast === 1;
 }
 
 interface HumanProfile {
@@ -147,10 +163,11 @@ function formatDayLabel(iso: string, t: (key: TranslationKey) => string) {
 }
 
 /**
- * The day marker, built the way Slack builds it: no rule across the transcript,
- * just a pill that pins to the top while that day is on screen. It deliberately
- * overflows its own row so it costs almost no vertical space — which only reads
- * correctly because the pill is opaque and ringed, and text passes behind it.
+ * The day marker: no rule across the transcript, just a pill that pins to the
+ * top while that day is on screen. Slack lets the pill float over the text
+ * scrolling beneath it; here the whole row carries the pane's background and
+ * spans the scroller's padding, so content passes cleanly behind the band
+ * instead of bleeding out around the pill.
  */
 const DayDivider = memo(function DayDivider({
   date,
@@ -160,7 +177,10 @@ const DayDivider = memo(function DayDivider({
   label: string;
 }) {
   return (
-    <div className="sticky top-0 z-20 mt-4 mb-6 flex h-[9px] justify-center first:mt-1">
+    // -top-4 cancels the scroller's own top padding: sticky offsets resolve
+    // against the padding edge, so top-0 would pin the band 16px down and leave
+    // a sliver of half-scrolled text above it.
+    <div className="sticky -top-4 z-20 -mx-5 mt-4 flex justify-center bg-card px-5 pt-5 pb-1.5 first:mt-0">
       <time
         className="h-7 rounded-full bg-card px-4 text-[13px] font-bold leading-7 text-foreground shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]"
         dateTime={date}
@@ -184,6 +204,12 @@ function formatRelativeTime(iso: string, language: string) {
     if (elapsed >= ms) return formatter.format(-Math.floor(elapsed / ms), unit);
   }
   return formatter.format(-Math.max(1, Math.floor(elapsed / 1000)), 'second');
+}
+
+interface ReactionRow {
+  actor_id: string;
+  actor_type: 'human' | 'agent';
+  emoji: string;
 }
 
 export interface ThreadSummary {
@@ -246,6 +272,98 @@ const ThreadIndicator = memo(function ThreadIndicator({
   );
 });
 
+function summarizeReactions(
+  rows: ReactionRow[] | undefined,
+  viewerId: string | null,
+  identityFor: (actorId: string) => { name: string },
+): ReactionSummary[] | undefined {
+  if (!rows || rows.length === 0) return undefined;
+  const byEmoji = new Map<string, ReactionSummary>();
+  for (const row of rows) {
+    const existing = byEmoji.get(row.emoji);
+    const name = identityFor(row.actor_id).name;
+    if (!existing) {
+      byEmoji.set(row.emoji, {
+        actorNames: [name],
+        count: 1,
+        emoji: row.emoji,
+        mine: row.actor_id === viewerId,
+      });
+      continue;
+    }
+    existing.count += 1;
+    existing.actorNames.push(name);
+    if (row.actor_id === viewerId) existing.mine = true;
+  }
+  return [...byEmoji.values()];
+}
+
+/** Slack's default set, which is what the picker offers before you go looking. */
+const QUICK_REACTIONS = ['👀', '✅', '🎉', '👍', '🙏', '😄'] as const;
+
+export interface ReactionSummary {
+  emoji: string;
+  count: number;
+  mine: boolean;
+  actorNames: string[];
+}
+
+const ReactionBar = memo(function ReactionBar({
+  addLabel,
+  onPick,
+  onToggle,
+  reactions,
+}: {
+  addLabel: string;
+  onPick: (emoji: string) => void;
+  onToggle: (emoji: string) => void;
+  reactions: ReactionSummary[];
+}) {
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {reactions.map((reaction) => (
+        <button
+          aria-pressed={reaction.mine}
+          className={`flex h-[22px] items-center gap-1 rounded-full border px-2 text-xs transition-colors ${
+            reaction.mine
+              ? 'border-primary bg-primary/10 text-primary'
+              : 'border-border bg-accent/50 text-foreground hover:border-muted-foreground/40'
+          }`}
+          key={reaction.emoji}
+          onClick={() => onToggle(reaction.emoji)}
+          title={reaction.actorNames.join(', ')}
+          type="button"
+        >
+          <span className="text-[13px] leading-none">{reaction.emoji}</span>
+          <span className="tabular-nums">{reaction.count}</span>
+        </button>
+      ))}
+      <div className="group/add relative">
+        <button
+          aria-label={addLabel}
+          className="flex h-[22px] items-center rounded-full border border-dashed border-border px-2 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+          title={addLabel}
+          type="button"
+        >
+          <SmilePlusIcon className="size-3.5" />
+        </button>
+        <div className="absolute bottom-full left-0 z-20 mb-1 hidden gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] group-focus-within/add:flex group-hover/add:flex">
+          {QUICK_REACTIONS.map((emoji) => (
+            <button
+              className="rounded px-1.5 py-0.5 text-base transition-colors hover:bg-accent"
+              key={emoji}
+              onClick={() => onPick(emoji)}
+              type="button"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+});
+
 interface MessageRowProps {
   message: Message;
   sameSender: boolean;
@@ -255,6 +373,10 @@ interface MessageRowProps {
   threadLastReplyLabel?: string;
   threadViewLabel?: string;
   replyInThreadLabel?: string;
+  reactions?: ReactionSummary[];
+  broadcastPreamble?: string;
+  addReactionLabel?: string;
+  onToggleReaction?: (emoji: string) => void;
   threadAvatarFor?: (senderId: string) => { name: string; url: string | null };
   onOpenThread?: () => void;
   avatarUrl: string | null | undefined;
@@ -286,6 +408,10 @@ const MessageRow = memo(function MessageRow({
   threadLastReplyLabel,
   threadViewLabel,
   replyInThreadLabel,
+  reactions,
+  broadcastPreamble,
+  addReactionLabel,
+  onToggleReaction,
   threadAvatarFor,
   onOpenThread,
 }: MessageRowProps) {
@@ -335,6 +461,31 @@ const MessageRow = memo(function MessageRow({
         // it never covers the first line of text.
         <div className="absolute -top-3.5 right-3 z-10 hidden group-focus-within:flex group-hover:flex">
           <div className="flex gap-0.5 rounded-xl bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
+            {onToggleReaction && (
+              <div className="group/pick relative">
+                <Button
+                  aria-label={addReactionLabel}
+                  className="size-8 text-muted-foreground"
+                  size="icon-sm"
+                  title={addReactionLabel}
+                  variant="ghost"
+                >
+                  <SmilePlusIcon className="size-4" />
+                </Button>
+                <div className="absolute right-0 top-full z-20 hidden gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] group-focus-within/pick:flex group-hover/pick:flex">
+                  {QUICK_REACTIONS.map((emoji) => (
+                    <button
+                      className="rounded px-1.5 py-0.5 text-base transition-colors hover:bg-accent"
+                      key={emoji}
+                      onClick={() => onToggleReaction(emoji)}
+                      type="button"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <Button
               aria-label={replyInThreadLabel}
               className="size-8 text-muted-foreground"
@@ -366,6 +517,18 @@ const MessageRow = memo(function MessageRow({
             </time>
           </div>
         )}
+        {broadcastPreamble && onOpenThread && (
+          // Slack's "also sent to the channel" line: the reply shows here, but
+          // it says where it actually lives.
+          <button
+            className="mb-0.5 flex max-w-full items-center gap-1 text-left text-[13px] text-muted-foreground hover:underline"
+            onClick={onOpenThread}
+            type="button"
+          >
+            <ArrowUpRightIcon className="size-3.5 shrink-0" />
+            <span className="truncate">{broadcastPreamble}</span>
+          </button>
+        )}
         <div
           className="prose-message wrap-break-word text-[15px] subpixel-antialiased prose-headings:antialiased"
           style={{ lineHeight: '22px' }}
@@ -376,14 +539,20 @@ const MessageRow = memo(function MessageRow({
               <AlertTitle>{runtimeErrorLabel}</AlertTitle>
               <AlertDescription>{runtimeErrorDescription(runtimeErrorDetail)}</AlertDescription>
             </Alert>
-          ) : message.sender_type === 'agent' ? (
-            <SafeMarkdown>{message.content}</SafeMarkdown>
           ) : (
-            // People write Markdown too now — the composer produces it for
-            // formatting and for every attachment reference.
+            // Everyone writes Markdown here, and a mention is a mention whoever
+            // typed it — a teammate naming someone should read the same way.
             <SafeMarkdown mentions>{message.content}</SafeMarkdown>
           )}
         </div>
+        {reactions && reactions.length > 0 && onToggleReaction && addReactionLabel && (
+          <ReactionBar
+            addLabel={addReactionLabel}
+            onPick={onToggleReaction}
+            onToggle={onToggleReaction}
+            reactions={reactions}
+          />
+        )}
         {thread && threadLabel && threadAvatarFor && onOpenThread && (
           <ThreadIndicator
             countLabel={threadLabel}
@@ -489,11 +658,19 @@ function MessageAreaContent({
   // only needs a count and who took part.
   const [threads, setThreads] = useState<Map<string, ThreadSummary>>(new Map());
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  // Reactions keyed by message. Like threads, they hang off the transcript
+  // rather than living in it — a reaction never reorders or reflows the flow.
+  const [reactions, setReactions] = useState<Map<string, ReactionRow[]>>(new Map());
   const openThreadIdRef = useRef<string | null>(null);
+  const reactionsRef = useRef<Map<string, ReactionRow[]>>(new Map());
 
   useEffect(() => {
     openThreadIdRef.current = openThreadId;
   }, [openThreadId]);
+
+  useEffect(() => {
+    reactionsRef.current = reactions;
+  }, [reactions]);
 
   const handleThreadRepliesChanged = useCallback(
     (parentId: string, replies: Array<{ created_at: string; sender_id: string }>) => {
@@ -597,6 +774,66 @@ function MessageAreaContent({
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const messageRealtimeRef = useRef({ generation: 0, ready: false });
   const supabase = createClient();
+
+  const toggleReaction = useCallback(
+    (messageId: string, emoji: string) => {
+      const actorId = userIdRef.current;
+      if (!actorId) return;
+      const existing = reactionsRef.current.get(messageId) ?? [];
+      const mine = existing.some(
+        (entry) => entry.actor_id === actorId && entry.emoji === emoji,
+      );
+      setReactions((current) => {
+        const list = current.get(messageId) ?? [];
+        const without = list.filter(
+          (entry) => !(entry.actor_id === actorId && entry.emoji === emoji),
+        );
+        const next = new Map(current);
+        if (mine) {
+          if (without.length === 0) next.delete(messageId);
+          else next.set(messageId, without);
+        } else {
+          next.set(messageId, [...without, { actor_id: actorId, actor_type: 'human', emoji }]);
+        }
+        return next;
+      });
+      void (async () => {
+        const request = mine
+          ? supabase
+              .from('message_reactions')
+              .delete()
+              .eq('message_id', messageId)
+              .eq('actor_id', actorId)
+              .eq('emoji', emoji)
+          : supabase.from('message_reactions').insert({
+              actor_id: actorId,
+              actor_type: 'human',
+              emoji,
+              message_id: messageId,
+            });
+        const { error } = await request;
+        if (!error) return;
+        // Put the optimistic change back the way it was.
+        setReactions((current) => {
+          const list = current.get(messageId) ?? [];
+          const without = list.filter(
+            (entry) => !(entry.actor_id === actorId && entry.emoji === emoji),
+          );
+          const next = new Map(current);
+          if (mine) {
+            next.set(messageId, [...without, { actor_id: actorId, actor_type: 'human', emoji }]);
+          } else if (without.length === 0) {
+            next.delete(messageId);
+          } else {
+            next.set(messageId, without);
+          }
+          return next;
+        });
+      })();
+    },
+    [supabase],
+  );
+
   const agentActivities = useAgentActivity();
   const { settings, t } = useAppSettings();
   const { run: runGuardedAction } = useWorkspaceNavigation();
@@ -1104,6 +1341,24 @@ function MessageAreaContent({
       void agentDirectoryRefresh.runNow();
     };
 
+    async function loadReactions(targetMessageIds: string[], controller: AbortController) {
+      if (targetMessageIds.length === 0) return;
+      const { data, error } = await supabase
+        .from('message_reactions')
+        .select('message_id, actor_id, actor_type, emoji')
+        .in('message_id', targetMessageIds)
+        .abortSignal(controller.signal);
+      if (error || !data || !isCurrent()) return;
+      const next = new Map<string, ReactionRow[]>();
+      for (const row of data as Array<ReactionRow & { message_id: string }>) {
+        const list = next.get(row.message_id);
+        const entry = { actor_id: row.actor_id, actor_type: row.actor_type, emoji: row.emoji };
+        if (list) list.push(entry);
+        else next.set(row.message_id, [entry]);
+      }
+      setReactions(next);
+    }
+
     async function loadThreadSummaries(
       targetChannelId: string,
       controller: AbortController,
@@ -1149,7 +1404,9 @@ function MessageAreaContent({
           .from('messages')
           .select('*')
           .eq('channel_id', channelId)
-          .is('thread_parent_id', null)
+          // The main flow is top-level messages plus the thread replies whose
+          // author chose to send them to the channel as well.
+          .or('thread_parent_id.is.null,thread_broadcast.eq.1')
           .order('seq', { ascending: false })
           .limit(50)
           .abortSignal(controller.signal);
@@ -1182,6 +1439,7 @@ function MessageAreaContent({
           });
           setHasMore(data.length === 50);
           void loadThreadSummaries(channelId, controller);
+          void loadReactions(data.map((message: Message) => message.id), controller);
           requestAnimationFrame(() => {
             if (!isCurrent()) return;
             const scrollElement = scrollContainerRef.current;
@@ -1249,7 +1507,25 @@ function MessageAreaContent({
           if (!isCurrent()) return;
           const newMsg = payload.new;
           if (newMsg.channel_id !== channelId) return;
-          if (!newMsg.thread_parent_id) {
+          // A threaded reply bumps the indicator on its parent whether or not
+          // its author also sent it to the channel. An open panel reports the
+          // authoritative count for its own thread, so leave that one alone.
+          if (newMsg.thread_parent_id && openThreadIdRef.current !== newMsg.thread_parent_id) {
+            const parentId = newMsg.thread_parent_id;
+            setThreads((current) => {
+              const existing = current.get(parentId);
+              const next = new Map(current);
+              next.set(parentId, {
+                lastReplyAt: newMsg.created_at,
+                replyCount: (existing?.replyCount ?? 0) + 1,
+                senderIds: existing?.senderIds.includes(newMsg.sender_id)
+                  ? existing.senderIds
+                  : [...(existing?.senderIds ?? []), newMsg.sender_id],
+              });
+              return next;
+            });
+          }
+          if (!newMsg.thread_parent_id || isBroadcast(newMsg)) {
             const isNewMessage = !seenMessageIdsRef.current.has(newMsg.id);
             seenMessageIdsRef.current.add(newMsg.id);
             setMessages((prev) => {
@@ -1298,32 +1574,47 @@ function MessageAreaContent({
             if (newMsg.sender_type === 'agent') {
               markAgentsResponded([newMsg.sender_id]);
             }
-          } else {
-            // A threaded reply stays out of the main flow; it only bumps the
-            // indicator on its parent. An open panel reports the authoritative
-            // count for its own thread, so leave that one alone.
-            const parentId = newMsg.thread_parent_id;
-            if (openThreadIdRef.current !== parentId) {
-              setThreads((current) => {
-                const existing = current.get(parentId);
-                const next = new Map(current);
-                next.set(parentId, {
-                  lastReplyAt: newMsg.created_at,
-                  replyCount: (existing?.replyCount ?? 0) + 1,
-                  senderIds: existing?.senderIds.includes(newMsg.sender_id)
-                    ? existing.senderIds
-                    : [...(existing?.senderIds ?? []), newMsg.sender_id],
-                });
-                return next;
-              });
-            }
-            if (newMsg.sender_type === 'agent') {
-              markAgentsResponded([newMsg.sender_id]);
-            }
+          } else if (newMsg.sender_type === 'agent') {
+            markAgentsResponded([newMsg.sender_id]);
           }
         },
       )
       .subscribe((status: string) => handleRealtimeStatus('messages', status));
+
+    const reactionSubscription = supabase
+      .channel(`message-reactions:${channelId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'message_reactions' },
+        (payload: { eventType?: string; new?: ReactionRow & { message_id: string }; old?: ReactionRow & { message_id: string } }) => {
+          if (!isCurrent()) return;
+          const row = payload.new ?? payload.old;
+          // The reaction stream is not scoped to a channel, so ignore anything
+          // landing on a message this transcript has never shown.
+          if (!row?.message_id || !seenMessageIdsRef.current.has(row.message_id)) return;
+          const removed = !payload.new;
+          setReactions((current) => {
+            const existing = current.get(row.message_id) ?? [];
+            const without = existing.filter(
+              (entry) => !(entry.actor_id === row.actor_id && entry.emoji === row.emoji),
+            );
+            // The optimistic path already wrote this; re-adding would double it.
+            if (removed && without.length === existing.length) return current;
+            const next = new Map(current);
+            if (removed) {
+              if (without.length === 0) next.delete(row.message_id);
+              else next.set(row.message_id, without);
+            } else {
+              next.set(row.message_id, [
+                ...without,
+                { actor_id: row.actor_id, actor_type: row.actor_type, emoji: row.emoji },
+              ]);
+            }
+            return next;
+          });
+        },
+      )
+      .subscribe((status: string) => handleRealtimeStatus('reactions', status));
 
     const membershipSubscription = supabase
       .channel(`channel-members:${channelId}`)
@@ -1387,6 +1678,7 @@ function MessageAreaContent({
       window.cancelAnimationFrame(resetFrame);
       abortMessageRequests();
       supabase.removeChannel(subscription);
+      supabase.removeChannel(reactionSubscription);
       supabase.removeChannel(membershipSubscription);
       supabase.removeChannel(agentSubscription);
     };
@@ -1410,7 +1702,9 @@ function MessageAreaContent({
           .from('messages')
           .select('*')
           .eq('channel_id', channel.id)
-          .is('thread_parent_id', null)
+          // The main flow is top-level messages plus the thread replies whose
+          // author chose to send them to the channel as well.
+          .or('thread_parent_id.is.null,thread_broadcast.eq.1')
           .eq('sender_type', 'agent')
           .gt('created_at', since)
           .order('created_at', { ascending: true })
@@ -1544,7 +1838,7 @@ function MessageAreaContent({
         .from('messages')
         .select('*')
         .eq('channel_id', channelId)
-        .is('thread_parent_id', null)
+        .or('thread_parent_id.is.null,thread_broadcast.eq.1')
         .lt('seq', oldestSeq)
         .order('seq', { ascending: false })
         .limit(50)
@@ -1974,7 +2268,14 @@ function MessageAreaContent({
 
   return (
     <div className="flex min-w-0 flex-1">
-    <div className="flex min-w-0 flex-1 flex-col bg-card max-w-full text-pretty">
+    <div
+      // With a thread open there is not room for both below a wide viewport, so
+      // the thread takes over rather than squeezing the transcript to a column
+      // of single characters.
+      className={`min-w-0 flex-1 flex-col bg-card max-w-full text-pretty ${
+        openThreadParent ? 'hidden lg:flex' : 'flex'
+      }`}
+    >
       {/* Channel header */}
       <div
         className="flex items-center gap-3 border-b-[0.5px] py-2 px-3 select-none"
@@ -2213,6 +2514,20 @@ function MessageAreaContent({
               }
               threadViewLabel={t('message.thread.view')}
               replyInThreadLabel={t('message.thread.replyInThread')}
+              addReactionLabel={t('message.reaction.add')}
+              broadcastPreamble={
+                isBroadcast(msg) && msg.thread_parent_id
+                  ? t('message.thread.broadcastFrom', {
+                      excerpt: threadRootExcerpt(messages, msg.thread_parent_id),
+                    })
+                  : undefined
+              }
+              reactions={summarizeReactions(reactions.get(msg.id), userId, threadAvatarFor)}
+              onToggleReaction={
+                msg.sender_type === 'system'
+                  ? undefined
+                  : (emoji: string) => toggleReaction(msg.id, emoji)
+              }
               onOpenThread={
                 msg.sender_type === 'system' ? undefined : () => setOpenThreadId(msg.id)
               }

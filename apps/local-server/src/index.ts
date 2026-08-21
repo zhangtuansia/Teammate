@@ -143,8 +143,16 @@ const tableColumns = {
     "content",
     "seq",
     "thread_parent_id",
+    "thread_broadcast",
     "created_at",
     "updated_at",
+  ],
+  message_reactions: [
+    "message_id",
+    "actor_id",
+    "actor_type",
+    "emoji",
+    "created_at",
   ],
   message_deliveries: [
     "message_id",
@@ -610,12 +618,15 @@ function parseQueryFilters(table: TableName, value: unknown[]):
         return { error: `Invalid OR filter at index ${index}` };
       }
       for (const alternative of filter.value.split(",")) {
+        // `col.eq.value` and `col.is.null` are the two forms callers need to
+        // express "either the main flow or a broadcast".
         const separator = alternative.indexOf(".eq.");
-        const column = separator > 0 ? alternative.slice(0, separator) : "";
-        if (
-          separator < 1 ||
-          !(tableColumns[table] as readonly string[]).includes(column)
-        ) {
+        const column = separator > 0
+          ? alternative.slice(0, separator)
+          : alternative.endsWith(".is.null")
+            ? alternative.slice(0, -".is.null".length)
+            : "";
+        if (!column || !(tableColumns[table] as readonly string[]).includes(column)) {
           return { error: `Invalid OR filter at index ${index}` };
         }
       }
@@ -1042,7 +1053,11 @@ function normalizeModel(runtime: AgentRuntime, value: unknown) {
         : "sonnet";
 }
 
-function ensureColumn(table: "agents" | "tasks" | "documents", column: string, definition: string) {
+function ensureColumn(
+  table: "agents" | "messages" | "tasks" | "documents",
+  column: string,
+  definition: string,
+) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
     name: string;
   }>;
@@ -1176,11 +1191,23 @@ db.exec(`
     content TEXT NOT NULL,
     seq INTEGER NOT NULL,
     thread_parent_id TEXT,
+    thread_broadcast INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_local_messages_channel_seq
     ON messages(channel_id, seq DESC);
+
+  CREATE TABLE IF NOT EXISTS message_reactions (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    actor_id TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (message_id, actor_id, emoji)
+  );
+  CREATE INDEX IF NOT EXISTS idx_local_message_reactions_message
+    ON message_reactions(message_id);
 
   CREATE TABLE IF NOT EXISTS message_deliveries (
     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -1410,6 +1437,7 @@ ensureColumn("agents", "thinking_level", "TEXT NOT NULL DEFAULT 'medium'");
 ensureColumn("agents", "runtime_session_id", "TEXT");
 ensureColumn("agents", "runtime_session_runtime", "TEXT");
 ensureColumn("agents", "connection_id", "TEXT");
+ensureColumn("messages", "thread_broadcast", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("tasks", "parent_task_id", "TEXT");
 ensureColumn("tasks", "title", "TEXT");
 ensureColumn("tasks", "description", "TEXT");
@@ -6101,7 +6129,37 @@ function validateLocalMutation(table: TableName, row: DbRow, previous?: DbRow) {
         ),
         "Thread parent must belong to the same channel",
       );
+    } else {
+      requireLocalInvariant(
+        !localValue(row, "thread_broadcast") || String(row.thread_broadcast) === "0",
+        "Only a thread reply can be broadcast to the channel",
+      );
     }
+    return;
+  }
+
+  if (table === "message_reactions") {
+    // A reaction is an edge, never edited — adding and removing is the whole
+    // vocabulary, so an update would only ever be a way to forge one.
+    requireLocalInvariant(!previous, "Reactions are added and removed, never edited");
+    const messageId = localValue(row, "message_id");
+    const actorId = localValue(row, "actor_id");
+    const actorType = localValue(row, "actor_type");
+    const emoji = localValue(row, "emoji");
+    requireLocalInvariant(
+      emoji.length > 0 && emoji.length <= 16 && !/\s/.test(emoji),
+      "Invalid reaction emoji",
+    );
+    const channelRow = db
+      .prepare("SELECT channel_id FROM messages WHERE id = ?")
+      .get(toSqlValue(messageId)) as { channel_id: string } | undefined;
+    requireLocalInvariant(channelRow, "Reaction target message does not exist");
+    requireLocalInvariant(
+      (actorType === "agent" || actorType === "human") &&
+        (actorType === "human" ? actorId === LOCAL_USER_ID : true) &&
+        localMemberBelongsToChannel(channelRow!.channel_id, actorId, actorType),
+      "Reaction author is not a valid channel member",
+    );
     return;
   }
 
@@ -6419,6 +6477,30 @@ function authorizeLocalQuery(
       }
     }
     return query;
+  }
+
+  if (
+    (query.action === "insert" || query.action === "delete") &&
+    query.table === "message_reactions"
+  ) {
+    if (query.action === "insert") {
+      const rows = Array.isArray(query.values) ? query.values : [query.values];
+      for (const value of rows) {
+        const row = value as DbRow;
+        if (row.actor_id !== principal.agentId || row.actor_type !== "agent") {
+          throw new LocalRequestError(403, "Reaction identity is outside this local capability");
+        }
+      }
+      return query;
+    }
+    // A teammate can only take back their own.
+    return {
+      ...query,
+      filters: [
+        ...(query.filters || []),
+        { column: "actor_id", operator: "eq", value: principal.agentId },
+      ],
+    };
   }
 
   if (query.action === "insert" && query.table === "documents") {
@@ -7009,6 +7091,10 @@ function buildWhere(table: TableName, filters: QueryFilter[]) {
       const alternatives = String(filter.value)
         .split(",")
         .map((item) => {
+          if (item.endsWith(".is.null")) {
+            const column = assertColumn(table, item.slice(0, -".is.null".length));
+            return `${column} IS NULL`;
+          }
           const separator = item.indexOf(".eq.");
           if (separator < 1) throw new Error(`Unsupported OR filter: ${item}`);
           const column = assertColumn(table, item.slice(0, separator));
@@ -7080,6 +7166,7 @@ function applyDefaults(table: TableName, row: DbRow) {
       .get(toSqlValue(row.channel_id)) as { next_seq: number };
     row.seq = result.next_seq;
     row.thread_parent_id ??= null;
+    row.thread_broadcast ??= 0;
   }
   if (table === "message_deliveries") {
     row.status ??= "pending";

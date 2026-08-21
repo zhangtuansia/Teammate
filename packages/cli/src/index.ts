@@ -721,6 +721,10 @@ async function cmdMessageSend(flags: Record<string, string>) {
   }
 
   const { channelId, threadParentId } = await resolveTarget(target);
+  const broadcast = flags.broadcast !== undefined;
+  if (broadcast && !threadParentId) {
+    fail("INVALID_ARG", "--broadcast only applies to a thread target");
+  }
   const attached: string[] = [];
   for (const path of attachments) {
     attached.push(attachmentMarkdown(await uploadAttachment(path)));
@@ -735,6 +739,7 @@ async function cmdMessageSend(flags: Record<string, string>) {
       sender_type: "agent",
       content: body,
       thread_parent_id: threadParentId,
+      thread_broadcast: broadcast,
     })
     .select("id")
     .single();
@@ -1841,6 +1846,63 @@ async function cmdDocumentUpdate(flags: Record<string, string>) {
   );
 }
 
+/**
+ * Reacting is the cheap way to answer. A teammate who has seen a message and
+ * has nothing to add can say so without spending a line in the channel.
+ */
+async function cmdMessageReact(flags: Record<string, string>) {
+  const idOrShort = flags["message-id"];
+  if (!idOrShort) fail("INVALID_ARG", "Missing --message-id");
+  const emoji = flags.emoji;
+  if (!emoji) fail("INVALID_ARG", "Missing --emoji");
+  if (emoji.length > 16 || /\s/.test(emoji)) {
+    fail("INVALID_ARG", "An emoji must be a single short token with no spaces");
+  }
+
+  let messageId = idOrShort;
+  if (idOrShort.length <= 8) {
+    if (!flags.channel) {
+      fail("INVALID_ARG", "Short message IDs require --channel");
+    }
+    const { channelId } = await resolveTarget(flags.channel);
+    messageId = await resolveMessageByShortId(channelId, idOrShort);
+  }
+
+  const { data: message, error } = await supabase
+    .from("messages")
+    .select("id, channel_id")
+    .eq("id", messageId)
+    .single();
+  if (error || !message) {
+    fail("REACT_FAILED", error?.message || "Message not found");
+  }
+  await requireAgentChannelMembership(message.channel_id, "REACT_FAILED");
+
+  if (flags.remove !== undefined) {
+    const removal = await supabase
+      .from("message_reactions")
+      .delete()
+      .eq("message_id", message.id)
+      .eq("actor_id", AGENT_ID)
+      .eq("emoji", emoji);
+    if (removal.error) fail("REACT_FAILED", removal.error.message);
+    console.log(`Removed ${emoji} from ${shortId(message.id)}.`);
+    return;
+  }
+
+  const { error: insertError } = await supabase.from("message_reactions").insert({
+    actor_id: AGENT_ID,
+    actor_type: "agent",
+    emoji,
+    message_id: message.id,
+  });
+  // Reacting twice is not an error — the reaction is already there.
+  if (insertError && !/duplicate|unique|constraint/i.test(insertError.message)) {
+    fail("REACT_FAILED", insertError.message);
+  }
+  console.log(`Reacted ${emoji} to ${shortId(message.id)}.`);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1865,6 +1927,9 @@ async function main() {
 
     case "message claim":
       return cmdMessageClaim(flags);
+
+    case "message react":
+      return cmdMessageReact(flags);
 
     case "server info":
       return cmdServerInfo();
@@ -1913,11 +1978,15 @@ async function main() {
 
 Usage:
   teammate message send --target "#channel"    Send a message (content via stdin)
+  teammate message send --target "#ch:shortid" --broadcast
+                                               Reply in a thread and show it in the channel
   teammate message check                       Check for new messages
   teammate message read --channel "#channel"   Read channel history
   teammate message search --query "keyword"    Search messages
   teammate message claim --message-id ID [--channel "#channel"]
                                                Claim a top-level message as a task
+  teammate message react --message-id ID --emoji 👀 [--channel "#ch"] [--remove]
+                                               React to a message instead of replying
   teammate server info                         Show server info
   teammate task list [--channel "#channel"] [--archived|--all]
                                                List active, archived, or all tasks

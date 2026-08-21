@@ -192,6 +192,7 @@ async function insertHumanMessage(
   channelId = LOCAL_DM_ID,
   content = "hello",
   threadParentId: string | null = null,
+  threadBroadcast = false,
 ) {
   const result = await client
     .from("messages")
@@ -201,6 +202,7 @@ async function insertHumanMessage(
       sender_type: "human",
       content,
       thread_parent_id: threadParentId,
+      thread_broadcast: threadBroadcast,
     })
     .select("*")
     .single();
@@ -702,6 +704,103 @@ test("an unclaimed thread reaches the room; a teammate's thread stays theirs", a
       (await loadDelivery(client, followUp.id))?.last_error || "",
       /mid-conversation/,
     );
+  });
+});
+
+test("a broadcast thread reply is addressed to the room, a plain one is not", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    await setChannelAgents(client, [LOCAL_AGENT_ID, created.agent.id]);
+    const bridge = deliveryBridge(client, async () => undefined);
+
+    const root = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "design review notes");
+    await drain(bridge);
+    // Helper takes the thread, so it becomes their conversation.
+    await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "Looking at it now.",
+      root.id,
+    );
+
+    // A plain reply in a thread that is theirs stays out of everyone else's way.
+    const quiet = await insertHumanMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      "one detail on the spacing",
+      root.id,
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, quiet.id))?.status, "skipped");
+
+    // The same reply, sent to the channel as well, is addressed to the room.
+    const shared = await insertHumanMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      "posting the conclusion here too",
+      root.id,
+      true,
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, shared.id))?.status, "completed");
+  });
+});
+
+test("reactions belong to channel members and are added and removed, never edited", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const message = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "ship it?");
+
+    const added = await client.from("message_reactions").insert({
+      message_id: message.id,
+      actor_id: LOCAL_AGENT_ID,
+      actor_type: "agent",
+      emoji: "👀",
+    });
+    assertQuery(added);
+
+    const spaced = await client.from("message_reactions").insert({
+      message_id: message.id,
+      actor_id: LOCAL_AGENT_ID,
+      actor_type: "agent",
+      emoji: "not an emoji",
+    });
+    assertQueryError(spaced, /Invalid reaction emoji/i);
+
+    const stranger = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Outsider", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    const forged = await client.from("message_reactions").insert({
+      message_id: message.id,
+      actor_id: stranger.agent.id,
+      actor_type: "agent",
+      emoji: "👍",
+    });
+    assertQueryError(forged, /not a valid channel member/i);
+
+    const edited = await client
+      .from("message_reactions")
+      .update({ emoji: "🎉" })
+      .eq("message_id", message.id)
+      .eq("actor_id", LOCAL_AGENT_ID);
+    assertQueryError(edited, /added and removed, never edited/i);
+
+    // Deleting the message takes its reactions with it.
+    await client.from("messages").delete().eq("id", message.id);
+    const remaining = await client
+      .from("message_reactions")
+      .select("emoji")
+      .eq("message_id", message.id);
+    assertQuery(remaining);
+    assert.equal((remaining.data as unknown[]).length, 0);
   });
 });
 
