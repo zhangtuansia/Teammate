@@ -11,6 +11,7 @@ import TiptapMessageInput, {
   type TiptapMessageInputHandle,
 } from './tiptap-message-input';
 import { GeneratedAvatar } from './generated-avatar';
+import { formatMessageClock, parseMessageTime } from '@/lib/message-time';
 
 export interface ThreadMessage {
   id: string;
@@ -50,10 +51,7 @@ function ThreadRow({
   sameSender: boolean;
 }) {
   const who = identityFor(message.sender_id, message);
-  const time = new Date(message.created_at).toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  const time = formatMessageClock(message.created_at);
   return (
     <div
       className={`group flex gap-2 rounded-lg px-2 py-0.5 transition-colors hover:bg-accent/40 ${
@@ -282,7 +280,8 @@ export function ThreadPanel({
           const sameSender =
             Boolean(previous) &&
             previous.sender_id === reply.sender_id &&
-            new Date(reply.created_at).getTime() - new Date(previous.created_at).getTime() <
+            (parseMessageTime(reply.created_at)?.getTime() ?? NaN) -
+              (parseMessageTime(previous.created_at)?.getTime() ?? NaN) <
               5 * 60 * 1000;
           return (
             <ThreadRow

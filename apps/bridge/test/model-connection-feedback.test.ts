@@ -6,6 +6,7 @@ import {
   type RuntimeModelConnection,
 } from "../../web/src/lib/agent-runtime.ts";
 import { parseRuntimeError } from "../../web/src/lib/runtime-error.ts";
+import { formatMessageClock, parseMessageTime } from "../../web/src/lib/message-time.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -163,4 +164,25 @@ test("AI settings follows the connection-first IA and disables missing local run
   assert.match(providers, /Not installed/);
   assert.doesNotMatch(connections, /<Collapsible/);
   assert.doesNotMatch(connections, /connectivity test|model test/i);
+});
+
+test("message timestamps parse the same way on every engine", () => {
+  const iso = parseMessageTime("2026-08-21T03:25:39.271Z");
+  assert.ok(iso);
+  assert.equal(iso.toISOString(), "2026-08-21T03:25:39.271Z");
+
+  // The space-separated SQL form is what older rows carry. Chrome reads it as
+  // local time and Safari refuses it outright, so the desktop shell showed
+  // "Invalid Date" where the browser looked fine. Both must land on the same
+  // UTC instant as the rest of the data.
+  const sql = parseMessageTime("2026-08-21 09:56:00");
+  assert.ok(sql, "a space-separated SQL timestamp must still parse");
+  assert.equal(sql.toISOString(), "2026-08-21T09:56:00.000Z");
+
+  // Genuinely unusable values report themselves instead of becoming a Date
+  // that renders as "Invalid Date" and splits the transcript around itself.
+  assert.equal(parseMessageTime("2026-08-21T10:16:50.3NZ"), null);
+  assert.equal(parseMessageTime(""), null);
+  assert.equal(parseMessageTime(null), null);
+  assert.equal(formatMessageClock("2026-08-21T10:16:50.3NZ"), "");
 });

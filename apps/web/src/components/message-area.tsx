@@ -42,6 +42,7 @@ import { GeneratedAvatar } from './generated-avatar';
 import { ThreadPanel } from './thread-panel';
 import { createTrailingRefreshScheduler } from '@/lib/trailing-refresh';
 import { parseRuntimeError } from '@/lib/runtime-error';
+import { formatMessageClock, parseMessageTime } from '@/lib/message-time';
 
 const RUNTIME_ERROR_MESSAGE_PREFIX = '<!-- teammate:runtime-error -->';
 const DRAFT_STORAGE_PREFIX = 'teammate:message-draft:';
@@ -154,13 +155,12 @@ interface MessageTargets {
  * the transcript at every neighbour.
  */
 function dayKey(iso: string | null | undefined) {
-  if (!iso) return null;
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? null : date.toDateString();
+  return parseMessageTime(iso)?.toDateString() ?? null;
 }
 
 function formatDayLabel(iso: string, t: (key: TranslationKey) => string) {
-  const date = new Date(iso);
+  const date = parseMessageTime(iso);
+  if (!date) return '';
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(today.getDate() - 1);
@@ -205,7 +205,9 @@ const DayDivider = memo(function DayDivider({
 
 /** "3 hours ago" for the thread indicator, matching what Slack puts there. */
 function formatRelativeTime(iso: string, language: string) {
-  const elapsed = Date.now() - new Date(iso).getTime();
+  const at = parseMessageTime(iso);
+  if (!at) return '';
+  const elapsed = Date.now() - at.getTime();
   const formatter = new Intl.RelativeTimeFormat(language, { numeric: 'always' });
   const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
     ['day', 86_400_000],
@@ -430,10 +432,7 @@ const MessageRow = memo(function MessageRow({
   const runtimeErrorDetail = message.content.startsWith(RUNTIME_ERROR_MESSAGE_PREFIX)
     ? message.content.slice(RUNTIME_ERROR_MESSAGE_PREFIX.length).trim()
     : null;
-  const formattedTime = new Date(message.created_at).toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+  const formattedTime = formatMessageClock(message.created_at);
 
   return (
     <div
@@ -706,7 +705,7 @@ function MessageAreaContent({
   );
 
   const [hasContent, setHasContent] = useState(false);
-  const [formattingVisible, setFormattingVisible] = useState(false);
+  const [formattingVisible, setFormattingVisible] = useState(true);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -800,6 +799,22 @@ function MessageAreaContent({
     withSeq.sort((left, right) => (left.seq as number) - (right.seq as number));
     return [...withSeq, ...pending];
   }, [messages]);
+
+  // Which rows open a new day. Walking the list once and carrying the last day
+  // we could actually read means a row with an unusable timestamp is skipped
+  // rather than splitting the day on both sides of itself — that is what turned
+  // two bad rows into three "today" dividers.
+  const dayDividers = useMemo(() => {
+    const starts = new Map<string, string>();
+    let lastDay: string | null = null;
+    for (const message of orderedMessages) {
+      const day = dayKey(message.created_at);
+      if (day === null) continue;
+      if (day !== lastDay) starts.set(message.id, message.created_at);
+      lastDay = day;
+    }
+    return starts;
+  }, [orderedMessages]);
 
   // Threads and reactions hang off the transcript rather than living in it, so
   // they load on their own schedule. They used to ride along inside the message
@@ -2507,11 +2522,11 @@ function MessageAreaContent({
           </div>
         )}
         {orderedMessages.map((msg, i) => {
-          const prevMsg = messages[i - 1];
-          const messageDay = dayKey(msg.created_at);
-          const startsNewDay = messageDay !== null && messageDay !== dayKey(prevMsg?.created_at);
+          const prevMsg = orderedMessages[i - 1];
+          const startsNewDay = dayDividers.has(msg.id);
           const elapsed =
-            new Date(msg.created_at).getTime() - new Date(prevMsg?.created_at ?? 0).getTime();
+            (parseMessageTime(msg.created_at)?.getTime() ?? NaN) -
+            (parseMessageTime(prevMsg?.created_at)?.getTime() ?? NaN);
           const sameSender =
             prevMsg &&
             !startsNewDay &&
@@ -2714,7 +2729,7 @@ function MessageAreaContent({
       )}
 
       {/* Input */}
-      <div className="relative px-4 pb-4 pt-2">
+      <div className="relative px-5 pb-5 pt-2">
         {identityError && (
           <div className="mb-2 flex items-center justify-between gap-3 rounded-lg bg-destructive/5 px-3 py-2" role="alert">
             <span className="min-w-0 truncate text-xs text-destructive" title={identityError}>
@@ -2779,7 +2794,7 @@ function MessageAreaContent({
               </div>
             );
           })()}
-        <div className="rounded-lg border bg-card shadow-xs/5 overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24 transition-shadow">
+        <div className="rounded-[8px] border bg-card shadow-[0_1px_3px_0_rgba(0,0,0,0.08)] overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24 transition-shadow">
           <div>
             <TiptapMessageInput
               key={channel.id}
