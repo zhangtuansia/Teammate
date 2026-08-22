@@ -10,6 +10,7 @@ import { formatMessageClock, parseMessageTime } from "../../web/src/lib/message-
 import { isBlockedAddress, parseLinkMetadata } from "../../local-server/src/link-preview.ts";
 import { remarkChatBreaks, type MdastNode } from "../../web/src/lib/markdown-breaks.ts";
 import { documentPreview } from "../../web/src/lib/document-preview.ts";
+import { canEditAsRichText } from "../../web/src/lib/markdown-round-trip.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -282,4 +283,20 @@ test("a document preview reads as prose, not as markup", () => {
   // Rules and table separators carry nothing to read.
   assert.equal(documentPreview("标题\n---\n正文"), "标题 · 正文");
   assert.equal(documentPreview(""), "");
+});
+
+test("rich text editing is offered only where markdown survives the round trip", () => {
+  // A person edits what a teammate wrote. The editor holds only what its
+  // extensions know, so anything else would come back changed — and a table an
+  // agent spent a turn producing must not vanish on someone's first save.
+  assert.equal(canEditAsRichText("# 标题\n\n- 一\n- 二\n\n**粗体** 和 `代码`。"), true);
+  assert.equal(canEditAsRichText("段落\n\n> 引用\n\n1. 第一\n2. 第二"), true);
+
+  assert.equal(
+    canEditAsRichText("| 接口 | 状态 |\n| --- | --- |\n| /a | ok |"),
+    false,
+    "a GFM table has no extension to hold it",
+  );
+  assert.equal(canEditAsRichText("<div>raw</div>"), false);
+  assert.equal(canEditAsRichText("脚注[^1]\n\n[^1]: 说明"), false);
 });

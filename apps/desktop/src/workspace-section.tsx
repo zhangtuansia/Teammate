@@ -5,6 +5,8 @@ import { withRequestDeadline } from "@/lib/request-deadline";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { parseMessageTime } from "@/lib/message-time";
 import { documentPreview } from "@/lib/document-preview";
+import { canEditAsRichText } from "@/lib/markdown-round-trip";
+import { DocumentEditor } from "@/components/document-editor";
 import { ArrowRight, CheckCircle2, Circle, Clock3, FileText, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
@@ -265,6 +267,10 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
   const [editing, setEditing] = useState(false);
+  // Decided from what was loaded, not from what is being typed: a document that
+  // opened as source stays source for the session rather than switching editors
+  // under the author the moment they delete the last table row.
+  const [richTextEditable, setRichTextEditable] = useState(true);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [deleting, setDeleting] = useState(false);
@@ -547,6 +553,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       setDraftUpdatedAt(selectedDocument.updated_at);
       setTitle(selectedDocument.title);
       setContent(selectedDocument.content);
+      setRichTextEditable(canEditAsRichText(selectedDocument.content));
       setDirty(false);
       if (selectedDocument.id !== draftId) {
         setEditing(false);
@@ -762,7 +769,10 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     return (
       <div className="flex min-w-0 flex-1 flex-col bg-card">
         <SectionHeader
-          title={selectedDocument.title || t("documents.untitled")}
+          // The document carries its own title now, so the bar above it says
+          // where you are and what state the document is in instead of saying
+          // the title a second time.
+          title={t("documents.title")}
           description={editing && dirty ? t("documents.unsaved") : t("documents.saved")}
           action={(
             <div className="flex items-center gap-1">
@@ -815,32 +825,47 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 {formatDocumentDate(selectedDocument.updated_at, t)}
               </span>
             </div>
+            {/* The title belongs to the document, not to a header bar, and it
+                stays in the same place whether you are reading or writing. */}
             {editing ? (
-              <>
-                <Field>
-                  <FieldLabel>{t("documents.titleField")}</FieldLabel>
-                  <Input
-                    value={title}
-                    onChange={(event) => {
-                      setTitle(event.target.value);
-                      setDirty(true);
-                    }}
-                    placeholder={t("documents.untitled")}
-                  />
-                </Field>
-                <Field>
-                  <FieldLabel>{t("documents.contentField")}</FieldLabel>
+              <input
+                className="w-full border-0 bg-transparent p-0 text-[28px] font-bold leading-tight outline-none placeholder:text-muted-foreground/60"
+                onChange={(event) => {
+                  setTitle(event.target.value);
+                  setDirty(true);
+                }}
+                placeholder={t("documents.untitled")}
+                value={title}
+              />
+            ) : (
+              <h1 className="text-[28px] font-bold leading-tight">
+                {selectedDocument.title || t("documents.untitled")}
+              </h1>
+            )}
+            {editing ? (
+              richTextEditable ? (
+                <DocumentEditor
+                  content={content}
+                  onChange={(markdown) => {
+                    setContent(markdown);
+                    setDirty(true);
+                  }}
+                  placeholder={t("documents.contentPlaceholder")}
+                />
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">{t("documents.sourceOnly")}</p>
                   <Textarea
-                    value={content}
+                    className="min-h-[55vh] resize-none border-0 bg-transparent p-0 font-mono text-[13px] leading-[20px] shadow-none focus-visible:ring-0"
                     onChange={(event) => {
                       setContent(event.target.value);
                       setDirty(true);
                     }}
                     placeholder={t("documents.contentPlaceholder")}
-                    className="min-h-[55vh]"
+                    value={content}
                   />
-                </Field>
-              </>
+                </div>
+              )
             ) : content ? (
               <article
                 className="prose-message wrap-break-word text-[15px] subpixel-antialiased"
