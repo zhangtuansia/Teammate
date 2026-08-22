@@ -926,6 +926,10 @@ create table public.documents (
   content text default '' not null,
   created_by uuid references public.profiles(id) on delete set null,
   generated_by_agent_id uuid references public.agents(id) on delete set null,
+  -- Where the document sits. Folders are not a table of their own: they are the
+  -- distinct paths of the documents in them, so there is no second structure to
+  -- drift out of step with the first, and a folder cannot outlive its contents.
+  folder_path text default '' not null,
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
 );
@@ -981,6 +985,7 @@ returns table (
   server_id uuid,
   title text,
   generated_by_agent_id uuid,
+  folder_path text,
   created_at timestamptz,
   updated_at timestamptz,
   excerpt text,
@@ -1005,6 +1010,7 @@ begin
     document.server_id,
     document.title,
     document.generated_by_agent_id,
+    document.folder_path,
     document.created_at,
     document.updated_at,
     -- When the body is what matched, show why rather than the opening line.

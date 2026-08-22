@@ -13,12 +13,13 @@ import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
-import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, SearchIcon, WrenchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, SearchIcon, FolderIcon, WrenchIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
 import { parseMessageTime } from "@/lib/message-time";
+import { ancestorPaths, buildDocumentTree, type DocumentFolder } from "@/lib/document-tree";
 
 interface Server {
   id: string;
@@ -88,7 +89,109 @@ function groupDocumentsByAge(
 interface WorkspaceDocument {
   id: string;
   title: string;
+  folder_path: string;
   updated_at: string;
+}
+
+/** Indent per level. Deep trees still leave room for the name to be read. */
+const TREE_INDENT = 12;
+
+function DocumentRow({
+  active,
+  depth,
+  document,
+  onOpen,
+  t,
+}: {
+  active: boolean;
+  depth: number;
+  document: WorkspaceDocument;
+  onOpen: (id: string) => void;
+  t: (key: TranslationKey) => string;
+}) {
+  return (
+    <button
+      aria-current={active ? "page" : undefined}
+      className={`flex h-8 w-full items-center gap-2 rounded-[6px] pr-2 text-left text-[13px] transition-colors ${
+        active
+          ? "bg-primary/10 font-medium text-primary"
+          : "text-muted-foreground hover:bg-accent/60"
+      }`}
+      onClick={() => onOpen(document.id)}
+      style={{ paddingLeft: 10 + depth * TREE_INDENT }}
+      type="button"
+    >
+      <FileTextIcon className={`size-4 shrink-0 ${active ? "" : "opacity-60"}`} />
+      <span className="truncate">{document.title || t("documents.untitled")}</span>
+    </button>
+  );
+}
+
+function DocumentFolderRow({
+  activeDocumentId,
+  folder,
+  onOpenDocument,
+  onToggle,
+  openFolders,
+  t,
+}: {
+  activeDocumentId: string | null;
+  folder: DocumentFolder<WorkspaceDocument>;
+  onOpenDocument: (id: string) => void;
+  onToggle: (path: string) => void;
+  openFolders: Set<string>;
+  t: (key: TranslationKey) => string;
+}) {
+  const open = openFolders.has(folder.path);
+  return (
+    <>
+      <button
+        aria-expanded={open}
+        className="group/folder flex h-8 w-full items-center gap-1 rounded-[6px] pr-2 text-left text-[13px] text-foreground/80 transition-colors hover:bg-accent/60"
+        onClick={() => onToggle(folder.path)}
+        style={{ paddingLeft: 4 + folder.depth * TREE_INDENT }}
+        type="button"
+      >
+        {open ? (
+          <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <FolderIcon className="size-4 shrink-0 text-primary/70" />
+        <span className="truncate">{folder.name}</span>
+        {/* What is inside, so a closed folder is not a dead end. It steps out of
+            the way on hover, where the name may need the room. */}
+        <span className="ml-auto shrink-0 pl-1 text-[11px] tabular-nums text-muted-foreground group-hover/folder:opacity-0">
+          {folder.totalDocuments}
+        </span>
+      </button>
+      {open && (
+        <>
+          {folder.folders.map((child) => (
+            <DocumentFolderRow
+              activeDocumentId={activeDocumentId}
+              folder={child}
+              key={child.path}
+              onOpenDocument={onOpenDocument}
+              onToggle={onToggle}
+              openFolders={openFolders}
+              t={t}
+            />
+          ))}
+          {folder.documents.map((document) => (
+            <DocumentRow
+              active={activeDocumentId === document.id}
+              depth={folder.depth + 1}
+              document={document}
+              key={document.id}
+              onOpen={onOpenDocument}
+              t={t}
+            />
+          ))}
+        </>
+      )}
+    </>
+  );
 }
 
 interface ChannelMemberRealtimeRecord {
@@ -137,6 +240,7 @@ export function Sidebar({
   const [groupChannels, setGroupChannels] = useState<Channel[]>([]);
   const [documents, setDocuments] = useState<WorkspaceDocument[]>([]);
   const [documentQuery, setDocumentQuery] = useState("");
+  const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [userId, setUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
@@ -218,8 +322,56 @@ export function Sidebar({
   const visibleDocuments = useMemo(() => {
     const needle = documentQuery.trim().toLowerCase();
     if (!needle) return documents;
-    return documents.filter((document) => (document.title || "").toLowerCase().includes(needle));
+    // The folder is part of a document's name here, so a search for "api"
+    // finds what is filed under `api/` as well as what is titled that way.
+    return documents.filter((document) =>
+      `${document.folder_path}/${document.title || ""}`.toLowerCase().includes(needle),
+    );
   }, [documentQuery, documents]);
+  const documentTree = useMemo(() => buildDocumentTree(visibleDocuments), [visibleDocuments]);
+
+  const toggleFolder = useCallback((path: string) => {
+    setOpenFolders((current) => {
+      const next = new Set(current);
+      if (!next.delete(path)) next.add(path);
+      return next;
+    });
+  }, []);
+
+  const openDocument = useCallback(
+    (id: string) => {
+      navigate(
+        `/s/${serverSlug}/documents?document=${id}${
+          documentSearch ? `&q=${encodeURIComponent(documentSearch)}` : ""
+        }`,
+      );
+    },
+    [documentSearch, navigate, serverSlug],
+  );
+
+  // Searching digs through folders, so it opens them: a match three levels down
+  // that stays behind a closed folder has not really been found.
+  const foldersWithMatches = documentQuery.trim()
+    ? visibleDocuments.flatMap((document) => ancestorPaths(document.folder_path || "")).join(" ")
+    : "";
+  const [lastFoldersWithMatches, setLastFoldersWithMatches] = useState(foldersWithMatches);
+  if (lastFoldersWithMatches !== foldersWithMatches) {
+    setLastFoldersWithMatches(foldersWithMatches);
+    if (foldersWithMatches) {
+      setOpenFolders((current) => new Set([...current, ...foldersWithMatches.split(" ")]));
+    }
+  }
+
+  // Opening a document from anywhere reveals where it lives.
+  const activeDocumentPath =
+    documents.find((document) => document.id === activeDocumentId)?.folder_path || "";
+  const [lastActivePath, setLastActivePath] = useState(activeDocumentPath);
+  if (lastActivePath !== activeDocumentPath) {
+    setLastActivePath(activeDocumentPath);
+    if (activeDocumentPath) {
+      setOpenFolders((current) => new Set([...current, ...ancestorPaths(activeDocumentPath)]));
+    }
+  }
   const activeSettingsSection = searchParams.get("section") || "profile";
 
   useLayoutEffect(() => {
@@ -418,7 +570,7 @@ export function Sidebar({
           .abortSignal(requestController.signal),
         supabase
           .from("documents")
-          .select("id, title, updated_at")
+          .select("id, title, folder_path, updated_at")
           .eq("server_id", serverId)
           .order("updated_at", { ascending: false })
           .abortSignal(requestController.signal),
@@ -1108,10 +1260,10 @@ export function Sidebar({
             {/* Search sits over the list it searches, rather than in the header
                 of the pane on the other side of the window. */}
             <div className="relative px-1">
-              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <input
                 aria-label={t("documents.searchPlaceholder")}
-                className="h-7 w-full rounded-[6px] bg-accent/70 pl-7 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:shadow-[0_0_0_1px_var(--border)]"
+                className="h-8 w-full rounded-lg bg-accent/70 pl-8 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:shadow-[0_0_0_1px_var(--border)]"
                 onChange={(event) => setDocumentQuery(event.target.value)}
                 placeholder={t("documents.searchPlaceholder")}
                 type="text"
@@ -1138,33 +1290,37 @@ export function Sidebar({
                 {documentQuery.trim() ? t("documents.noMatches") : t("documents.sidebarEmpty")}
               </p>
             ) : (
-              <div className="flex flex-col gap-1">
-                {groupDocumentsByAge(visibleDocuments, t).map((group) => (
-                  <div className="flex flex-col gap-1" key={group.label}>
-                    {/* A flat list of every document tells you nothing about
-                        which ones are live work. Grouping by when they were
-                        last touched does. */}
+              <div className="flex flex-col gap-0.5">
+                {/* Folders first, as a tree you can walk. A document that came
+                    from a folder on disk belongs in that folder here too. */}
+                {documentTree.folders.map((folder) => (
+                  <DocumentFolderRow
+                    activeDocumentId={activeDocumentId}
+                    folder={folder}
+                    key={folder.path}
+                    onOpenDocument={openDocument}
+                    onToggle={toggleFolder}
+                    openFolders={openFolders}
+                    t={t}
+                  />
+                ))}
+                {/* Then whatever is filed nowhere, still cut into the buckets a
+                    person thinks in — a flat list by date tells you nothing
+                    about which documents are live work. */}
+                {groupDocumentsByAge(documentTree.loose, t).map((group) => (
+                  <div className="flex flex-col gap-0.5" key={group.label}>
                     <span className="px-2 pt-2 text-[11px] font-medium text-muted-foreground/70">
                       {group.label}
                     </span>
                     {group.documents.map((document) => (
-                      <Button
+                      <DocumentRow
+                        active={activeDocumentId === document.id}
+                        depth={0}
+                        document={document}
                         key={document.id}
-                        variant="ghost"
-                        size="sm"
-                        className={`w-full justify-start ${activeDocumentId === document.id ? "bg-accent text-foreground" : "text-muted-foreground"}`}
-                        onClick={() =>
-                          navigate(
-                            `/s/${serverSlug}/documents?document=${document.id}${
-                              documentSearch ? `&q=${encodeURIComponent(documentSearch)}` : ""
-                            }`,
-                          )
-                        }
-                        aria-current={activeDocumentId === document.id ? "page" : undefined}
-                      >
-                        <FileTextIcon />
-                        <span className="truncate">{document.title || t("documents.untitled")}</span>
-                      </Button>
+                        onOpen={openDocument}
+                        t={t}
+                      />
                     ))}
                   </div>
                 ))}

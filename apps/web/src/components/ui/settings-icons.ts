@@ -10,6 +10,7 @@ export {
   Clock3,
   Cpu,
   FileText,
+  Folder,
   FolderPlus,
   Ellipsis,
   Home,

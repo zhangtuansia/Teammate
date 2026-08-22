@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FOLDER_IMPORT_FILE_LIMIT, documentTitleFor, planFolderImport } from "@/lib/folder-import";
+import { FOLDER_IMPORT_FILE_LIMIT, documentPlacement, planFolderImport } from "@/lib/folder-import";
 import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
@@ -9,7 +9,7 @@ import { apiUrl } from "@/lib/api-url";
 import { documentPreview } from "@/lib/document-preview";
 import { canEditAsRichText } from "@/lib/markdown-round-trip";
 import { DocumentEditor } from "@/components/document-editor";
-import { ArrowDown, ArrowRight, CheckCircle2, Circle, Clock3, FileText, FolderPlus, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
+import { ArrowDown, ArrowRight, CheckCircle2, Circle, Clock3, FileText, Folder, FolderPlus, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardPanel } from "@/components/ui/card";
@@ -123,13 +123,14 @@ interface WorkspaceDocumentRecord {
   content: string;
   created_by: string | null;
   generated_by_agent_id: string | null;
+  folder_path: string;
   created_at: string;
   updated_at: string;
 }
 
 type WorkspaceDocumentSummaryRecord = Pick<
   WorkspaceDocumentRecord,
-  "id" | "server_id" | "title" | "generated_by_agent_id" | "created_at" | "updated_at"
+  "id" | "server_id" | "title" | "generated_by_agent_id" | "folder_path" | "created_at" | "updated_at"
 >;
 
 /**
@@ -211,8 +212,8 @@ const EMPTY_CHANNELS: ChannelRecord[] = [];
 const EMPTY_ASSIGNEES: AssigneeOption[] = [];
 const EMPTY_MEMBERSHIPS: MembershipRecord[] = [];
 
-/** Title, owner, created, last updated — the same shape in header and rows. */
-const DOCUMENT_COLUMNS = "grid-cols-[1fr_auto_auto_auto]";
+/** Title, location, owner, created, updated — one shape for header and rows. */
+const DOCUMENT_COLUMNS = "grid-cols-[1fr_auto_auto_auto_auto]";
 
 function SectionHeader({ title, description, action }: {
   title: string;
@@ -330,6 +331,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         created_at: document.created_at,
         excerpt: document.excerpt || "",
         generated_by_agent_id: document.generated_by_agent_id,
+        folder_path: document.folder_path || "",
         generatorAvatarUrl: document.generator_avatar_url || null,
         generatorName: document.generator_name || null,
         id: document.id,
@@ -454,12 +456,18 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       const { data: auth } = await client.auth.getUser();
       if (!auth.user) throw new Error(t("documents.createFailed"));
       const rows = await Promise.all(
-        plan.candidates.map(async (candidate) => ({
-          content: await candidate.file.text(),
-          created_by: auth.user!.id,
-          server_id: serverId,
-          title: documentTitleFor(candidate.path),
-        })),
+        plan.candidates.map(async (candidate) => {
+          const placement = documentPlacement(candidate.path);
+          return {
+            content: await candidate.file.text(),
+            created_by: auth.user!.id,
+            // The folder the note was in on disk is the folder it lands in
+            // here — that is what the tree in the sidebar is drawn from.
+            folder_path: placement.folder,
+            server_id: serverId,
+            title: placement.title,
+          };
+        }),
       );
       const { error: insertError } = await client.from("documents").insert(rows);
       if (insertError) throw new Error(insertError.message);
@@ -1143,8 +1151,9 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
 
             {/* A table, not a wall of cards: with more than a handful of
                 documents the columns are what let you find one. */}
-            <div className={`grid ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b px-3 pb-2 text-[12px] text-muted-foreground`}>
+            <div className={`grid ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b px-3 pb-2 text-[12px] text-muted-foreground/80`}>
               <span>{t("documents.columnTitle")}</span>
+              <span>{t("documents.columnLocation")}</span>
               <span>{t("documents.columnOwner")}</span>
               {(["created_at", "updated_at"] as const).map((column) => (
                 <button
@@ -1163,7 +1172,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
               // "open" button, which made the row itself dead space and asked
               // for a decision where there was only one thing to do.
               <button
-                className={`grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/60 px-3 py-2.5 text-left hover:bg-accent/50`}
+                className={`grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/50 px-3 py-3 text-left transition-colors hover:bg-accent/40`}
                 key={document.id}
                 onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
                 type="button"
@@ -1173,7 +1182,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                     <FileText className="size-3.5" />
                   </span>
                   <span className="min-w-0">
-                    <span className="block truncate text-[14px] font-semibold leading-[20px]">
+                    <span className="block truncate text-[14px] font-medium leading-[20px]">
                       {document.title || t("documents.untitled")}
                     </span>
                     {document.excerpt.trim() && (
@@ -1182,6 +1191,18 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                       </span>
                     )}
                   </span>
+                </span>
+                {/* Where it lives. Two notes can share a name across folders,
+                    and this is what tells them apart in a flat list. */}
+                <span className="flex w-36 items-center gap-1.5 text-xs text-muted-foreground">
+                  {document.folder_path ? (
+                    <>
+                      <Folder className="size-3.5 shrink-0 opacity-70" />
+                      <span className="truncate">{document.folder_path}</span>
+                    </>
+                  ) : (
+                    <span className="truncate opacity-60">{t("documents.locationRoot")}</span>
+                  )}
                 </span>
                 <span className="flex w-32 items-center gap-1.5 text-xs text-muted-foreground">
                   {document.generatorName && document.generated_by_agent_id ? (

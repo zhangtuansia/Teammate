@@ -195,6 +195,7 @@ const tableColumns = {
     "content",
     "created_by",
     "generated_by_agent_id",
+    "folder_path",
     "created_at",
     "updated_at",
   ],
@@ -1346,6 +1347,7 @@ db.exec(`
     content TEXT NOT NULL DEFAULT '',
     created_by TEXT NOT NULL,
     generated_by_agent_id TEXT,
+    folder_path TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -1469,6 +1471,10 @@ ensureColumn("tasks", "title", "TEXT");
 ensureColumn("tasks", "description", "TEXT");
 ensureColumn("tasks", "archived_at", "TEXT");
 ensureColumn("documents", "generated_by_agent_id", "TEXT");
+// Where the document sits. Folders are not a table of their own: they are the
+// distinct paths of the documents in them, so there is no second structure to
+// drift out of step with the first, and a folder cannot outlive its contents.
+ensureColumn("documents", "folder_path", "TEXT NOT NULL DEFAULT ''");
 const llmConnectionColumns = db.prepare("PRAGMA table_info(llm_connections)").all() as Array<{
   name: string;
 }>;
@@ -5087,6 +5093,8 @@ function localListWorkspaceDocuments(argsValue: unknown) {
            document.server_id,
            document.title,
            document.generated_by_agent_id,
+         document.folder_path,
+           document.folder_path,
            document.created_at,
            document.updated_at,
            CASE
@@ -5117,6 +5125,7 @@ function localListWorkspaceDocuments(argsValue: unknown) {
          document.server_id,
          document.title,
          document.generated_by_agent_id,
+         document.folder_path,
          document.created_at,
          document.updated_at,
          substr(document.content, 1, 240) AS excerpt,
@@ -6592,6 +6601,23 @@ function validateLocalMutation(table: TableName, row: DbRow, previous?: DbRow) {
       typeof row.content === "string" && row.content.length <= 2_000_000,
       "Invalid document content",
     );
+    // The folder is a display path, not a filesystem one — it names a node in a
+    // tree the sidebar draws. Agents write documents too, and a leading slash or
+    // a `..` segment would render as a folder with no name or one that climbs
+    // out of the workspace, so the shape is settled here rather than in the
+    // component that has to draw it.
+    if (row.folder_path !== undefined && row.folder_path !== null) {
+      const folderPath = String(row.folder_path);
+      requireLocalInvariant(
+        folderPath.length <= 400 &&
+          !folderPath.startsWith("/") &&
+          !folderPath.endsWith("/") &&
+          !folderPath.includes("//") &&
+          !folderPath.split("/").includes("..") &&
+          folderPath.split("/").length <= 12,
+        "Invalid document folder",
+      );
+    }
     return;
   }
 

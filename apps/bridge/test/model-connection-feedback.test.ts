@@ -19,9 +19,10 @@ import {
 import { preferredEmojiForm, reactionKey } from "../../web/src/lib/emoji.ts";
 import {
   FOLDER_IMPORT_FILE_LIMIT,
-  documentTitleFor,
+  documentPlacement,
   planFolderImport,
 } from "../../web/src/lib/folder-import.ts";
+import { ancestorPaths, buildDocumentTree } from "../../web/src/lib/document-tree.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -406,10 +407,10 @@ test("adding a local folder takes the notes and leaves everything else", () => {
   );
   assert.equal(plan.skippedOverLimit, 0);
 
-  // A nested note keeps its folders in the title: `api.md` and `internal/api.md`
-  // are two different notes and the workspace has no folders to tell them apart.
-  assert.equal(documentTitleFor("deep/api.markdown"), "deep/api");
-  assert.equal(documentTitleFor("readme.md"), "readme");
+  // A nested note keeps the folder it came in, rather than having it pressed
+  // flat into the title.
+  assert.deepEqual(documentPlacement("deep/api.markdown"), { folder: "deep", title: "api" });
+  assert.deepEqual(documentPlacement("readme.md"), { folder: "", title: "readme" });
 
   // Pointing at a huge folder takes a capped number and says how many it left.
   const many = Array.from({ length: FOLDER_IMPORT_FILE_LIMIT + 5 }, (_, index) =>
@@ -418,4 +419,41 @@ test("adding a local folder takes the notes and leaves everything else", () => {
   const capped = planFolderImport(many);
   assert.equal(capped.candidates.length, FOLDER_IMPORT_FILE_LIMIT);
   assert.equal(capped.skippedOverLimit, 5);
+});
+
+test("folders in the sidebar are the paths the documents claim", () => {
+  const at = (id: string, folder: string) => ({
+    folder_path: folder,
+    id,
+    title: id,
+    updated_at: "2026-08-22 10:00:00",
+  });
+
+  const tree = buildDocumentTree([
+    at("errors", "api/v2"),
+    at("readme", ""),
+    at("overview", "api"),
+    at("changes", "api/v2"),
+  ]);
+
+  // Loose documents stay out of the tree rather than being filed somewhere.
+  assert.deepEqual(tree.loose.map((document) => document.id), ["readme"]);
+
+  assert.deepEqual(tree.folders.map((folder) => folder.path), ["api"]);
+  const api = tree.folders[0];
+  assert.deepEqual(api.documents.map((document) => document.id), ["overview"]);
+  // A closed folder still says how much is underneath it, however deep.
+  assert.equal(api.totalDocuments, 3);
+  assert.deepEqual(api.folders.map((folder) => folder.path), ["api/v2"]);
+  assert.equal(api.folders[0].name, "v2");
+  assert.equal(api.folders[0].depth, 1);
+
+  // A folder only on the way to another still exists, or the tree would have a
+  // branch growing out of nothing.
+  const deep = buildDocumentTree([at("only", "a/b/c")]);
+  assert.deepEqual(deep.folders.map((folder) => folder.path), ["a"]);
+  assert.equal(deep.folders[0].folders[0].folders[0].path, "a/b/c");
+
+  assert.deepEqual(ancestorPaths("api/v2"), ["api", "api/v2"]);
+  assert.deepEqual(ancestorPaths(""), []);
 });

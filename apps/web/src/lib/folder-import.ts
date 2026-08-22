@@ -20,7 +20,7 @@ const SKIPPED_DIRECTORIES = new Set([
   '__pycache__',
 ]);
 
-export const FOLDER_IMPORT_FILE_LIMIT = 200;
+export const FOLDER_IMPORT_FILE_LIMIT = 500;
 const FILE_SIZE_LIMIT = 1024 * 1024;
 
 export interface FolderImportCandidate {
@@ -64,11 +64,33 @@ export function planFolderImport(files: readonly File[]): FolderImportPlan {
 }
 
 /**
- * What to call the document. A nested file keeps its folders in the name, since
- * `api.md` and `internal/api.md` are two different notes and the workspace has
- * no folders of its own to tell them apart with.
+ * The document's name and the folder it goes in. The folder a note was filed
+ * under is what tells you what it is about, so the tree the folder came in is
+ * kept rather than pressed flat into the title.
+ *
+ * The chosen folder is the root, so `notes/api/v2/errors.md` becomes `errors`
+ * in `api/v2` — the same shape it had on disk.
  */
-export function documentTitleFor(path: string) {
-  const withoutExtension = path.replace(/\.(md|markdown|mdx|txt|text)$/i, '');
-  return withoutExtension || path;
+export function documentPlacement(path: string) {
+  const segments = path.split('/');
+  const name = segments.pop() ?? path;
+  return {
+    folder: segments.join('/'),
+    title: name.replace(/\.(md|markdown|mdx|txt|text)$/i, '') || name,
+  };
+}
+
+/** The folders a set of documents implies, including the ones only on the way. */
+export function folderTreeOf(paths: readonly string[]): string[] {
+  const folders = new Set<string>();
+  for (const path of paths) {
+    if (!path) continue;
+    const segments = path.split('/');
+    // `api/v2` means there is an `api` too, even with nothing filed directly
+    // in it — otherwise the tree would have a branch growing out of nothing.
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      folders.add(segments.slice(0, depth).join('/'));
+    }
+  }
+  return [...folders].sort((a, b) => a.localeCompare(b));
 }
