@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
-import { useAppSettings } from "@/hooks/use-app-settings";
+import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
+import { parseMessageTime } from "@/lib/message-time";
 import { ArrowRight, CheckCircle2, Circle, Clock3, FileText, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
@@ -125,6 +126,28 @@ type WorkspaceDocumentSummaryRecord = Pick<
   WorkspaceDocumentRecord,
   "id" | "server_id" | "title" | "generated_by_agent_id" | "created_at" | "updated_at"
 >;
+
+/**
+ * When a document was last touched, in the terms the rest of the app uses.
+ * "2026/8/22" tells you nothing at a glance about whether this is the thing
+ * you were working on ten minutes ago.
+ */
+function formatDocumentDate(iso: string, t: (key: TranslationKey) => string) {
+  const date = parseMessageTime(iso);
+  if (!date) return "";
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  if (date.toDateString() === yesterday.toDateString()) return t("message.yesterday");
+  return date.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
 
 interface WorkspaceDocumentSummaryViewModel extends WorkspaceDocumentSummaryRecord {
   generatorName: string | null;
@@ -746,11 +769,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       <div className="flex min-w-0 flex-1 flex-col bg-card">
         <SectionHeader
           title={selectedDocument.title || t("documents.untitled")}
-          description={editing && dirty
-            ? t("documents.unsaved")
-            : selectedDocument.generatorName
-              ? t("documents.generatedBy", { name: selectedDocument.generatorName })
-              : t("documents.saved")}
+          description={editing && dirty ? t("documents.unsaved") : t("documents.saved")}
           action={(
             <div className="flex items-center gap-1">
               <Button
@@ -784,17 +803,24 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         />
         <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto w-full max-w-3xl space-y-5 px-5 py-6">
-            {selectedDocument.generatorName && selectedDocument.generated_by_agent_id && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <GeneratedAvatar
-                  id={selectedDocument.generated_by_agent_id}
-                  name={selectedDocument.generatorName}
-                  avatarUrl={selectedDocument.generatorAvatarUrl}
-                  size="xs"
-                />
-                <span>{t("documents.generatedBy", { name: selectedDocument.generatorName })}</span>
-              </div>
-            )}
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              {selectedDocument.generatorName && selectedDocument.generated_by_agent_id && (
+                <>
+                  <GeneratedAvatar
+                    id={selectedDocument.generated_by_agent_id}
+                    name={selectedDocument.generatorName}
+                    avatarUrl={selectedDocument.generatorAvatarUrl}
+                    shape="rounded"
+                    size="xs"
+                  />
+                  <span>{t("documents.generatedBy", { name: selectedDocument.generatorName })}</span>
+                  <span aria-hidden="true">·</span>
+                </>
+              )}
+              <span className="tabular-nums">
+                {formatDocumentDate(selectedDocument.updated_at, t)}
+              </span>
+            </div>
             {editing ? (
               <>
                 <Field>
@@ -898,40 +924,40 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto grid w-full max-w-4xl gap-3 p-6 sm:grid-cols-2 sm:p-8">
             {documents.map((document) => (
-              <Card key={document.id}>
-                <CardPanel className="flex min-h-28 flex-col items-start justify-between gap-4 p-5">
-                  <div className="min-w-0">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <FileText className="size-5 text-muted-foreground" />
-                      {document.generatorName && document.generated_by_agent_id && (
-                        <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-                          <GeneratedAvatar
-                            id={document.generated_by_agent_id}
-                            name={document.generatorName}
-                            avatarUrl={document.generatorAvatarUrl}
-                            size="xs"
-                          />
-                          <span className="truncate">
-                            {t("documents.generatedBy", { name: document.generatorName })}
-                          </span>
-                        </span>
-                      )}
-                    </div>
-                    <h2 className="truncate text-sm font-semibold">{document.title || t("documents.untitled")}</h2>
-                    <p className="mt-1 text-xs tabular-nums text-muted-foreground">
-                      {new Date(document.updated_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
-                  >
-                    {t("documents.open")}
-                    <ArrowRight />
-                  </Button>
-                </CardPanel>
-              </Card>
+              // The whole card opens the document. It used to carry a separate
+              // "open" button, which made the card itself dead space and asked
+              // for a decision where there was only one thing to do.
+              <button
+                className="group rounded-2xl border bg-card p-4 text-left transition-colors hover:border-muted-foreground/40 hover:bg-accent/40"
+                key={document.id}
+                onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
+                type="button"
+              >
+                <div className="flex items-start gap-2.5">
+                  <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <h2 className="min-w-0 flex-1 truncate text-[15px] font-bold leading-[22px]">
+                    {document.title || t("documents.untitled")}
+                  </h2>
+                </div>
+                <div className="mt-2 flex items-center gap-1.5 pl-[26px] text-xs text-muted-foreground">
+                  {document.generatorName && document.generated_by_agent_id && (
+                    <>
+                      <GeneratedAvatar
+                        id={document.generated_by_agent_id}
+                        name={document.generatorName}
+                        avatarUrl={document.generatorAvatarUrl}
+                        shape="rounded"
+                        size="xs"
+                      />
+                      <span className="truncate">{document.generatorName}</span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  )}
+                  <span className="shrink-0 tabular-nums">
+                    {formatDocumentDate(document.updated_at, t)}
+                  </span>
+                </div>
+              </button>
             ))}
           </div>
         </ScrollArea>
