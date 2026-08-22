@@ -8,7 +8,7 @@ import { apiUrl } from "@/lib/api-url";
 import { documentPreview } from "@/lib/document-preview";
 import { canEditAsRichText } from "@/lib/markdown-round-trip";
 import { DocumentEditor } from "@/components/document-editor";
-import { ArrowRight, CheckCircle2, Circle, Clock3, FileText, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Trash2Icon, X } from "@/components/ui/settings-icons";
+import { ArrowRight, CheckCircle2, Circle, Clock3, FileText, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardPanel } from "@/components/ui/card";
@@ -966,26 +966,29 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         title={t("documents.title")}
         description={t("documents.description")}
         action={(
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => void loadDocuments(true)}
-            disabled={currentListLoadState?.refreshing}
-            aria-label={t("agentSettings.refresh")}
-            title={t("agentSettings.refresh")}
-          >
-            <RefreshCw className={currentListLoadState?.refreshing ? "animate-spin" : ""} />
-          </Button>
+          <div className="flex items-center gap-1">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                className="h-7 w-52 rounded-[6px] bg-accent pl-7 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:shadow-[0_0_0_1px_var(--border)]"
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={t("documents.searchPlaceholder")}
+                value={search}
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => void loadDocuments(true)}
+              disabled={currentListLoadState?.refreshing}
+              aria-label={t("agentSettings.refresh")}
+              title={t("agentSettings.refresh")}
+            >
+              <RefreshCw className={currentListLoadState?.refreshing ? "animate-spin" : ""} />
+            </Button>
+          </div>
         )}
       />
-      <div className="border-b px-6 py-2">
-        <Input
-          className="h-8"
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder={t("documents.searchPlaceholder")}
-          value={search}
-        />
-      </div>
       {documents.length === 0 ? (
         <Empty>
           <EmptyHeader>

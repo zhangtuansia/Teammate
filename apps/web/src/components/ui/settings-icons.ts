@@ -20,6 +20,7 @@ export {
   Server,
   Settings,
   ScanEye,
+  Search,
   Trash2Icon,
   Upload,
   User,
