@@ -136,6 +136,9 @@ create table public.messages (
   -- A thread reply the author also wanted the channel to see. Slack renders it
   -- in the main flow with the thread root quoted above it.
   thread_broadcast boolean default false not null,
+  -- Set when a person rewrites what they said, so the UI can mark it without
+  -- inferring intent from updated_at, which moves for other reasons too.
+  edited_at timestamptz,
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
 );
@@ -194,6 +197,32 @@ for each row execute function public.validate_message_scope();
 create index idx_messages_channel on public.messages(channel_id, created_at desc);
 create unique index idx_messages_channel_seq on public.messages(channel_id, seq);
 create index idx_messages_thread on public.messages(thread_parent_id, created_at asc);
+
+-- -----------------------------------------------------------
+-- Read state
+-- -----------------------------------------------------------
+-- How far each person has read in each channel. The unread marker is drawn
+-- from the value captured when the channel was opened, so it stays put while
+-- you read rather than sliding ahead of you.
+create table public.channel_read_state (
+  user_id uuid not null,
+  channel_id uuid references public.channels(id) on delete cascade not null,
+  last_read_seq bigint default 0 not null,
+  updated_at timestamptz default now() not null,
+  primary key (user_id, channel_id)
+);
+
+alter table public.channel_read_state enable row level security;
+
+create policy "People see only their own read state" on public.channel_read_state for select using (
+  auth.uid() = user_id
+);
+create policy "People record their own read state" on public.channel_read_state for insert with check (
+  auth.uid() = user_id and public.user_is_channel_member(channel_id)
+);
+create policy "People advance their own read state" on public.channel_read_state for update using (
+  auth.uid() = user_id
+);
 
 -- -----------------------------------------------------------
 -- Reactions
@@ -3066,6 +3095,16 @@ create policy "Channel members can send messages" on public.messages for insert 
 
 -- Reactions inherit the message's channel: you can see and add one wherever
 -- you could have replied, and you can only take back your own.
+-- Authors can rewrite or retract what they said, and nothing else.
+create policy "Authors can edit their own messages" on public.messages for update using (
+  (sender_type = 'human' and auth.uid() = sender_id)
+  or (sender_type = 'agent' and public.user_owns_agent_in_channel(sender_id, channel_id))
+);
+create policy "Authors can delete their own messages" on public.messages for delete using (
+  (sender_type = 'human' and auth.uid() = sender_id)
+  or (sender_type = 'agent' and public.user_owns_agent_in_channel(sender_id, channel_id))
+);
+
 create policy "Channel members can view reactions" on public.message_reactions for select using (
   exists (
     select 1 from public.messages message

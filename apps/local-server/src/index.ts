@@ -144,9 +144,11 @@ const tableColumns = {
     "seq",
     "thread_parent_id",
     "thread_broadcast",
+    "edited_at",
     "created_at",
     "updated_at",
   ],
+  channel_read_state: ["user_id", "channel_id", "last_read_seq", "updated_at"],
   message_reactions: [
     "message_id",
     "actor_id",
@@ -1192,11 +1194,20 @@ db.exec(`
     seq INTEGER NOT NULL,
     thread_parent_id TEXT,
     thread_broadcast INTEGER NOT NULL DEFAULT 0,
+    edited_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_local_messages_channel_seq
     ON messages(channel_id, seq DESC);
+
+  CREATE TABLE IF NOT EXISTS channel_read_state (
+    user_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    last_read_seq INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, channel_id)
+  );
 
   CREATE TABLE IF NOT EXISTS message_reactions (
     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -1438,6 +1449,7 @@ ensureColumn("agents", "runtime_session_id", "TEXT");
 ensureColumn("agents", "runtime_session_runtime", "TEXT");
 ensureColumn("agents", "connection_id", "TEXT");
 ensureColumn("messages", "thread_broadcast", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("messages", "edited_at", "TEXT");
 ensureColumn("tasks", "parent_task_id", "TEXT");
 ensureColumn("tasks", "title", "TEXT");
 ensureColumn("tasks", "description", "TEXT");
@@ -6099,7 +6111,14 @@ function validateLocalMutation(table: TableName, row: DbRow, previous?: DbRow) {
 
   if (table === "messages") {
     if (previous) {
-      requireImmutableFields(table, previous, row, ["channel_id", "sender_id", "sender_type", "seq"]);
+      requireImmutableFields(table, previous, row, [
+        "channel_id",
+        "sender_id",
+        "sender_type",
+        "seq",
+        "created_at",
+        "thread_parent_id",
+      ]);
     }
     const channelId = localValue(row, "channel_id");
     const senderId = localValue(row, "sender_id");
@@ -6135,6 +6154,18 @@ function validateLocalMutation(table: TableName, row: DbRow, previous?: DbRow) {
         "Only a thread reply can be broadcast to the channel",
       );
     }
+    return;
+  }
+
+  if (table === "channel_read_state") {
+    requireLocalInvariant(
+      localValue(row, "user_id") === LOCAL_USER_ID,
+      "Read state belongs to another person",
+    );
+    requireLocalInvariant(
+      localRowExists("SELECT 1 FROM channels WHERE id = ?", localValue(row, "channel_id")),
+      "Read state channel does not exist",
+    );
     return;
   }
 
@@ -7167,6 +7198,7 @@ function applyDefaults(table: TableName, row: DbRow) {
     row.seq = result.next_seq;
     row.thread_parent_id ??= null;
     row.thread_broadcast ??= 0;
+    row.edited_at ??= null;
   }
   if (table === "message_deliveries") {
     row.status ??= "pending";

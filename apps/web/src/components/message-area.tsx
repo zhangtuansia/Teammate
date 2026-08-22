@@ -11,7 +11,9 @@ import {
   LoaderCircleIcon,
   MessageSquareIcon,
   SmilePlusIcon,
+  PencilIcon,
   PlusIcon,
+  Trash2Icon,
   RotateCcwIcon,
   SettingsIcon,
   TypeIcon,
@@ -69,6 +71,7 @@ interface Message {
   created_at: string;
   thread_parent_id: string | null;
   thread_broadcast?: boolean | number | null;
+  edited_at?: string | null;
   profiles?: { display_name: string } | null;
   motion?: 'send' | 'receive';
   delivery?: 'pending' | 'sent' | 'failed';
@@ -173,6 +176,23 @@ function formatDayLabel(iso: string, t: (key: TranslationKey) => string) {
     ...(date.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
   });
 }
+
+
+/**
+ * Slack's "new messages" rule. The line is drawn from where you had read to
+ * when you opened the channel, and it stays there while you read — it does not
+ * slide ahead of you as you catch up, or the marker would be useless.
+ */
+const UnreadDivider = memo(function UnreadDivider({ label }: { label: string }) {
+  return (
+    <div className="pointer-events-none relative my-2 flex items-center px-5">
+      <span aria-hidden="true" className="h-px flex-1 bg-destructive" />
+      <span className="ml-2 rounded-full bg-destructive px-2 py-0.5 text-[11px] font-bold text-destructive-foreground">
+        {label}
+      </span>
+    </div>
+  );
+});
 
 /**
  * The day marker: no rule across the transcript, just a pill that pins to the
@@ -379,6 +399,74 @@ const ReactionBar = memo(function ReactionBar({
   );
 });
 
+/**
+ * Editing happens where the message sits, the way Slack does it, rather than
+ * lifting the text into a dialog. Enter saves and Escape abandons, which is
+ * what the composer above already teaches.
+ */
+function MessageEditor({
+  cancelLabel,
+  initialContent,
+  onCancel,
+  onSubmit,
+  saveLabel,
+}: {
+  cancelLabel: string;
+  initialContent: string;
+  onCancel: () => void;
+  onSubmit: (content: string) => void;
+  saveLabel: string;
+}) {
+  const [draft, setDraft] = useState(initialContent);
+  const areaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const area = areaRef.current;
+    if (!area) return;
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+  }, []);
+
+  const submit = () => {
+    const next = draft.trim();
+    if (!next || next === initialContent.trim()) {
+      onCancel();
+      return;
+    }
+    onSubmit(next);
+  };
+
+  return (
+    <div className="my-1">
+      <textarea
+        className="min-h-[64px] w-full resize-y rounded-[8px] border bg-card px-3 py-2 text-[15px] leading-[22px] outline-none focus:border-ring focus:ring-[3px] focus:ring-ring/24"
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            onCancel();
+            return;
+          }
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            submit();
+          }
+        }}
+        ref={areaRef}
+        value={draft}
+      />
+      <div className="mt-1.5 flex justify-end gap-2">
+        <Button onClick={onCancel} size="xs" variant="ghost">
+          {cancelLabel}
+        </Button>
+        <Button onClick={submit} size="xs">
+          {saveLabel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 interface MessageRowProps {
   message: Message;
   sameSender: boolean;
@@ -390,6 +478,17 @@ interface MessageRowProps {
   replyInThreadLabel?: string;
   reactions?: ReactionSummary[];
   broadcastPreamble?: string;
+  editing?: boolean;
+  canModify?: boolean;
+  editLabel?: string;
+  deleteLabel?: string;
+  editedLabel?: string;
+  saveLabel?: string;
+  cancelLabel?: string;
+  onStartEdit?: () => void;
+  onCancelEdit?: () => void;
+  onSubmitEdit?: (content: string) => void;
+  onDelete?: () => void;
   addReactionLabel?: string;
   onToggleReaction?: (emoji: string) => void;
   threadAvatarFor?: (senderId: string) => { name: string; url: string | null };
@@ -425,6 +524,17 @@ const MessageRow = memo(function MessageRow({
   replyInThreadLabel,
   reactions,
   broadcastPreamble,
+  editing,
+  canModify,
+  editLabel,
+  deleteLabel,
+  editedLabel,
+  saveLabel,
+  cancelLabel,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+  onDelete,
   addReactionLabel,
   onToggleReaction,
   threadAvatarFor,
@@ -440,6 +550,7 @@ const MessageRow = memo(function MessageRow({
       // The containment hint lives on the content column, not here: it implies
       // paint containment, which would clip the hover toolbar straddling the
       // row's top edge.
+      id={`message-${message.id}`}
       className={`group relative flex gap-2 px-5 py-2 hover:bg-accent/40 ${
         message.motion === 'send'
           ? 'animate-message-send'
@@ -508,6 +619,30 @@ const MessageRow = memo(function MessageRow({
             >
               <MessageSquareIcon className="size-4" />
             </Button>
+            {canModify && onStartEdit && (
+              <Button
+                aria-label={editLabel}
+                className="size-8 text-muted-foreground"
+                onClick={onStartEdit}
+                size="icon-sm"
+                title={editLabel}
+                variant="ghost"
+              >
+                <PencilIcon className="size-4" />
+              </Button>
+            )}
+            {canModify && onDelete && (
+              <Button
+                aria-label={deleteLabel}
+                className="size-8 text-muted-foreground hover:text-destructive"
+                onClick={onDelete}
+                size="icon-sm"
+                title={deleteLabel}
+                variant="ghost"
+              >
+                <Trash2Icon className="size-4" />
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -541,8 +676,19 @@ const MessageRow = memo(function MessageRow({
             <span className="truncate">{broadcastPreamble}</span>
           </button>
         )}
+        {editing && onSubmitEdit && onCancelEdit ? (
+          <MessageEditor
+            cancelLabel={cancelLabel || ''}
+            initialContent={message.content}
+            onCancel={onCancelEdit}
+            onSubmit={onSubmitEdit}
+            saveLabel={saveLabel || ''}
+          />
+        ) : (
         <div
-          className="prose-message wrap-break-word text-[15px] subpixel-antialiased prose-headings:antialiased"
+          className={`prose-message wrap-break-word text-[15px] subpixel-antialiased prose-headings:antialiased ${
+            message.edited_at ? 'has-edit-marker' : ''
+          }`}
           style={{ lineHeight: '22px' }}
         >
           {runtimeErrorDetail !== null ? (
@@ -554,9 +700,17 @@ const MessageRow = memo(function MessageRow({
           ) : (
             // Everyone writes Markdown here, and a mention is a mention whoever
             // typed it — a teammate naming someone should read the same way.
-            <SafeMarkdown mentions>{message.content}</SafeMarkdown>
+            <>
+              <SafeMarkdown mentions>{message.content}</SafeMarkdown>
+              {message.edited_at && (
+                <span className="ml-1 align-baseline text-xs text-muted-foreground">
+                  {editedLabel}
+                </span>
+              )}
+            </>
           )}
         </div>
+        )}
         {reactions && reactions.length > 0 && onToggleReaction && addReactionLabel && (
           <ReactionBar
             addLabel={addReactionLabel}
@@ -670,6 +824,10 @@ function MessageAreaContent({
   // only needs a count and who took part.
   const [threads, setThreads] = useState<Map<string, ThreadSummary>>(new Map());
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  // Captured once per channel visit. The marker is drawn from this, so it holds
+  // still while you read instead of chasing the newest message.
+  const [unreadBoundarySeq, setUnreadBoundarySeq] = useState<number | null>(null);
   // Reactions keyed by message. Like threads, they hang off the transcript
   // rather than living in it — a reaction never reorders or reflows the flow.
   const [reactions, setReactions] = useState<Map<string, ReactionRow[]>>(new Map());
@@ -710,6 +868,8 @@ function MessageAreaContent({
   const [attachmentBusy, setAttachmentBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
+  const [draggingFiles, setDraggingFiles] = useState(false);
 
   const attachFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
@@ -800,6 +960,24 @@ function MessageAreaContent({
     withSeq.sort((left, right) => (left.seq as number) - (right.seq as number));
     return [...withSeq, ...pending];
   }, [messages]);
+
+  const unread = useMemo(() => {
+    if (unreadBoundarySeq === null || unreadBoundarySeq === 0) return null;
+    const firstUnread = orderedMessages.find(
+      (message) =>
+        typeof message.seq === 'number' &&
+        message.seq > unreadBoundarySeq &&
+        message.sender_id !== userId,
+    );
+    if (!firstUnread) return null;
+    const count = orderedMessages.filter(
+      (message) =>
+        typeof message.seq === 'number' &&
+        message.seq > unreadBoundarySeq &&
+        message.sender_id !== userId,
+    ).length;
+    return { count, id: firstUnread.id };
+  }, [orderedMessages, unreadBoundarySeq, userId]);
 
   // Which rows open a new day. Walking the list once and carrying the last day
   // we could actually read means a row with an unusable timestamp is skipped
@@ -953,6 +1131,106 @@ function MessageAreaContent({
 
   const agentActivities = useAgentActivity();
   const { settings, t } = useAppSettings();
+
+  const readStateChannelId = channel?.id;
+  const latestSeq = useMemo(() => {
+    let highest = 0;
+    for (const message of messages) {
+      if (typeof message.seq === 'number' && message.seq > highest) highest = message.seq;
+    }
+    return highest;
+  }, [messages]);
+
+  // Read where the person had got to before showing them anything, so the
+  // marker reflects the visit they are starting rather than the one they just
+  // finished.
+  useEffect(() => {
+    if (!readStateChannelId || !userId) return;
+    let active = true;
+    void (async () => {
+      const { data, error } = await supabase
+        .from('channel_read_state')
+        .select('last_read_seq')
+        .eq('channel_id', readStateChannelId)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (!active) return;
+      setUnreadBoundarySeq(error ? 0 : Number((data as { last_read_seq?: number } | null)?.last_read_seq ?? 0));
+    })();
+    return () => {
+      active = false;
+    };
+  }, [readStateChannelId, supabase, userId]);
+
+  // Catching up is what marks a channel read: the newest message is only read
+  // once it has actually been on screen.
+  useEffect(() => {
+    if (!readStateChannelId || !userId || latestSeq === 0) return;
+    if (!isNearBottomRef.current) return;
+    const timer = setTimeout(() => {
+      void (async () => {
+        // The local adapter has no upsert, and one row per person per channel
+        // is cheap enough that update-then-insert beats widening the protocol.
+        const updated = await supabase
+          .from('channel_read_state')
+          .update({ last_read_seq: latestSeq })
+          .eq('channel_id', readStateChannelId)
+          .eq('user_id', userId)
+          .select('channel_id');
+        if (!updated.error && (updated.data as unknown[] | null)?.length) return;
+        await supabase.from('channel_read_state').insert({
+          channel_id: readStateChannelId,
+          last_read_seq: latestSeq,
+          user_id: userId,
+        });
+      })();
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [latestSeq, readStateChannelId, supabase, userId]);
+
+  const submitMessageEdit = useCallback(
+    (messageId: string, content: string) => {
+      setEditingMessageId(null);
+      const editedAt = new Date().toISOString();
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === messageId ? { ...message, content, edited_at: editedAt } : message,
+        ),
+      );
+      void (async () => {
+        const { error } = await supabase
+          .from('messages')
+          .update({ content, edited_at: editedAt })
+          .eq('id', messageId);
+        if (error) setSendError(t('message.editFailed'));
+      })();
+    },
+    [supabase, t],
+  );
+
+  const deleteMessage = useCallback(
+    (messageId: string) => {
+      // The row leaves the transcript immediately; realtime confirms it, and a
+      // failure restores it rather than leaving a hole nobody can explain.
+      let removed: Message | undefined;
+      setMessages((current) => {
+        removed = current.find((message) => message.id === messageId);
+        return current.filter((message) => message.id !== messageId);
+      });
+      void (async () => {
+        const { error } = await supabase.from('messages').delete().eq('id', messageId);
+        if (!error || !removed) return;
+        setSendError(t('message.deleteFailed'));
+        setMessages((current) =>
+          current.some((message) => message.id === messageId)
+            ? current
+            : [...current, removed as Message],
+        );
+      })();
+    },
+    [supabase, t],
+  );
+
   const { run: runGuardedAction } = useWorkspaceNavigation();
   const playMessageCue = useMessageSounds(settings.messageSounds);
   const describeRuntimeError = useCallback((detail: string) => {
@@ -1636,6 +1914,41 @@ function MessageAreaContent({
           } else if (newMsg.sender_type === 'agent') {
             markAgentsResponded([newMsg.sender_id]);
           }
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'messages',
+          filter: `channel_id=eq.${channelId}`,
+        },
+        (payload: { new: Message }) => {
+          if (!isCurrent() || payload.new.channel_id !== channelId) return;
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === payload.new.id
+                ? { ...payload.new, motion: message.motion, delivery: message.delivery }
+                : message,
+            ),
+          );
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'messages',
+          filter: `channel_id=eq.${channelId}`,
+        },
+        (payload: { old: Message }) => {
+          if (!isCurrent()) return;
+          const goneId = payload.old?.id;
+          if (!goneId) return;
+          seenMessageIdsRef.current.delete(goneId);
+          setMessages((prev) => prev.filter((message) => message.id !== goneId));
         },
       )
       .subscribe((status: string) => handleRealtimeStatus('messages', status));
@@ -2576,6 +2889,19 @@ function MessageAreaContent({
               threadViewLabel={t('message.thread.view')}
               replyInThreadLabel={t('message.thread.replyInThread')}
               addReactionLabel={t('message.reaction.add')}
+              canModify={msg.sender_type === 'human' && msg.sender_id === userId && !msg.delivery}
+              editing={editingMessageId === msg.id}
+              editLabel={t('message.edit')}
+              deleteLabel={t('message.delete')}
+              editedLabel={t('message.edited')}
+              saveLabel={t('message.editSave')}
+              cancelLabel={t('message.editCancel')}
+              onStartEdit={() => setEditingMessageId(msg.id)}
+              onCancelEdit={() => setEditingMessageId(null)}
+              onSubmitEdit={(content) => submitMessageEdit(msg.id, content)}
+              onDelete={() => {
+                if (window.confirm(t('message.deleteConfirm'))) deleteMessage(msg.id);
+              }}
               broadcastPreamble={
                 isBroadcast(msg) && msg.thread_parent_id
                   ? t('message.thread.broadcastFrom', {
@@ -2594,10 +2920,16 @@ function MessageAreaContent({
               }
             />
           );
-          if (!startsNewDay) return row;
+          const marker = unread?.id === msg.id
+            ? <UnreadDivider key={`unread-${msg.id}`} label={t('message.newMessagesLine')} />
+            : null;
+          if (!startsNewDay && !marker) return row;
           return (
             <div className="contents" key={`day-${msg.id}`}>
-              <DayDivider date={msg.created_at} label={formatDayLabel(msg.created_at, t)} />
+              {startsNewDay && (
+                <DayDivider date={msg.created_at} label={formatDayLabel(msg.created_at, t)} />
+              )}
+              {marker}
               {row}
             </div>
           );
@@ -2658,6 +2990,25 @@ function MessageAreaContent({
 
         <div ref={bottomRef} />
       </div>
+      {unread && (
+        // Slack's unread banner: it says how far behind you are and takes you
+        // to the first message you have not read, not to the newest one.
+        <div className="absolute inset-x-0 top-0 z-30 flex justify-center px-4 pt-2">
+          <button
+            className="pointer-events-auto flex items-center gap-2 rounded-full bg-primary px-3 py-1 text-[13px] font-bold text-primary-foreground shadow-lg"
+            onClick={() => {
+              const target = document.getElementById(`message-${unread.id}`);
+              target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }}
+            type="button"
+          >
+            {unread.count === 1
+              ? t('message.newMessage')
+              : t('message.newMessages', { count: String(unread.count) })}
+            <span className="opacity-70">{t('message.jumpToUnread')}</span>
+          </button>
+        </div>
+      )}
       {newMessageCount > 0 && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-4">
           <Button
@@ -2730,7 +3081,32 @@ function MessageAreaContent({
       )}
 
       {/* Input */}
-      <div className="relative px-5 pb-5 pt-2">
+      <div
+        className="relative px-5 pb-5 pt-2"
+        onDragEnter={(event) => {
+          if (!event.dataTransfer?.types.includes('Files')) return;
+          dragDepthRef.current += 1;
+          setDraggingFiles(true);
+        }}
+        onDragLeave={() => {
+          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+          if (dragDepthRef.current === 0) setDraggingFiles(false);
+        }}
+        onDragOver={(event) => {
+          if (!event.dataTransfer?.types.includes('Files')) return;
+          // Without this the browser navigates to the dropped file instead.
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer?.types.includes('Files')) return;
+          event.preventDefault();
+          dragDepthRef.current = 0;
+          setDraggingFiles(false);
+          const files = Array.from(event.dataTransfer.files);
+          if (files.length > 0) void attachFiles(files);
+        }}
+      >
         {identityError && (
           <div className="mb-2 flex items-center justify-between gap-3 rounded-lg bg-destructive/5 px-3 py-2" role="alert">
             <span className="min-w-0 truncate text-xs text-destructive" title={identityError}>
@@ -2795,6 +3171,14 @@ function MessageAreaContent({
               </div>
             );
           })()}
+        {draggingFiles && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-5 inset-y-2 z-20 flex items-center justify-center rounded-[8px] border-2 border-dashed border-primary bg-primary/5"
+          >
+            <span className="text-[13px] font-bold text-primary">{t('message.dropFiles')}</span>
+          </div>
+        )}
         <div className="rounded-[8px] border bg-card shadow-[0_1px_3px_0_rgba(0,0,0,0.08)] overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24 transition-shadow">
           <div>
             <TiptapMessageInput

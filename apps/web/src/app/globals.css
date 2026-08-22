@@ -437,6 +437,13 @@
   color: var(--foreground);
 }
 
+/* The "edited" marker has to sit at the end of the sentence, not under it.
+   Only a trailing paragraph is inlined, so a message ending in a code block or
+   a list drops the marker to its own line instead of mangling that block. */
+.prose-message.has-edit-marker > p:last-of-type {
+  display: inline;
+}
+
 .prose-message h1,
 .prose-message h2,
 .prose-message h3,

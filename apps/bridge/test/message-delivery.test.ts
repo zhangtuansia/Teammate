@@ -804,6 +804,69 @@ test("reactions belong to channel members and are added and removed, never edite
   });
 });
 
+test("authors may rewrite their own messages, and nothing else about them", async () => {
+  await withLocalHarness(async ({ client }) => {
+    const message = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "frist draft");
+
+    const edited = await client
+      .from("messages")
+      .update({ content: "first draft", edited_at: "2026-08-22T01:00:00.000Z" })
+      .eq("id", message.id)
+      .select("content, edited_at")
+      .single();
+    assertQuery(edited);
+    assert.equal((edited.data as { content: string }).content, "first draft");
+
+    // An edit is a rewrite of what you said, not a way to become someone else,
+    // move the message, or backdate it.
+    for (const [field, value] of [
+      ["sender_id", LOCAL_AGENT_ID],
+      ["sender_type", "agent"],
+      ["channel_id", LOCAL_DM_ID],
+      ["created_at", "2020-01-01T00:00:00.000Z"],
+    ] as const) {
+      const forged = await client
+        .from("messages")
+        .update({ [field]: value })
+        .eq("id", message.id);
+      assertQueryError(forged, /immutable/i);
+    }
+
+    await client.from("messages").delete().eq("id", message.id);
+    const gone = await client.from("messages").select("id").eq("id", message.id);
+    assertQuery(gone);
+    assert.equal((gone.data as unknown[]).length, 0);
+  });
+});
+
+test("read state is per person and cannot be written for anyone else", async () => {
+  await withLocalHarness(async ({ client }) => {
+    const mine = await client.from("channel_read_state").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      last_read_seq: 3,
+      user_id: LOCAL_USER_ID,
+    });
+    assertQuery(mine);
+
+    const forged = await client.from("channel_read_state").insert({
+      channel_id: LOCAL_CHANNEL_ID,
+      last_read_seq: 99,
+      user_id: LOCAL_AGENT_ID,
+    });
+    assertQueryError(forged, /belongs to another person/i);
+
+    const advanced = await client
+      .from("channel_read_state")
+      .update({ last_read_seq: 7 })
+      .eq("channel_id", LOCAL_CHANNEL_ID)
+      .eq("user_id", LOCAL_USER_ID)
+      .select("last_read_seq")
+      .single();
+    assertQuery(advanced);
+    assert.equal(Number((advanced.data as { last_read_seq: number }).last_read_seq), 7);
+  });
+});
+
 test("a person talking to a quiet room reaches every teammate in it", async () => {
   await withLocalHarness(async ({ client, baseUrl , databasePath }) => {
     const created = await localApi<{ agent: { id: string } }>(
