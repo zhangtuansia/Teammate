@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { FOLDER_IMPORT_FILE_LIMIT, documentTitleFor, planFolderImport } from "@/lib/folder-import";
 import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
@@ -8,7 +9,7 @@ import { apiUrl } from "@/lib/api-url";
 import { documentPreview } from "@/lib/document-preview";
 import { canEditAsRichText } from "@/lib/markdown-round-trip";
 import { DocumentEditor } from "@/components/document-editor";
-import { ArrowRight, CheckCircle2, Circle, Clock3, FileText, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
+import { ArrowDown, ArrowRight, CheckCircle2, Circle, Clock3, FileText, FolderPlus, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardPanel } from "@/components/ui/card";
@@ -210,9 +211,13 @@ const EMPTY_CHANNELS: ChannelRecord[] = [];
 const EMPTY_ASSIGNEES: AssigneeOption[] = [];
 const EMPTY_MEMBERSHIPS: MembershipRecord[] = [];
 
+/** Title, owner, created, last updated — the same shape in header and rows. */
+const DOCUMENT_COLUMNS = "grid-cols-[1fr_auto_auto_auto]";
+
 function SectionHeader({ title, description, action }: {
   title: string;
-  description: string;
+  /** Omitted where the title says everything, rather than padded with prose. */
+  description?: string;
   action?: ReactNode;
 }) {
   return (
@@ -224,7 +229,7 @@ function SectionHeader({ title, description, action }: {
       />
       <div className="pointer-events-none relative min-w-0">
         <h1 className="truncate text-[15px] font-semibold">{title}</h1>
-        <p className="mt-0.5 truncate text-xs text-muted-foreground">{description}</p>
+        {description && <p className="mt-0.5 truncate text-xs text-muted-foreground">{description}</p>}
       </div>
       {action && <div className="relative">{action}</div>}
     </header>
@@ -268,9 +273,15 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
   const [conflict, setConflict] = useState(false);
-  const [search, setSearch] = useState("");
+  // Typed in the sidebar, carried here in the address — one box, two panes.
+  const search = searchParams.get("q") || "";
   const [activeSearch, setActiveSearch] = useState("");
   const searchRef = useRef("");
+  const [sort, setSort] = useState<"created_at" | "updated_at">("updated_at");
+  const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importStatus, setImportStatus] = useState("");
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const saveTimerRef = useRef<number | null>(null);
   // Decided from what was loaded, not from what is being typed: a document that
   // opened as source stays source for the session rather than switching editors
@@ -423,15 +434,89 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     }
   }, [serverId]);
 
-  // Searching waits for a pause: every keystroke would otherwise start a query
-  // and abort the one before it.
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      searchRef.current = search.trim();
-      setActiveSearch(search.trim());
+  /**
+   * Every note in the folder becomes a document. They are copied, not linked:
+   * the workspace owns what it holds, and a document that quietly rewrote a
+   * file on disk — or went missing when one was renamed — would be a surprise
+   * nobody asked for. Importing the same folder twice makes second copies.
+   */
+  async function handleImportFolder(files: File[]) {
+    if (importing || files.length === 0) return;
+    const plan = planFolderImport(files);
+    if (plan.candidates.length === 0) {
+      setImportStatus(t("documents.importNothing"));
+      return;
+    }
+    setImporting(true);
+    setImportStatus(t("documents.importReading", { count: String(plan.candidates.length) }));
+    try {
+      const client = createClient();
+      const { data: auth } = await client.auth.getUser();
+      if (!auth.user) throw new Error(t("documents.createFailed"));
+      const rows = await Promise.all(
+        plan.candidates.map(async (candidate) => ({
+          content: await candidate.file.text(),
+          created_by: auth.user!.id,
+          server_id: serverId,
+          title: documentTitleFor(candidate.path),
+        })),
+      );
+      const { error: insertError } = await client.from("documents").insert(rows);
+      if (insertError) throw new Error(insertError.message);
+      setImportStatus(
+        plan.skippedOverLimit > 0
+          ? t("documents.importedSome", {
+              count: String(rows.length),
+              limit: String(FOLDER_IMPORT_FILE_LIMIT),
+            })
+          : t("documents.imported", { count: String(rows.length) }),
+      );
       void loadDocuments(true);
-    }, 250);
-    return () => window.clearTimeout(timer);
+    } catch (importError) {
+      setImportStatus(
+        importError instanceof Error ? importError.message : t("documents.importFailed"),
+      );
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function handleCreate() {
+    if (creating) return;
+    setCreating(true);
+    try {
+      const client = createClient();
+      const { data: auth } = await client.auth.getUser();
+      if (!auth.user) throw new Error(t("documents.createFailed"));
+      const { data, error: createError } = await client
+        .from("documents")
+        .insert({
+          content: "",
+          created_by: auth.user.id,
+          server_id: serverId,
+          title: t("documents.untitled"),
+        })
+        .select("id")
+        .single();
+      if (createError || !data) throw new Error(createError?.message || t("documents.createFailed"));
+      router.push(`/s/${serverSlug}/documents?document=${(data as { id: string }).id}`);
+    } catch (createError) {
+      setListLoadState({
+        error: createError instanceof Error ? createError.message : t("documents.createFailed"),
+        loading: false,
+        refreshing: false,
+        serverId,
+      });
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  // The address only changes once typing has settled, so this can run on it.
+  useEffect(() => {
+    searchRef.current = search.trim();
+    setActiveSearch(search.trim());
+    void loadDocuments(true);
     // loadDocuments is stable per server; re-running on it would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
@@ -541,6 +626,12 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
 
   const currentListSnapshot = listSnapshot?.serverId === serverId ? listSnapshot : null;
   const documents = currentListSnapshot?.documents || [];
+  // Which column the table is read by. The list arrives newest-updated first,
+  // so that order is the one the server already gives us.
+  const sortedDocuments = useMemo(() => {
+    if (sort === "updated_at") return documents;
+    return [...documents].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  }, [documents, sort]);
   const currentDetailSnapshot = detailSnapshot?.serverId === serverId &&
     detailSnapshot.documentId === documentId
     ? detailSnapshot
@@ -962,32 +1053,12 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
 
   return (
     <div className="flex min-w-0 flex-1 flex-col bg-card">
+      {/* The search box lives in the sidebar, over the list it searches, and
+          the list keeps itself current over the realtime channel — so this bar
+          is left with the one thing it is for: saying where you are. */}
       <SectionHeader
         title={t("documents.title")}
-        description={t("documents.description")}
-        action={(
-          <div className="flex items-center gap-1">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <input
-                className="h-7 w-52 rounded-[6px] bg-accent pl-7 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:shadow-[0_0_0_1px_var(--border)]"
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={t("documents.searchPlaceholder")}
-                value={search}
-              />
-            </div>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => void loadDocuments(true)}
-              disabled={currentListLoadState?.refreshing}
-              aria-label={t("agentSettings.refresh")}
-              title={t("agentSettings.refresh")}
-            >
-              <RefreshCw className={currentListLoadState?.refreshing ? "animate-spin" : ""} />
-            </Button>
-          </div>
-        )}
+        description={activeSearch ? t("documents.searchingFor", { query: activeSearch }) : undefined}
       />
       {documents.length === 0 ? (
         <Empty>
@@ -1002,35 +1073,111 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 : t("documents.emptyDescription")}
             </EmptyDescription>
           </EmptyHeader>
+          {!activeSearch && (
+            <Button loading={creating} onClick={() => void handleCreate()} size="sm">
+              <Plus />
+              {t("documents.new")}
+            </Button>
+          )}
         </Empty>
       ) : (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto w-full max-w-4xl px-6 py-4">
+          <div className="w-full px-6 pb-6">
+            {/* Making something is the first thing you came here to do, so it
+                is the first thing on the page rather than a "+" in a corner. */}
+            <div className="flex gap-3 py-4">
+              <button
+                className="flex flex-1 items-center gap-3 rounded-xl border bg-card px-4 py-3 text-left transition-colors hover:border-muted-foreground/30 hover:bg-accent/40 disabled:opacity-60"
+                disabled={creating}
+                onClick={() => void handleCreate()}
+                type="button"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Plus className="size-4" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold">
+                    {t("documents.new")}
+                  </span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {t("documents.newHint")}
+                  </span>
+                </span>
+              </button>
+              {/* There is no server to upload to — the workspace is a file on
+                  this disk. So the gesture is to point at a folder already on
+                  it, which is what "upload" was ever standing in for. */}
+              <button
+                className="flex flex-1 items-center gap-3 rounded-xl border bg-card px-4 py-3 text-left transition-colors hover:border-muted-foreground/30 hover:bg-accent/40 disabled:opacity-60"
+                disabled={importing}
+                onClick={() => folderInputRef.current?.click()}
+                type="button"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  {importing ? <RefreshCw className="size-4 animate-spin" /> : <FolderPlus className="size-4" />}
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold">
+                    {t("documents.importFolder")}
+                  </span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {importStatus || t("documents.importFolderHint")}
+                  </span>
+                </span>
+              </button>
+              <input
+                className="hidden"
+                multiple
+                onChange={(event) => {
+                  const files = [...(event.target.files ?? [])];
+                  // Cleared so choosing the same folder twice fires again.
+                  event.target.value = "";
+                  void handleImportFolder(files);
+                }}
+                ref={folderInputRef}
+                type="file"
+                // Not in the React DOM types; WebKit and Chromium both take it.
+                {...{ directory: "", webkitdirectory: "" }}
+              />
+            </div>
+
             {/* A table, not a wall of cards: with more than a handful of
                 documents the columns are what let you find one. */}
-            <div className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 border-b px-2 pb-2 text-[11px] font-medium text-muted-foreground">
+            <div className={`grid ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b px-3 pb-2 text-[12px] text-muted-foreground`}>
               <span>{t("documents.columnTitle")}</span>
               <span>{t("documents.columnOwner")}</span>
-              <span className="text-right">{t("documents.columnUpdated")}</span>
+              {(["created_at", "updated_at"] as const).map((column) => (
+                <button
+                  className="flex items-center justify-end gap-1 transition-colors hover:text-foreground"
+                  key={column}
+                  onClick={() => setSort(column)}
+                  type="button"
+                >
+                  {t(column === "created_at" ? "documents.columnCreated" : "documents.columnUpdated")}
+                  {sort === column && <ArrowDown className="size-3" />}
+                </button>
+              ))}
             </div>
-            {documents.map((document) => (
-              // The whole card opens the document. It used to carry a separate
-              // "open" button, which made the card itself dead space and asked
+            {sortedDocuments.map((document) => (
+              // The whole row opens the document. It used to carry a separate
+              // "open" button, which made the row itself dead space and asked
               // for a decision where there was only one thing to do.
               <button
-                className="grid w-full grid-cols-[1fr_auto_auto] items-center gap-x-6 rounded-lg px-2 py-2 text-left hover:bg-accent/50"
+                className={`grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/60 px-3 py-2.5 text-left hover:bg-accent/50`}
                 key={document.id}
                 onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
                 type="button"
               >
                 <span className="flex min-w-0 items-start gap-2.5">
-                  <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 text-primary">
+                    <FileText className="size-3.5" />
+                  </span>
                   <span className="min-w-0">
-                    <span className="block truncate text-[15px] font-bold leading-[22px]">
+                    <span className="block truncate text-[14px] font-semibold leading-[20px]">
                       {document.title || t("documents.untitled")}
                     </span>
                     {document.excerpt.trim() && (
-                      <span className="mt-0.5 block truncate text-[13px] leading-[18px] text-muted-foreground">
+                      <span className="mt-0.5 block truncate text-[12px] leading-[17px] text-muted-foreground">
                         {documentPreview(document.excerpt)}
                       </span>
                     )}
@@ -1052,7 +1199,10 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                     <span className="truncate">{t("documents.ownerYou")}</span>
                   )}
                 </span>
-                <span className="w-20 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                <span className="w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                  {formatDocumentDate(document.created_at, t)}
+                </span>
+                <span className="w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
                   {formatDocumentDate(document.updated_at, t)}
                 </span>
               </button>

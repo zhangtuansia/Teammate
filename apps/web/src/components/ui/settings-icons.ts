@@ -1,5 +1,6 @@
 export {
   AlertCircle,
+  ArrowDown,
   ArrowRight,
   Bot,
   Check,
@@ -9,6 +10,7 @@ export {
   Clock3,
   Cpu,
   FileText,
+  FolderPlus,
   Ellipsis,
   Home,
   ListChecks,

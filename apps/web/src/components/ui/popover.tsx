@@ -33,6 +33,7 @@ export function PopoverPopup({
   sideOffset = 4,
   alignOffset = 0,
   tooltipStyle = false,
+  padded = true,
   anchor,
   portalProps,
   ...props
@@ -43,6 +44,8 @@ export function PopoverPopup({
   sideOffset?: PopoverPrimitive.Positioner.Props["sideOffset"];
   alignOffset?: PopoverPrimitive.Positioner.Props["alignOffset"];
   tooltipStyle?: boolean;
+  /** Off for content that lays itself out to the popup's edges, like a picker. */
+  padded?: boolean;
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
 }): React.ReactElement {
   return (
@@ -72,6 +75,7 @@ export function PopoverPopup({
               tooltipStyle
                 ? "py-1 [--viewport-inline-padding:--spacing(2)]"
                 : "not-data-transitioning:overflow-y-auto",
+              !padded && "overflow-clip py-0 [--viewport-inline-padding:0px]",
             )}
             data-slot="popover-viewport"
           >

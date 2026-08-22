@@ -16,6 +16,12 @@ import {
   tightenMarkdownLists,
   unpadMarkdownTables,
 } from "../../web/src/lib/markdown-normalize.ts";
+import { preferredEmojiForm, reactionKey } from "../../web/src/lib/emoji.ts";
+import {
+  FOLDER_IMPORT_FILE_LIMIT,
+  documentTitleFor,
+  planFolderImport,
+} from "../../web/src/lib/folder-import.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -359,4 +365,57 @@ test("saving a document does not repad its tables", () => {
     unpadMarkdownTables("```\n| not | a  | table |\n```"),
     "```\n| not | a  | table |\n```",
   );
+});
+
+test("one emoji is one reaction however it is spelled", () => {
+  // The variation selector is invisible, so two spellings would otherwise show
+  // as two identical chips side by side on the same message.
+  assert.equal(reactionKey("\u{1F44D}️"), reactionKey("\u{1F44D}"));
+  assert.equal(reactionKey("❤️"), "❤");
+
+  // Different emoji stay different, and a flag's zero-width joiner is content.
+  assert.notEqual(reactionKey("\u{1F44D}"), reactionKey("\u{1F44E}"));
+  assert.equal(
+    reactionKey("\u{1F3F3}️‍\u{1F308}"),
+    "\u{1F3F3}‍\u{1F308}",
+  );
+
+  // Of two spellings, the chip shows the one that renders in colour.
+  assert.equal(preferredEmojiForm("❤", "❤️"), "❤️");
+  assert.equal(preferredEmojiForm("❤️", "❤"), "❤️");
+});
+
+test("adding a local folder takes the notes and leaves everything else", () => {
+  const file = (path: string, size = 10) =>
+    Object.assign(new File(["x".repeat(size)], path.split("/").pop() ?? path), {
+      webkitRelativePath: `notes/${path}`,
+    });
+
+  const plan = planFolderImport([
+    file("readme.md"),
+    file("deep/api.markdown"),
+    file("photo.png"),
+    file(".git/COMMIT_EDITMSG"),
+    file("node_modules/pkg/readme.md"),
+    file("empty.md", 0),
+  ]);
+
+  assert.deepEqual(
+    plan.candidates.map((candidate) => candidate.path),
+    ["deep/api.markdown", "readme.md"],
+  );
+  assert.equal(plan.skippedOverLimit, 0);
+
+  // A nested note keeps its folders in the title: `api.md` and `internal/api.md`
+  // are two different notes and the workspace has no folders to tell them apart.
+  assert.equal(documentTitleFor("deep/api.markdown"), "deep/api");
+  assert.equal(documentTitleFor("readme.md"), "readme");
+
+  // Pointing at a huge folder takes a capped number and says how many it left.
+  const many = Array.from({ length: FOLDER_IMPORT_FILE_LIMIT + 5 }, (_, index) =>
+    file(`note-${String(index).padStart(4, "0")}.md`),
+  );
+  const capped = planFolderImport(many);
+  assert.equal(capped.candidates.length, FOLDER_IMPORT_FILE_LIMIT);
+  assert.equal(capped.skippedOverLimit, 5);
 });

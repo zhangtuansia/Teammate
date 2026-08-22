@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, useCallback, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter, useParams, usePathname, useSearchParams } from "next/navigation";
 import { CreateAgentDialog } from "./create-agent-dialog";
@@ -13,7 +13,7 @@ import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
-import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, WrenchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, SearchIcon, WrenchIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
@@ -136,6 +136,7 @@ export function Sidebar({
   const [dmChannels, setDmChannels] = useState<DmChannel[]>([]);
   const [groupChannels, setGroupChannels] = useState<Channel[]>([]);
   const [documents, setDocuments] = useState<WorkspaceDocument[]>([]);
+  const [documentQuery, setDocumentQuery] = useState("");
   const [userId, setUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
@@ -201,6 +202,24 @@ export function Sidebar({
         : "home";
   const activeTaskFilter = searchParams.get("status") || "all";
   const activeDocumentId = searchParams.get("document");
+  const documentSearch = searchParams.get("q") || "";
+  // The box holds what you typed; the address holds what has been searched for.
+  // When the address moves on its own — the back button, a link — the box
+  // follows it. Adjusting during the render is how React would rather hear it
+  // than through an effect that renders once with the stale value first.
+  const [lastSearchInAddress, setLastSearchInAddress] = useState(documentSearch);
+  if (lastSearchInAddress !== documentSearch) {
+    setLastSearchInAddress(documentSearch);
+    setDocumentQuery(documentSearch);
+  }
+  // The list narrows as you type. It matches on the title only, where the pane
+  // on the right also reads the contents — so the pane can show a document the
+  // sidebar does not, which is the right way round for a list of names.
+  const visibleDocuments = useMemo(() => {
+    const needle = documentQuery.trim().toLowerCase();
+    if (!needle) return documents;
+    return documents.filter((document) => (document.title || "").toLowerCase().includes(needle));
+  }, [documentQuery, documents]);
   const activeSettingsSection = searchParams.get("section") || "profile";
 
   useLayoutEffect(() => {
@@ -767,6 +786,23 @@ export function Sidebar({
     }
   }
 
+  // The box is here but the documents pane does the searching, so the query
+  // travels in the URL — the one piece of state both sides already share. It
+  // settles first: a query per keystroke would be a round trip per keystroke.
+  useEffect(() => {
+    if (workspaceView !== "documents") return;
+    const timer = window.setTimeout(() => {
+      const wanted = documentQuery.trim();
+      if (wanted === documentSearch) return;
+      const params = new URLSearchParams(searchParams.toString());
+      if (wanted) params.set("q", wanted);
+      else params.delete("q");
+      const query = params.toString();
+      router.replace(`${pathname}${query ? `?${query}` : ""}`);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [documentQuery, documentSearch, pathname, router, searchParams, workspaceView]);
+
   async function handleCreateDocument() {
     if (!userId || creatingDocumentRef.current) return;
     const generation = documentCreateGenerationRef.current + 1;
@@ -1069,6 +1105,19 @@ export function Sidebar({
 
         {workspaceView === "documents" && (
           <div className="space-y-3">
+            {/* Search sits over the list it searches, rather than in the header
+                of the pane on the other side of the window. */}
+            <div className="relative px-1">
+              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                aria-label={t("documents.searchPlaceholder")}
+                className="h-7 w-full rounded-[6px] bg-accent/70 pl-7 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:shadow-[0_0_0_1px_var(--border)]"
+                onChange={(event) => setDocumentQuery(event.target.value)}
+                placeholder={t("documents.searchPlaceholder")}
+                type="text"
+                value={documentQuery}
+              />
+            </div>
             <div className="flex h-[22px] items-center justify-between px-2">
               <span className="text-[12px] font-medium text-muted-foreground">
                 {t("documents.title")}
@@ -1084,13 +1133,13 @@ export function Sidebar({
                 <PlusIcon />
               </Button>
             </div>
-            {documents.length === 0 ? (
+            {visibleDocuments.length === 0 ? (
               <p className="px-2 pt-2 text-xs leading-relaxed text-muted-foreground">
-                {t("documents.sidebarEmpty")}
+                {documentQuery.trim() ? t("documents.noMatches") : t("documents.sidebarEmpty")}
               </p>
             ) : (
               <div className="flex flex-col gap-1">
-                {groupDocumentsByAge(documents, t).map((group) => (
+                {groupDocumentsByAge(visibleDocuments, t).map((group) => (
                   <div className="flex flex-col gap-1" key={group.label}>
                     {/* A flat list of every document tells you nothing about
                         which ones are live work. Grouping by when they were
@@ -1104,7 +1153,13 @@ export function Sidebar({
                         variant="ghost"
                         size="sm"
                         className={`w-full justify-start ${activeDocumentId === document.id ? "bg-accent text-foreground" : "text-muted-foreground"}`}
-                        onClick={() => navigate(`/s/${serverSlug}/documents?document=${document.id}`)}
+                        onClick={() =>
+                          navigate(
+                            `/s/${serverSlug}/documents?document=${document.id}${
+                              documentSearch ? `&q=${encodeURIComponent(documentSearch)}` : ""
+                            }`,
+                          )
+                        }
                         aria-current={activeDocumentId === document.id ? "page" : undefined}
                       >
                         <FileTextIcon />

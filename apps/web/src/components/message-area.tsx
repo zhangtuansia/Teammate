@@ -1,6 +1,6 @@
 'use client';
 
-import { memo, useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import {
   AlertCircleIcon,
@@ -23,6 +23,15 @@ import TiptapMessageInput, {
   type FormattingAction,
   type TiptapMessageInputHandle,
 } from './tiptap-message-input';
+import { Popover, PopoverPopup, PopoverTrigger } from '@/components/ui/popover';
+import { preferredEmojiForm, reactionKey } from '@/lib/emoji';
+
+// Every emoji there is, with its names in two languages, is a quarter of a
+// megabyte — worth having, but not worth carrying in the bundle that has to
+// load before the first message appears. It arrives when the picker is opened.
+const EmojiPicker = lazy(() =>
+  import('@/components/emoji-picker').then((module) => ({ default: module.EmojiPicker })),
+);
 import { useAgentActivity } from '@/hooks/use-agent-activity';
 import { useAppSettings, type TranslationKey } from '@/hooks/use-app-settings';
 import { useMessageSounds } from '@/hooks/use-message-sounds';
@@ -316,10 +325,12 @@ function summarizeReactions(
   if (!rows || rows.length === 0) return undefined;
   const byEmoji = new Map<string, ReactionSummary>();
   for (const row of rows) {
-    const existing = byEmoji.get(row.emoji);
+    // Two spellings of the same emoji are one reaction, not two chips.
+    const key = reactionKey(row.emoji);
+    const existing = byEmoji.get(key);
     const name = identityFor(row.actor_id).name;
     if (!existing) {
-      byEmoji.set(row.emoji, {
+      byEmoji.set(key, {
         actorNames: [name],
         count: 1,
         emoji: row.emoji,
@@ -328,14 +339,74 @@ function summarizeReactions(
       continue;
     }
     existing.count += 1;
+    existing.emoji = preferredEmojiForm(existing.emoji, row.emoji);
     existing.actorNames.push(name);
     if (row.actor_id === viewerId) existing.mine = true;
   }
   return [...byEmoji.values()];
 }
 
-/** Slack's default set, which is what the picker offers before you go looking. */
+/** One click away in the hover toolbar; the rest live behind the picker. */
 const QUICK_REACTIONS = ['👀', '✅', '🎉', '👍', '🙏', '😄'] as const;
+
+/**
+ * The quick row plus a way out of it. Six emoji cover most of what anyone
+ * reaches for, and the trailing button opens the whole set for the times they
+ * do not — the same shape Slack uses, and for the same reason.
+ */
+const ReactionChoices = memo(function ReactionChoices({
+  align,
+  moreLabel,
+  onOpenChange,
+  onPick,
+  open,
+  t,
+}: {
+  align: 'start' | 'end';
+  moreLabel: string;
+  onOpenChange: (open: boolean) => void;
+  onPick: (emoji: string) => void;
+  open: boolean;
+  t: (key: TranslationKey) => string;
+}) {
+  return (
+    <div className="flex items-center gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
+      {QUICK_REACTIONS.map((emoji) => (
+        <button
+          className="rounded px-1.5 py-0.5 text-base transition-colors hover:bg-accent"
+          key={emoji}
+          onClick={() => onPick(emoji)}
+          type="button"
+        >
+          {emoji}
+        </button>
+      ))}
+      <span className="mx-0.5 h-4 w-px bg-border" />
+      <Popover onOpenChange={onOpenChange} open={open}>
+        <PopoverTrigger
+          aria-label={moreLabel}
+          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          title={moreLabel}
+        >
+          <SmilePlusIcon className="size-4" />
+        </PopoverTrigger>
+        <PopoverPopup align={align} padded={false} side="bottom">
+          {/* The panel is its own size from the first frame, so arriving
+              emoji do not shove the popover around under the pointer. */}
+          <Suspense fallback={<div className="h-80 w-[332px]" />}>
+            <EmojiPicker
+              onPick={(emoji) => {
+                onOpenChange(false);
+                onPick(emoji);
+              }}
+              t={t}
+            />
+          </Suspense>
+        </PopoverPopup>
+      </Popover>
+    </div>
+  );
+});
 
 export interface ReactionSummary {
   emoji: string;
@@ -349,12 +420,17 @@ const ReactionBar = memo(function ReactionBar({
   onPick,
   onToggle,
   reactions,
+  t,
 }: {
   addLabel: string;
   onPick: (emoji: string) => void;
   onToggle: (emoji: string) => void;
   reactions: ReactionSummary[];
+  t: (key: TranslationKey) => string;
 }) {
+  // Reaching the picker means leaving the row, which would otherwise take the
+  // hover state — and the button the picker is anchored to — with it.
+  const [pickerOpen, setPickerOpen] = useState(false);
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1">
       {reactions.map((reaction) => (
@@ -377,23 +453,27 @@ const ReactionBar = memo(function ReactionBar({
       <div className="group/add relative">
         <button
           aria-label={addLabel}
-          className="flex h-6 items-center rounded-full border border-dashed border-border px-2 text-muted-foreground opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+          className={`flex h-6 items-center rounded-full border border-dashed border-border px-2 text-muted-foreground hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 ${
+            pickerOpen ? 'opacity-100' : 'opacity-0'
+          }`}
           title={addLabel}
           type="button"
         >
           <SmilePlusIcon className="size-3.5" />
         </button>
-        <div className="absolute bottom-full left-0 z-20 mb-1 hidden gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] group-focus-within/add:flex group-hover/add:flex">
-          {QUICK_REACTIONS.map((emoji) => (
-            <button
-              className="rounded px-1.5 py-0.5 text-base transition-colors hover:bg-accent"
-              key={emoji}
-              onClick={() => onPick(emoji)}
-              type="button"
-            >
-              {emoji}
-            </button>
-          ))}
+        <div
+          className={`absolute bottom-full left-0 z-20 mb-1 group-focus-within/add:block group-hover/add:block ${
+            pickerOpen ? 'block' : 'hidden'
+          }`}
+        >
+          <ReactionChoices
+            align="start"
+            moreLabel={addLabel}
+            onOpenChange={setPickerOpen}
+            onPick={onPick}
+            open={pickerOpen}
+            t={t}
+          />
         </div>
       </div>
     </div>
@@ -541,6 +621,9 @@ const MessageRow = memo(function MessageRow({
   threadAvatarFor,
   onOpenThread,
 }: MessageRowProps) {
+  const { t } = useAppSettings();
+  // The toolbar lives on hover, and reaching the picker means leaving the row.
+  const [rowPickerOpen, setRowPickerOpen] = useState(false);
   const runtimeErrorDetail = message.content.startsWith(RUNTIME_ERROR_MESSAGE_PREFIX)
     ? message.content.slice(RUNTIME_ERROR_MESSAGE_PREFIX.length).trim()
     : null;
@@ -583,7 +666,11 @@ const MessageRow = memo(function MessageRow({
         // Slack's hover affordance, and the only way to open a thread on a
         // message that has no replies yet. It straddles the row's top edge so
         // it never covers the first line of text.
-        <div className="absolute -top-3.5 right-6 z-10 hidden group-focus-within:flex group-hover:flex">
+        <div
+          className={`absolute -top-3.5 right-6 z-10 group-focus-within:flex group-hover:flex ${
+            rowPickerOpen ? 'flex' : 'hidden'
+          }`}
+        >
           <div className="flex gap-0.5 rounded-xl bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
             {onToggleReaction && (
               <div className="group/pick relative">
@@ -596,17 +683,19 @@ const MessageRow = memo(function MessageRow({
                 >
                   <SmilePlusIcon className="size-4" />
                 </Button>
-                <div className="absolute right-0 top-full z-20 hidden gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] group-focus-within/pick:flex group-hover/pick:flex">
-                  {QUICK_REACTIONS.map((emoji) => (
-                    <button
-                      className="rounded px-1.5 py-0.5 text-base transition-colors hover:bg-accent"
-                      key={emoji}
-                      onClick={() => onToggleReaction(emoji)}
-                      type="button"
-                    >
-                      {emoji}
-                    </button>
-                  ))}
+                <div
+                  className={`absolute right-0 top-full z-20 group-focus-within/pick:block group-hover/pick:block ${
+                    rowPickerOpen ? 'block' : 'hidden'
+                  }`}
+                >
+                  <ReactionChoices
+                    align="end"
+                    moreLabel={addReactionLabel ?? ''}
+                    onOpenChange={setRowPickerOpen}
+                    onPick={onToggleReaction}
+                    open={rowPickerOpen}
+                    t={t}
+                  />
                 </div>
               </div>
             )}
@@ -721,6 +810,7 @@ const MessageRow = memo(function MessageRow({
             onPick={onToggleReaction}
             onToggle={onToggleReaction}
             reactions={reactions}
+            t={t}
           />
         )}
         {thread && threadLabel && threadAvatarFor && onOpenThread && (
@@ -1065,13 +1155,17 @@ function MessageAreaContent({
       const actorId = userIdRef.current;
       if (!actorId) return;
       const existing = reactionsRef.current.get(messageId) ?? [];
-      const mine = existing.some(
-        (entry) => entry.actor_id === actorId && entry.emoji === emoji,
+      const key = reactionKey(emoji);
+      // Whichever spelling of this emoji the viewer's own reaction was stored
+      // as is the one the delete has to name, or it would match nothing.
+      const stored = existing.find(
+        (entry) => entry.actor_id === actorId && reactionKey(entry.emoji) === key,
       );
+      const mine = stored !== undefined;
       setReactions((current) => {
         const list = current.get(messageId) ?? [];
         const without = list.filter(
-          (entry) => !(entry.actor_id === actorId && entry.emoji === emoji),
+          (entry) => !(entry.actor_id === actorId && reactionKey(entry.emoji) === key),
         );
         const next = new Map(current);
         if (mine) {
@@ -1089,7 +1183,7 @@ function MessageAreaContent({
               .delete()
               .eq('message_id', messageId)
               .eq('actor_id', actorId)
-              .eq('emoji', emoji)
+              .eq('emoji', stored?.emoji ?? emoji)
           : supabase.from('message_reactions').insert({
               actor_id: actorId,
               actor_type: 'human',
@@ -1102,11 +1196,14 @@ function MessageAreaContent({
         setReactions((current) => {
           const list = current.get(messageId) ?? [];
           const without = list.filter(
-            (entry) => !(entry.actor_id === actorId && entry.emoji === emoji),
+            (entry) => !(entry.actor_id === actorId && reactionKey(entry.emoji) === key),
           );
           const next = new Map(current);
           if (mine) {
-            next.set(messageId, [...without, { actor_id: actorId, actor_type: 'human', emoji }]);
+            next.set(messageId, [
+              ...without,
+              { actor_id: actorId, actor_type: 'human', emoji: stored?.emoji ?? emoji },
+            ]);
           } else if (without.length === 0) {
             next.delete(messageId);
           } else {
