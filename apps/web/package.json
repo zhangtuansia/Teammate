@@ -9,15 +9,16 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@teammate/local-client": "workspace:*",
     "@base-ui/react": "^1.7.0",
     "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/colors": "^3.0.0",
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.104.1",
+    "@teammate/local-client": "workspace:*",
     "@tiptap/core": "^3.22.4",
     "@tiptap/extension-heading": "^3.22.4",
     "@tiptap/extension-link": "^3.22.4",
+    "@tiptap/extension-list": "^3.30.2",
     "@tiptap/extension-placeholder": "^3.22.4",
     "@tiptap/pm": "^3.22.4",
     "@tiptap/react": "^3.22.4",

@@ -11,6 +11,7 @@ import { isBlockedAddress, parseLinkMetadata } from "../../local-server/src/link
 import { remarkChatBreaks, type MdastNode } from "../../web/src/lib/markdown-breaks.ts";
 import { documentPreview } from "../../web/src/lib/document-preview.ts";
 import { canEditAsRichText } from "../../web/src/lib/markdown-round-trip.ts";
+import { tightenMarkdownLists } from "../../web/src/lib/markdown-normalize.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -299,4 +300,25 @@ test("rich text editing is offered only where markdown survives the round trip",
   );
   assert.equal(canEditAsRichText("<div>raw</div>"), false);
   assert.equal(canEditAsRichText("脚注[^1]\n\n[^1]: 说明"), false);
+});
+
+test("saving a document does not loosen its lists", () => {
+  // The editor writes a blank line between items, which makes the list loose:
+  // it renders with extra spacing and every save shows up as a diff to whoever
+  // reads the document next through the CLI.
+  assert.equal(
+    tightenMarkdownLists("- [x] 冒烟测试\n\n- [x] 灰度\n\n- [ ] 全量"),
+    "- [x] 冒烟测试\n- [x] 灰度\n- [ ] 全量",
+  );
+  assert.equal(tightenMarkdownLists("1. 一\n\n2. 二"), "1. 一\n2. 二");
+
+  // Spacing that belongs to the author stays: around the list, and between a
+  // list and the prose next to it.
+  assert.equal(
+    tightenMarkdownLists("段落\n\n- 一\n- 二\n\n下一段"),
+    "段落\n\n- 一\n- 二\n\n下一段",
+  );
+  // A nested item starts a different list, so the blank line is not ours to
+  // remove.
+  assert.equal(tightenMarkdownLists("- 一\n\n  - 嵌套"), "- 一\n\n  - 嵌套");
 });

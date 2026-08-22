@@ -650,6 +650,38 @@
   accent-color: var(--primary);
 }
 
+/* The editor builds a task list from its own markup rather than the plain
+   checkbox input GFM produces, so it needs its own rule to read as a
+   checklist: no bullet, and the box beside the line rather than above it. */
+.document-editor ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+  margin-left: 0;
+}
+.document-editor ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45em;
+  margin-left: 0;
+}
+.document-editor ul[data-type="taskList"] li > label {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  flex: 0 0 auto;
+  user-select: none;
+}
+.document-editor ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.document-editor ul[data-type="taskList"] li > div > p {
+  margin: 0;
+}
+.document-editor input[type="checkbox"] {
+  accent-color: var(--primary);
+}
+
 /* ── Attachments ──
    These selectors carry the element type so they outrank `.prose-message a`,
    whose dashed-underline link styling would otherwise bleed into the chip. */
