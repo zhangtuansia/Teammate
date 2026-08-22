@@ -6,21 +6,20 @@ import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
-import { Markdown } from "tiptap-markdown";
-import { tightenMarkdownLists } from "@/lib/markdown-normalize";
+import { Markdown } from "@tiptap/markdown";
+import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
+import {
+  collapseBlankLines,
+  tightenMarkdownLists,
+  unpadMarkdownTables,
+} from "@/lib/markdown-normalize";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Editor } from "@tiptap/core";
 
-interface MarkdownStorage {
-  getMarkdown: () => string;
-}
-
-/** tiptap-markdown declares its storage through module augmentation the local
- * TypeScript setup does not pick up, so reach it explicitly rather than
- * loosening the editor type everywhere it is used. */
 function markdownOf(editor: Editor): string {
-  const raw = (editor.storage as unknown as Record<string, MarkdownStorage>).markdown.getMarkdown();
-  return tightenMarkdownLists(raw);
+  return unpadMarkdownTables(
+    collapseBlankLines(tightenMarkdownLists(editor.getMarkdown())),
+  ).trim();
 }
 
 
@@ -112,6 +111,7 @@ export function DocumentEditor({
 
   const editor = useEditor({
     content,
+    contentType: "markdown",
     editorProps: {
       attributes: {
         class: "focus:outline-none min-h-[55vh]",
@@ -150,14 +150,15 @@ export function DocumentEditor({
       // checkbox in reach for the same reason.
       TaskList,
       TaskItem.configure({ nested: true }),
+      // Tables are a normal part of a work document, and the official Markdown
+      // extension lets each node say how it serialises, so a table an agent
+      // wrote now survives being opened and saved.
+      Table.configure({ resizable: false }),
+      TableRow,
+      TableHeader,
+      TableCell,
       Placeholder.configure({ placeholder }),
-      Markdown.configure({
-        // The stored document keeps the shape a person or a teammate wrote it
-        // in; the editor should not go re-flowing paragraphs behind them.
-        breaks: true,
-        linkify: false,
-        transformPastedText: true,
-      }),
+      Markdown,
     ],
     // The editor is created on the client only; rendering it on the server
     // and rehydrating produces a mismatch warning and an empty first paint.
@@ -235,7 +236,7 @@ export function DocumentEditor({
   useEffect(() => {
     if (!editor) return;
     if (markdownOf(editor) === content) return;
-    editor.commands.setContent(content, { emitUpdate: false });
+    editor.commands.setContent(content, { contentType: "markdown", emitUpdate: false });
   }, [content, editor]);
 
   return (

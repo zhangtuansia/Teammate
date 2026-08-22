@@ -1,6 +1,31 @@
 const LIST_ITEM = /^(\s*)(?:[-*+]|\d+[.)])\s+/;
 
 /**
+ * Collapse runs of blank lines. The serializer leaves two where the author
+ * wrote one, and in Markdown the extra line means nothing — but it means a
+ * diff, on every save, for whoever reads the document next. Blank lines inside
+ * a fenced code block are content and are left exactly as they are.
+ */
+export function collapseBlankLines(markdown: string) {
+  const lines = markdown.split("\n");
+  const out: string[] = [];
+  let insideFence = false;
+  let blanks = 0;
+
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) insideFence = !insideFence;
+    if (!insideFence && line.trim() === "") {
+      blanks += 1;
+      if (blanks > 1) continue;
+    } else {
+      blanks = 0;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/**
  * The editor writes a blank line between list items, which turns a tight list
  * into a loose one: Markdown then wraps each item in a paragraph and the list
  * renders with extra spacing. A document saved unchanged should come back
@@ -39,4 +64,35 @@ export function tightenMarkdownLists(markdown: string) {
   }
 
   return out.join("\n");
+}
+
+/**
+ * Undo the column padding the serializer adds to tables. It aligns cells with
+ * runs of spaces, which reads well but rewrites every row of a table a teammate
+ * wrote the first time a person saves the document — the whole table shows as
+ * changed when one cell was touched. Only the padding at cell boundaries is
+ * removed; whatever is inside a cell is left alone, and rows inside a fenced
+ * code block are not tables at all.
+ */
+export function unpadMarkdownTables(markdown: string) {
+  let insideFence = false;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence) return line;
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return line;
+      const cells = trimmed.slice(1, -1).split("|").map((cell) => cell.trim());
+      const normalized = cells.map((cell) =>
+        // The delimiter row carries alignment in its colons; the dashes
+        // themselves only need to be there.
+        /^:?-{2,}:?$/.test(cell) ? cell.replace(/-+/, "---") : cell,
+      );
+      return `| ${normalized.join(" | ")} |`;
+    })
+    .join("\n");
 }

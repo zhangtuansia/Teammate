@@ -7,10 +7,12 @@
  *
  * So the editor is offered only for documents it can return unharmed. The rest
  * are edited as source, which is lossless by construction.
+ *
+ * Tables came off this list once the table extension was added and the round
+ * trip was checked; anything added here should be removed the same way, by
+ * being able to hold the thing rather than by hoping.
  */
 const UNSUPPORTED = [
-  // GFM tables: no table extension is installed.
-  /^[ \t]*\|.*\|[ \t]*$/m,
   // Raw HTML blocks and inline tags.
   /<\/?[a-z][a-z0-9-]*(\s[^>]*)?>/i,
   // Footnote definitions and references.

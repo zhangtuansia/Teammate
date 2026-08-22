@@ -11,7 +11,11 @@ import { isBlockedAddress, parseLinkMetadata } from "../../local-server/src/link
 import { remarkChatBreaks, type MdastNode } from "../../web/src/lib/markdown-breaks.ts";
 import { documentPreview } from "../../web/src/lib/document-preview.ts";
 import { canEditAsRichText } from "../../web/src/lib/markdown-round-trip.ts";
-import { tightenMarkdownLists } from "../../web/src/lib/markdown-normalize.ts";
+import {
+  collapseBlankLines,
+  tightenMarkdownLists,
+  unpadMarkdownTables,
+} from "../../web/src/lib/markdown-normalize.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -293,11 +297,9 @@ test("rich text editing is offered only where markdown survives the round trip",
   assert.equal(canEditAsRichText("# 标题\n\n- 一\n- 二\n\n**粗体** 和 `代码`。"), true);
   assert.equal(canEditAsRichText("段落\n\n> 引用\n\n1. 第一\n2. 第二"), true);
 
-  assert.equal(
-    canEditAsRichText("| 接口 | 状态 |\n| --- | --- |\n| /a | ok |"),
-    false,
-    "a GFM table has no extension to hold it",
-  );
+  // Tables came off the unsupported list when the table extension went in and
+  // the round trip was checked, which is the only way something should leave it.
+  assert.equal(canEditAsRichText("| 接口 | 状态 |\n| --- | --- |\n| /a | ok |"), true);
   assert.equal(canEditAsRichText("<div>raw</div>"), false);
   assert.equal(canEditAsRichText("脚注[^1]\n\n[^1]: 说明"), false);
 });
@@ -321,4 +323,40 @@ test("saving a document does not loosen its lists", () => {
   // A nested item starts a different list, so the blank line is not ours to
   // remove.
   assert.equal(tightenMarkdownLists("- 一\n\n  - 嵌套"), "- 一\n\n  - 嵌套");
+});
+
+test("saving a document does not add blank lines to it", () => {
+  // The serializer leaves two blank lines where the author wrote one. Markdown
+  // reads them the same, but the document is read and rewritten by teammates
+  // through the CLI, where the extra line is a diff on every save.
+  assert.equal(collapseBlankLines("# 标题\n\n\n正文"), "# 标题\n\n正文");
+  assert.equal(collapseBlankLines("a\n\n\n\n\nb"), "a\n\nb");
+  assert.equal(collapseBlankLines("a\n\nb"), "a\n\nb");
+
+  // Blank lines inside a fence are content, not layout.
+  assert.equal(
+    collapseBlankLines("```py\nx = 1\n\n\ny = 2\n```"),
+    "```py\nx = 1\n\n\ny = 2\n```",
+  );
+});
+
+test("saving a document does not repad its tables", () => {
+  // One cell is edited; the rest of the table must not show as changed.
+  assert.equal(
+    unpadMarkdownTables(
+      "| 接口         | 状态   |\n| ---------- | ---- |\n| /api/query | 已完成  |",
+    ),
+    "| 接口 | 状态 |\n| --- | --- |\n| /api/query | 已完成 |",
+  );
+
+  // Alignment colons carry meaning and survive.
+  assert.equal(unpadMarkdownTables("| :--- | ---: |"), "| :--- | ---: |");
+
+  // Spacing inside a cell is the author's, and a pipe in a code fence is not a
+  // table at all.
+  assert.equal(unpadMarkdownTables("| a  b | c |"), "| a  b | c |");
+  assert.equal(
+    unpadMarkdownTables("```\n| not | a  | table |\n```"),
+    "```\n| not | a  | table |\n```",
+  );
 });

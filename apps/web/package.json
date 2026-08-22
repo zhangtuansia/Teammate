@@ -20,6 +20,8 @@
     "@tiptap/extension-link": "^3.22.4",
     "@tiptap/extension-list": "^3.30.2",
     "@tiptap/extension-placeholder": "^3.22.4",
+    "@tiptap/extension-table": "3.22.4",
+    "@tiptap/markdown": "3.22.4",
     "@tiptap/pm": "^3.22.4",
     "@tiptap/react": "^3.22.4",
     "@tiptap/starter-kit": "^3.22.4",
@@ -35,8 +37,7 @@
     "remark-gfm": "^4.0.1",
     "shadcn": "^4.5.0",
     "tailwind-merge": "^3.5.0",
-    "tailwindcss-radix-colors": "^2.1.0",
-    "tiptap-markdown": "^0.9.0"
+    "tailwindcss-radix-colors": "^2.1.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
