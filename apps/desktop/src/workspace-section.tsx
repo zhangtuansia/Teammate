@@ -268,6 +268,9 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
   const [conflict, setConflict] = useState(false);
+  const [search, setSearch] = useState("");
+  const [activeSearch, setActiveSearch] = useState("");
+  const searchRef = useRef("");
   const saveTimerRef = useRef<number | null>(null);
   // Decided from what was loaded, not from what is being typed: a document that
   // opened as source stays source for the session rather than switching editors
@@ -305,7 +308,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       // side, so the list neither pulls whole documents nor makes a second
       // round trip for the directory.
       const { data, error: queryError } = await client
-        .rpc("list_workspace_documents", { server_uuid: serverId })
+        .rpc("list_workspace_documents", { search: searchRef.current, server_uuid: serverId })
         .abortSignal(requestController.signal);
       if (requestController.signal.aborted) throw new Error("Request aborted");
       if (queryError) throw new Error(queryError.message);
@@ -419,6 +422,19 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       }
     }
   }, [serverId]);
+
+  // Searching waits for a pause: every keystroke would otherwise start a query
+  // and abort the one before it.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      searchRef.current = search.trim();
+      setActiveSearch(search.trim());
+      void loadDocuments(true);
+    }, 250);
+    return () => window.clearTimeout(timer);
+    // loadDocuments is stable per server; re-running on it would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   const scheduleDocumentsRefresh = useCallback(() => {
     if (listRefreshTimerRef.current !== null) window.clearTimeout(listRefreshTimerRef.current);
@@ -962,12 +978,26 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
           </Button>
         )}
       />
+      <div className="border-b px-6 py-2">
+        <Input
+          className="h-8"
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder={t("documents.searchPlaceholder")}
+          value={search}
+        />
+      </div>
       {documents.length === 0 ? (
         <Empty>
           <EmptyHeader>
             <EmptyMedia variant="icon"><FileText /></EmptyMedia>
-            <EmptyTitle>{t("documents.emptyTitle")}</EmptyTitle>
-            <EmptyDescription>{t("documents.emptyDescription")}</EmptyDescription>
+            <EmptyTitle>
+              {activeSearch ? t("documents.noMatches") : t("documents.emptyTitle")}
+            </EmptyTitle>
+            <EmptyDescription>
+              {activeSearch
+                ? t("documents.noMatchesDescription", { query: activeSearch })
+                : t("documents.emptyDescription")}
+            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (

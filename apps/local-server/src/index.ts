@@ -5073,6 +5073,42 @@ function localListWorkspaceDocuments(argsValue: unknown) {
   const args = (argsValue ?? {}) as Record<string, unknown>;
   const serverId = typeof args.server_uuid === "string" ? args.server_uuid : "";
   if (!serverId) throw new LocalRequestError(400, "server_uuid is required");
+  // The hosted function names this `search`; keep the two callable the same way.
+  const query = typeof args.search === "string" ? args.search.trim() : "";
+
+  if (query) {
+    // When the body is what matched, the excerpt should show why rather than
+    // the document's opening line, so it is cut around the hit.
+    const like = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
+    return db
+      .prepare(
+        `SELECT
+           document.id,
+           document.server_id,
+           document.title,
+           document.generated_by_agent_id,
+           document.created_at,
+           document.updated_at,
+           CASE
+             WHEN instr(lower(document.content), lower(?2)) > 0
+               THEN substr(
+                 document.content,
+                 max(1, instr(lower(document.content), lower(?2)) - 60),
+                 240
+               )
+             ELSE substr(document.content, 1, 240)
+           END AS excerpt,
+           length(document.content) AS content_length,
+           agent.display_name AS generator_name,
+           agent.avatar_url AS generator_avatar_url
+         FROM documents document
+         LEFT JOIN agents agent ON agent.id = document.generated_by_agent_id
+         WHERE document.server_id = ?1
+           AND (document.title LIKE ?3 ESCAPE '\\' OR document.content LIKE ?3 ESCAPE '\\')
+         ORDER BY document.updated_at DESC`
+      )
+      .all(serverId, query, like);
+  }
 
   return db
     .prepare(
