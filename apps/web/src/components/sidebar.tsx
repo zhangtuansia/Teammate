@@ -9,7 +9,7 @@ import { CreateServerDialog } from "./create-server-dialog";
 import { EditChannelDialog } from "./edit-channel-dialog";
 import { ContextMenu } from "./context-menu";
 import { useAgentActivity } from "@/hooks/use-agent-activity";
-import { useAppSettings } from "@/hooks/use-app-settings";
+import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
@@ -18,6 +18,7 @@ import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
+import { parseMessageTime } from "@/lib/message-time";
 
 interface Server {
   id: string;
@@ -44,6 +45,44 @@ interface Agent {
 
 interface DmChannel extends Channel {
   agent?: Agent;
+}
+
+/**
+ * Documents in the order they were last touched, cut into the buckets a person
+ * actually thinks in. Empty buckets are dropped so a young workspace does not
+ * show a column of headings with nothing under them.
+ */
+function groupDocumentsByAge(
+  documents: WorkspaceDocument[],
+  t: (key: TranslationKey) => string,
+) {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
+  const startOfWeek = startOfToday - 7 * 24 * 60 * 60 * 1000;
+
+  const buckets: Array<{ label: string; documents: WorkspaceDocument[] }> = [
+    { documents: [], label: t("documents.groupToday") },
+    { documents: [], label: t("documents.groupYesterday") },
+    { documents: [], label: t("documents.groupWeek") },
+    { documents: [], label: t("documents.groupOlder") },
+  ];
+
+  for (const document of documents) {
+    const at = parseMessageTime(document.updated_at)?.getTime();
+    const index = at === undefined
+      ? 3
+      : at >= startOfToday
+        ? 0
+        : at >= startOfYesterday
+          ? 1
+          : at >= startOfWeek
+            ? 2
+            : 3;
+    buckets[index].documents.push(document);
+  }
+
+  return buckets.filter((bucket) => bucket.documents.length > 0);
 }
 
 interface WorkspaceDocument {
@@ -1051,18 +1090,28 @@ export function Sidebar({
               </p>
             ) : (
               <div className="flex flex-col gap-1">
-                {documents.map((document) => (
-                  <Button
-                    key={document.id}
-                    variant="ghost"
-                    size="sm"
-                    className={`w-full justify-start ${activeDocumentId === document.id ? "bg-accent text-foreground" : "text-muted-foreground"}`}
-                    onClick={() => navigate(`/s/${serverSlug}/documents?document=${document.id}`)}
-                    aria-current={activeDocumentId === document.id ? "page" : undefined}
-                  >
-                    <FileTextIcon />
-                    <span className="truncate">{document.title || t("documents.untitled")}</span>
-                  </Button>
+                {groupDocumentsByAge(documents, t).map((group) => (
+                  <div className="flex flex-col gap-1" key={group.label}>
+                    {/* A flat list of every document tells you nothing about
+                        which ones are live work. Grouping by when they were
+                        last touched does. */}
+                    <span className="px-2 pt-2 text-[11px] font-medium text-muted-foreground/70">
+                      {group.label}
+                    </span>
+                    {group.documents.map((document) => (
+                      <Button
+                        key={document.id}
+                        variant="ghost"
+                        size="sm"
+                        className={`w-full justify-start ${activeDocumentId === document.id ? "bg-accent text-foreground" : "text-muted-foreground"}`}
+                        onClick={() => navigate(`/s/${serverSlug}/documents?document=${document.id}`)}
+                        aria-current={activeDocumentId === document.id ? "page" : undefined}
+                      >
+                        <FileTextIcon />
+                        <span className="truncate">{document.title || t("documents.untitled")}</span>
+                      </Button>
+                    ))}
+                  </div>
                 ))}
               </div>
             )}

@@ -1005,30 +1005,39 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         </Empty>
       ) : (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="mx-auto grid w-full max-w-4xl gap-3 p-6 sm:grid-cols-2 sm:p-8">
+          <div className="mx-auto w-full max-w-4xl px-6 py-4">
+            {/* A table, not a wall of cards: with more than a handful of
+                documents the columns are what let you find one. */}
+            <div className="grid grid-cols-[1fr_auto_auto] items-center gap-x-6 border-b px-2 pb-2 text-[11px] font-medium text-muted-foreground">
+              <span>{t("documents.columnTitle")}</span>
+              <span>{t("documents.columnOwner")}</span>
+              <span className="text-right">{t("documents.columnUpdated")}</span>
+            </div>
             {documents.map((document) => (
               // The whole card opens the document. It used to carry a separate
               // "open" button, which made the card itself dead space and asked
               // for a decision where there was only one thing to do.
               <button
-                className="group rounded-2xl border bg-card p-4 text-left transition-colors hover:border-muted-foreground/40 hover:bg-accent/40"
+                className="grid w-full grid-cols-[1fr_auto_auto] items-center gap-x-6 rounded-lg px-2 py-2 text-left hover:bg-accent/50"
                 key={document.id}
                 onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
                 type="button"
               >
-                <div className="flex items-start gap-2.5">
+                <span className="flex min-w-0 items-start gap-2.5">
                   <FileText className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                  <h2 className="min-w-0 flex-1 truncate text-[15px] font-bold leading-[22px]">
-                    {document.title || t("documents.untitled")}
-                  </h2>
-                </div>
-                {document.excerpt.trim() && (
-                  <p className="mt-1.5 line-clamp-2 pl-[26px] text-[13px] leading-[18px] text-muted-foreground">
-                    {documentPreview(document.excerpt)}
-                  </p>
-                )}
-                <div className="mt-2 flex items-center gap-1.5 pl-[26px] text-xs text-muted-foreground">
-                  {document.generatorName && document.generated_by_agent_id && (
+                  <span className="min-w-0">
+                    <span className="block truncate text-[15px] font-bold leading-[22px]">
+                      {document.title || t("documents.untitled")}
+                    </span>
+                    {document.excerpt.trim() && (
+                      <span className="mt-0.5 block truncate text-[13px] leading-[18px] text-muted-foreground">
+                        {documentPreview(document.excerpt)}
+                      </span>
+                    )}
+                  </span>
+                </span>
+                <span className="flex w-32 items-center gap-1.5 text-xs text-muted-foreground">
+                  {document.generatorName && document.generated_by_agent_id ? (
                     <>
                       <GeneratedAvatar
                         id={document.generated_by_agent_id}
@@ -1038,13 +1047,14 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                         size="xs"
                       />
                       <span className="truncate">{document.generatorName}</span>
-                      <span aria-hidden="true">·</span>
                     </>
+                  ) : (
+                    <span className="truncate">{t("documents.ownerYou")}</span>
                   )}
-                  <span className="shrink-0 tabular-nums">
-                    {formatDocumentDate(document.updated_at, t)}
-                  </span>
-                </div>
+                </span>
+                <span className="w-20 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                  {formatDocumentDate(document.updated_at, t)}
+                </span>
               </button>
             ))}
           </div>
