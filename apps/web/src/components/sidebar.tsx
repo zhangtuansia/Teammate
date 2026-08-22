@@ -979,7 +979,7 @@ export function Sidebar({
                     isActive
                       ? "bg-sanda-3 font-medium text-accent-foreground"
                       : pending
-                        ? "font-bold text-accent-foreground hover:bg-sanda-3"
+                        ? "font-black text-accent-foreground hover:bg-sanda-3"
                         : "text-muted-foreground hover:bg-sanda-3 hover:text-accent-foreground"
                   }`}
                   items={[
@@ -1001,7 +1001,7 @@ export function Sidebar({
                     <span className="truncate">{channel.name}</span>
                   </button>
                   {pending && pending.mentions > 0 && (
-                    <span className="mr-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-destructive px-1.5 text-[11px] font-bold text-destructive-foreground tabular-nums">
+                    <span className="mr-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-mention px-[5px] text-[10px] font-bold text-mention-foreground tabular-nums">
                       {pending.mentions > 99 ? '99+' : pending.mentions}
                     </span>
                   )}

@@ -53,6 +53,14 @@
   --sidebar-primary-foreground: var(--color-sand-1);
   --sidebar-ring: var(--color-sand-8);
 
+  /* Mention badge. Slack pairs a deep crimson fill with a pale tint rather
+     than the flat red-on-white that makes a badge shout and stay unreadable;
+     rose-700/rose-50 is that same relationship in Tailwind's palette. This is
+     its own pair because --destructive-foreground is a darker red for text on
+     ordinary surfaces, not a colour that can sit on a red fill. */
+  --mention: var(--color-rose-700);
+  --mention-foreground: var(--color-rose-50);
+
   /* Status colors (keep Tailwind built-in) */
   --destructive: var(--color-red-500);
   --destructive-foreground: var(--color-red-700);
@@ -119,6 +127,8 @@
   --color-input: var(--input);
   --color-foreground: var(--foreground);
   --color-destructive: var(--destructive);
+  --color-mention: var(--mention);
+  --color-mention-foreground: var(--mention-foreground);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
   --color-background: var(--background);
@@ -329,6 +339,10 @@
 }
 
 .dark {
+  /* Slightly lighter fill so the badge keeps its weight against a dark
+     sidebar without turning into a glowing dot. */
+  --mention: var(--color-rose-600);
+  --mention-foreground: var(--color-rose-50);
   --destructive-foreground: var(--color-red-400);
   --info: var(--color-blue-500);
   --info-foreground: var(--color-blue-400);
