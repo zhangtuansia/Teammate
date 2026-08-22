@@ -3305,6 +3305,7 @@ function readAppSettings() {
     defaultThinkingLevel: normalizeThinkingLevel(values.get("default_thinking_level")),
     showActivityDetails: values.get("show_activity_details") !== "false",
     messageSounds: values.get("message_sounds") !== "false",
+    documentEditor: values.get("document_editor") === "source" ? "source" : "rich",
   };
 }
 
@@ -5281,6 +5282,7 @@ async function handleSettingsRequest(request: IncomingMessage, response: ServerR
     defaultThinkingLevel?: string;
     showActivityDetails?: boolean;
     messageSounds?: boolean;
+    documentEditor?: string;
   };
   const updates: Array<[string, string]> = [];
 
@@ -5307,6 +5309,12 @@ async function handleSettingsRequest(request: IncomingMessage, response: ServerR
       return sendJson(response, 400, { error: "Invalid message sound setting" });
     }
     updates.push(["message_sounds", String(body.messageSounds)]);
+  }
+  if (body.documentEditor !== undefined) {
+    if (body.documentEditor !== "rich" && body.documentEditor !== "source") {
+      return sendJson(response, 400, { error: "Invalid document editor setting" });
+    }
+    updates.push(["document_editor", body.documentEditor]);
   }
   if (body.defaultThinkingLevel !== undefined) {
     if (!isThinkingLevel(body.defaultThinkingLevel)) {

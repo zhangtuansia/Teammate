@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { parseMessageTime } from "@/lib/message-time";
+import { apiUrl } from "@/lib/api-url";
 import { documentPreview } from "@/lib/document-preview";
 import { canEditAsRichText } from "@/lib/markdown-round-trip";
 import { DocumentEditor } from "@/components/document-editor";
@@ -231,7 +232,7 @@ function SectionHeader({ title, description, action }: {
 }
 
 function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSlug: string }) {
-  const { t } = useAppSettings();
+  const { settings, t, updateSettings } = useAppSettings();
   const router = useRouter();
   const searchParams = useSearchParams();
   const documentId = searchParams.get("document");
@@ -535,6 +536,22 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const detailLoading = Boolean(documentId) && !currentDetailSnapshot &&
     (currentDetailLoadState?.loading ?? true);
 
+  const useRichText = richTextEditable && settings.documentEditor !== "source";
+
+  // The context's updater only moves local state; the settings page persists
+  // through its own form, so a preference set from here writes itself.
+  const chooseDocumentEditor = useCallback(
+    (mode: "rich" | "source") => {
+      updateSettings?.({ ...settings, documentEditor: mode });
+      void fetch(apiUrl("/api/settings"), {
+        body: JSON.stringify({ documentEditor: mode }),
+        headers: { "Content-Type": "application/json" },
+        method: "PUT",
+      }).catch(() => undefined);
+    },
+    [settings, updateSettings],
+  );
+
   useEffect(() => {
     if (selectedDocument?.id === draftId && dirty) return;
     let cancelled = false;
@@ -797,6 +814,31 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
           }
           action={(
             <div className="flex items-center gap-1">
+              {/* Both modes write the same Markdown; this is a preference for
+                  how you would rather see it, and it is remembered. */}
+              <div className="mr-1 flex items-center rounded-lg bg-accent/60 p-0.5">
+                {(["rich", "source"] as const).map((mode) => (
+                  <button
+                    aria-pressed={useRichText === (mode === "rich")}
+                    className={`rounded-[6px] px-2 py-1 text-[12px] transition-colors disabled:opacity-40 ${
+                      useRichText === (mode === "rich")
+                        ? "bg-card text-foreground shadow-[0_0_0_1px_var(--border)]"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    disabled={mode === "rich" && !richTextEditable}
+                    key={mode}
+                    onClick={() => chooseDocumentEditor(mode)}
+                    title={
+                      mode === "rich" && !richTextEditable
+                        ? t("documents.editModeLocked")
+                        : undefined
+                    }
+                    type="button"
+                  >
+                    {mode === "rich" ? t("documents.editRich") : t("documents.editSource")}
+                  </button>
+                ))}
+              </div>
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -840,7 +882,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
               placeholder={t("documents.untitled")}
               value={title}
             />
-            {richTextEditable ? (
+            {useRichText ? (
               <DocumentEditor
                 content={content}
                 onChange={(markdown) => {
@@ -851,7 +893,9 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
               />
             ) : (
               <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">{t("documents.sourceOnly")}</p>
+                {!richTextEditable && (
+                  <p className="text-xs text-muted-foreground">{t("documents.editModeLocked")}</p>
+                )}
                 <Textarea
                   className="min-h-[55vh] resize-none border-0 bg-transparent p-0 font-mono text-[13px] leading-[20px] shadow-none focus-visible:ring-0"
                   onChange={(event) => {
