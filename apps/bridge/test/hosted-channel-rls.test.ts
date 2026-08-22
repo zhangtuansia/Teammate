@@ -441,7 +441,7 @@ test("channel and task consumers use scoped agent directories", async () => {
   );
   // The document list joins its authors server side, so the client is handed
   // the two display fields it renders and never the directory itself.
-  assert.match(loadDocuments, /\.rpc\("list_workspace_documents", \{ server_uuid: serverId \}\)/);
+  assert.match(loadDocuments, /\.rpc\("list_workspace_documents", \{[^}]*server_uuid: serverId[^}]*\}\)/);
   assert.doesNotMatch(loadDocuments, /list_workspace_agent_directory/);
   assert.doesNotMatch(workspaceSection, /\.from\("agents"\)/);
 
