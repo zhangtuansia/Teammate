@@ -189,10 +189,11 @@ const DayDivider = memo(function DayDivider({
   label: string;
 }) {
   return (
-    // -top-4 cancels the scroller's own top padding: sticky offsets resolve
-    // against the padding edge, so top-0 would pin the band 16px down and leave
-    // a sliver of half-scrolled text above it.
-    <div className="sticky -top-4 z-20 mt-4 flex justify-center bg-card px-5 pt-5 pb-1.5 first:mt-0">
+    // The row is deliberately shorter than the pill it holds, so the marker
+    // costs almost no vertical space and the transcript keeps its rhythm. The
+    // margins below reserve just enough room for the overflow in the unpinned
+    // position; once pinned, text passes behind the pill, which is opaque.
+    <div className="sticky top-0 z-20 mt-4 mb-6 flex h-[9px] justify-center first:mt-1">
       <time
         className="h-7 rounded-full bg-card px-4 text-[13px] font-bold leading-7 text-foreground shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]"
         dateTime={date}
