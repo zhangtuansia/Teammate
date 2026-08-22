@@ -39,6 +39,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { SafeMarkdown } from '@/components/ui/safe-markdown';
+import { LinkPreviewCard, extractLinks } from '@/components/ui/link-preview';
 import { ThinkingIndicator } from '@/components/ui/thinking-indicator';
 import { GeneratedAvatar } from './generated-avatar';
 import { ThreadPanel } from './thread-panel';
@@ -707,6 +708,9 @@ const MessageRow = memo(function MessageRow({
                   {editedLabel}
                 </span>
               )}
+              {extractLinks(message.content).map((link) => (
+                <LinkPreviewCard key={link} url={link} />
+              ))}
             </>
           )}
         </div>

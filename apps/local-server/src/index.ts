@@ -18,6 +18,7 @@ import {
   CodexOAuthRefreshCoordinator,
   loginOpenAICodex,
 } from "./chatgpt-oauth.js";
+import { fetchLinkPreview } from "./link-preview.js";
 import {
   EncryptedCredentialStore,
   type StoredCredential,
@@ -462,6 +463,9 @@ function requireHumanPrincipal(principal: LocalPrincipal) {
   }
   return principal;
 }
+
+/** A page's title and blurb do not change often; a day is plenty. */
+const LINK_PREVIEW_TTL_MS = 24 * 60 * 60 * 1000;
 
 const QUERY_ACTIONS = new Set<QueryRequest["action"]>([
   "select",
@@ -1201,6 +1205,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_local_messages_channel_seq
     ON messages(channel_id, seq DESC);
 
+  CREATE TABLE IF NOT EXISTS link_previews (
+    url TEXT PRIMARY KEY,
+    title TEXT,
+    description TEXT,
+    site_name TEXT,
+    image_url TEXT,
+    failed_reason TEXT,
+    fetched_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS channel_read_state (
     user_id TEXT NOT NULL,
     channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
@@ -1546,6 +1560,60 @@ async function dispatchLocalRequest(
         ok: true,
         mode: "local",
       });
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/link-preview") {
+      // Humans only. An agent asking this service to fetch a URL would turn the
+      // preview cache into a way to make outbound requests on demand; agents
+      // that need a page can fetch it themselves in their own workspace.
+      requireHumanPrincipal(authenticateLocalRequest(request));
+      const body = await readJson(request);
+      const target = typeof (body as { url?: unknown })?.url === "string"
+        ? (body as { url: string }).url
+        : "";
+      if (!target) throw new LocalRequestError(400, "A url is required");
+
+      const cached = db
+        .prepare("SELECT * FROM link_previews WHERE url = ?")
+        .get(target) as DbRow | undefined;
+      const freshEnough =
+        cached &&
+        Date.now() - Date.parse(String(cached.fetched_at)) < LINK_PREVIEW_TTL_MS;
+      if (freshEnough) {
+        return sendJson(response, 200, cached.failed_reason ? { preview: null } : { preview: cached });
+      }
+
+      const now = new Date().toISOString();
+      try {
+        const preview = await fetchLinkPreview(target);
+        db.prepare(
+          `INSERT INTO link_previews (url, title, description, site_name, image_url, failed_reason, fetched_at)
+             VALUES (?, ?, ?, ?, ?, NULL, ?)
+           ON CONFLICT(url) DO UPDATE SET
+             title = excluded.title, description = excluded.description,
+             site_name = excluded.site_name, image_url = excluded.image_url,
+             failed_reason = NULL, fetched_at = excluded.fetched_at`
+        ).run(
+          target,
+          preview.title,
+          preview.description,
+          preview.siteName,
+          preview.imageUrl,
+          now,
+        );
+        return sendJson(response, 200, { preview: { ...preview, url: target } });
+      } catch (error) {
+        // A failure is cached too, so one unreachable link is not re-fetched
+        // every time the transcript renders.
+        const reason = error instanceof Error ? error.message : "Preview failed";
+        db.prepare(
+          `INSERT INTO link_previews (url, title, description, site_name, image_url, failed_reason, fetched_at)
+             VALUES (?, NULL, NULL, NULL, NULL, ?, ?)
+           ON CONFLICT(url) DO UPDATE SET
+             failed_reason = excluded.failed_reason, fetched_at = excluded.fetched_at`
+        ).run(target, reason, now);
+        return sendJson(response, 200, { preview: null });
+      }
     }
 
     if (request.method === "POST" && url.pathname === "/api/attachments") {

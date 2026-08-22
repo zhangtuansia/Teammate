@@ -7,6 +7,7 @@ import {
 } from "../../web/src/lib/agent-runtime.ts";
 import { parseRuntimeError } from "../../web/src/lib/runtime-error.ts";
 import { formatMessageClock, parseMessageTime } from "../../web/src/lib/message-time.ts";
+import { isBlockedAddress, parseLinkMetadata } from "../../local-server/src/link-preview.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -185,4 +186,52 @@ test("message timestamps parse the same way on every engine", () => {
   assert.equal(parseMessageTime(""), null);
   assert.equal(parseMessageTime(null), null);
   assert.equal(formatMessageClock("2026-08-21T10:16:50.3NZ"), "");
+});
+
+test("link previews refuse to reach anything but the public internet", () => {
+  // Fetching a URL out of a message means this machine makes the request, so
+  // the only addresses worth reaching are ones any stranger could reach too.
+  for (const address of [
+    "127.0.0.1",
+    "0.0.0.0",
+    "10.1.2.3",
+    "172.16.0.1",
+    "172.31.255.255",
+    "192.168.1.1",
+    "169.254.169.254", // cloud metadata
+    "100.64.0.1", // carrier-grade NAT
+    "224.0.0.1",
+    "::1",
+    "fe80::1",
+    "fd00::1",
+    "::ffff:127.0.0.1", // a v4 loopback wearing a v6 hat
+    "not-an-address",
+  ]) {
+    assert.equal(isBlockedAddress(address), true, `${address} must be refused`);
+  }
+
+  for (const address of ["1.1.1.1", "93.184.216.34", "2606:2800:220:1::1"]) {
+    assert.equal(isBlockedAddress(address), false, `${address} should be reachable`);
+  }
+});
+
+test("link metadata prefers Open Graph and falls back to the title tag", () => {
+  const og = parseLinkMetadata(
+    "https://example.com/a",
+    `<html><head><title>Ignored</title>
+     <meta property="og:title" content="Real &amp; proper title">
+     <meta property="og:description" content="A blurb">
+     <meta property="og:site_name" content="Example">
+     </head></html>`,
+  );
+  assert.equal(og.title, "Real & proper title");
+  assert.equal(og.description, "A blurb");
+  assert.equal(og.siteName, "Example");
+
+  const bare = parseLinkMetadata(
+    "https://example.com/b",
+    "<html><head><title>Just a title</title></head></html>",
+  );
+  assert.equal(bare.title, "Just a title");
+  assert.equal(bare.description, null);
 });
