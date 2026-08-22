@@ -5039,6 +5039,10 @@ async function handleRpcRequest(
     case "record_channel_seen":
       data = localRecordChannelSeen(args);
       break;
+    case "list_workspace_documents":
+      requireHumanPrincipal(principal);
+      data = localListWorkspaceDocuments(args);
+      break;
     case "channel_unread_counts":
       requireHumanPrincipal(principal);
       data = localChannelUnreadCounts(args);
@@ -5058,6 +5062,38 @@ async function handleRpcRequest(
  * sidebar asks for every channel at once, and a query per channel would make
  * opening the app quadratic in channels.
  */
+/**
+ * The document list, with a short excerpt and the writing agent already
+ * attached. The excerpt is cut in SQL rather than client-side so a list view
+ * never pulls whole documents across just to render two lines of preview, and
+ * the agent join saves the round trip the caller used to make separately.
+ */
+function localListWorkspaceDocuments(argsValue: unknown) {
+  const args = (argsValue ?? {}) as Record<string, unknown>;
+  const serverId = typeof args.server_uuid === "string" ? args.server_uuid : "";
+  if (!serverId) throw new LocalRequestError(400, "server_uuid is required");
+
+  return db
+    .prepare(
+      `SELECT
+         document.id,
+         document.server_id,
+         document.title,
+         document.generated_by_agent_id,
+         document.created_at,
+         document.updated_at,
+         substr(document.content, 1, 240) AS excerpt,
+         length(document.content) AS content_length,
+         agent.display_name AS generator_name,
+         agent.avatar_url AS generator_avatar_url
+       FROM documents document
+       LEFT JOIN agents agent ON agent.id = document.generated_by_agent_id
+       WHERE document.server_id = ?
+       ORDER BY document.updated_at DESC`
+    )
+    .all(serverId);
+}
+
 function localChannelUnreadCounts(argsValue: unknown) {
   const args = (argsValue ?? {}) as Record<string, unknown>;
   const serverId = typeof args.server_uuid === "string" ? args.server_uuid : "";

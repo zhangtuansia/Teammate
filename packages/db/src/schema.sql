@@ -972,6 +972,52 @@ $$ language sql security definer stable set search_path = public, pg_temp;
 
 -- Human workspace members can discover agents without gaining SELECT access
 -- to runtime credentials, prompts, sessions, or owner identity fields.
+-- The document list with a short excerpt and the writing agent attached. The
+-- excerpt is cut here so a list view never pulls whole documents across just
+-- to render two lines of preview.
+create or replace function public.list_workspace_documents(server_uuid uuid)
+returns table (
+  id uuid,
+  server_id uuid,
+  title text,
+  generated_by_agent_id uuid,
+  created_at timestamptz,
+  updated_at timestamptz,
+  excerpt text,
+  content_length integer,
+  generator_name text,
+  generator_avatar_url text
+) as $$
+begin
+  if not public.teammate_is_human_session() or not exists (
+    select 1
+    from public.server_members viewer_membership
+    where viewer_membership.server_id = server_uuid
+      and viewer_membership.member_id = auth.uid()
+      and viewer_membership.member_type = 'human'
+  ) then
+    raise exception using errcode = '42501', message = 'Workspace access denied';
+  end if;
+
+  return query
+  select
+    document.id,
+    document.server_id,
+    document.title,
+    document.generated_by_agent_id,
+    document.created_at,
+    document.updated_at,
+    left(document.content, 240),
+    char_length(document.content),
+    agent.display_name,
+    agent.avatar_url
+  from public.documents document
+  left join public.agents agent on agent.id = document.generated_by_agent_id
+  where document.server_id = server_uuid
+  order by document.updated_at desc;
+end;
+$$ language plpgsql security definer set search_path = public;
+
 create or replace function public.list_workspace_agent_directory(server_uuid uuid)
 returns table (
   id uuid,
@@ -2811,6 +2857,7 @@ revoke all on function public.teammate_bridge_session_matches_server(uuid) from 
 revoke all on function public.touch_current_bridge_machine_key() from public;
 revoke all on function public.user_is_server_human_member(uuid) from public;
 revoke all on function public.list_workspace_agent_directory(uuid) from public;
+revoke all on function public.list_workspace_documents(uuid) from public;
 revoke all on function public.list_workspace_human_members(uuid) from public;
 revoke all on function public.user_is_channel_member(uuid) from public;
 revoke all on function public.user_has_agent_in_channel(uuid) from public;
@@ -2852,6 +2899,7 @@ grant execute on function public.teammate_bridge_session_matches_server(uuid) to
 grant execute on function public.touch_current_bridge_machine_key() to authenticated;
 grant execute on function public.user_is_server_human_member(uuid) to authenticated;
 grant execute on function public.list_workspace_agent_directory(uuid) to authenticated;
+grant execute on function public.list_workspace_documents(uuid) to authenticated;
 grant execute on function public.user_is_channel_member(uuid) to authenticated;
 grant execute on function public.user_has_agent_in_channel(uuid) to authenticated;
 grant execute on function public.user_owns_agent_in_channel(uuid, uuid) to authenticated;

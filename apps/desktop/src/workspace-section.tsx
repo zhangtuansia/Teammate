@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { parseMessageTime } from "@/lib/message-time";
+import { documentPreview } from "@/lib/document-preview";
 import { ArrowRight, CheckCircle2, Circle, Clock3, FileText, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
@@ -149,9 +150,19 @@ function formatDocumentDate(iso: string, t: (key: TranslationKey) => string) {
   });
 }
 
+/** The shape list_workspace_documents returns, before it is renamed. */
+interface WorkspaceDocumentSummaryRow extends WorkspaceDocumentSummaryRecord {
+  excerpt: string | null;
+  content_length: number | null;
+  generator_name: string | null;
+  generator_avatar_url: string | null;
+}
+
 interface WorkspaceDocumentSummaryViewModel extends WorkspaceDocumentSummaryRecord {
   generatorName: string | null;
   generatorAvatarUrl: string | null;
+  excerpt: string;
+  content_length: number;
 }
 
 interface WorkspaceDocumentViewModel extends WorkspaceDocumentRecord {
@@ -282,45 +293,28 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
 
     const client = createClient();
     try {
+      // One statement: the excerpt is cut and the writing agent joined server
+      // side, so the list neither pulls whole documents nor makes a second
+      // round trip for the directory.
       const { data, error: queryError } = await client
-        .from("documents")
-        .select("id, server_id, title, generated_by_agent_id, created_at, updated_at")
-        .eq("server_id", serverId)
-        .order("updated_at", { ascending: false })
+        .rpc("list_workspace_documents", { server_uuid: serverId })
         .abortSignal(requestController.signal);
       if (requestController.signal.aborted) throw new Error("Request aborted");
       if (queryError) throw new Error(queryError.message);
       if (!isCurrent()) return;
 
-      const records = (data || []) as WorkspaceDocumentSummaryRecord[];
-      const generatorIds = Array.from(new Set(
-        records.flatMap((document) => document.generated_by_agent_id || []),
-      ));
-      const generatorsResult = generatorIds.length > 0
-        ? await client.rpc("list_workspace_agent_directory", {
-            server_uuid: serverId,
-          }).abortSignal(requestController.signal)
-        : { data: [], error: null };
-      if (requestController.signal.aborted) throw new Error("Request aborted");
-      if (generatorsResult.error) throw new Error(generatorsResult.error.message);
-      if (!isCurrent()) return;
-
-      const generatorIdSet = new Set(generatorIds);
-      const generators = new Map(
-        ((generatorsResult.data || []) as AgentRecord[])
-          .filter((agent) => generatorIdSet.has(agent.id))
-          .map((agent) => [agent.id, agent]),
-      );
-      const documents = records.map((document) => {
-        const generator = document.generated_by_agent_id
-          ? generators.get(document.generated_by_agent_id)
-          : null;
-        return {
-          ...document,
-          generatorName: generator?.display_name || null,
-          generatorAvatarUrl: generator?.avatar_url || null,
-        };
-      });
+      const documents = ((data || []) as WorkspaceDocumentSummaryRow[]).map((document) => ({
+        content_length: Number(document.content_length ?? 0),
+        created_at: document.created_at,
+        excerpt: document.excerpt || "",
+        generated_by_agent_id: document.generated_by_agent_id,
+        generatorAvatarUrl: document.generator_avatar_url || null,
+        generatorName: document.generator_name || null,
+        id: document.id,
+        server_id: document.server_id,
+        title: document.title,
+        updated_at: document.updated_at,
+      }));
       const nextSnapshot = { serverId, documents };
       documentIdsRef.current = new Set(documents.map((document) => document.id));
       listSnapshotRef.current = nextSnapshot;
@@ -939,6 +933,11 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                     {document.title || t("documents.untitled")}
                   </h2>
                 </div>
+                {document.excerpt.trim() && (
+                  <p className="mt-1.5 line-clamp-2 pl-[26px] text-[13px] leading-[18px] text-muted-foreground">
+                    {documentPreview(document.excerpt)}
+                  </p>
+                )}
                 <div className="mt-2 flex items-center gap-1.5 pl-[26px] text-xs text-muted-foreground">
                   {document.generatorName && document.generated_by_agent_id && (
                     <>

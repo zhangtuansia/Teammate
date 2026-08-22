@@ -433,13 +433,30 @@ test("channel and task consumers use scoped agent directories", async () => {
   assert.match(loadTasks, /mentionName: agent\.name/);
   assert.match(loadTasks, /membershipRecords/);
 
+  // Bounded at the detail loader: that one still resolves a single document's
+  // author through the scoped directory, which is the right call for one row.
   const loadDocuments = workspaceSection.slice(
     workspaceSection.indexOf("const loadDocuments = useCallback"),
-    workspaceSection.indexOf("const scheduleDocumentsRefresh"),
+    workspaceSection.indexOf("const loadDocument = useCallback"),
   );
-  assert.match(loadDocuments, /list_workspace_agent_directory/g);
-  assert.match(loadDocuments, /generatorIdSet/);
+  // The document list joins its authors server side, so the client is handed
+  // the two display fields it renders and never the directory itself.
+  assert.match(loadDocuments, /\.rpc\("list_workspace_documents", \{ server_uuid: serverId \}\)/);
+  assert.doesNotMatch(loadDocuments, /list_workspace_agent_directory/);
   assert.doesNotMatch(workspaceSection, /\.from\("agents"\)/);
+
+  for (const sql of [schema, finalRls]) {
+    if (!sql.includes("list_workspace_documents")) continue;
+    const documents = sqlFunction(sql, "list_workspace_documents");
+    // A list view needs a name and a face, not the agent's owner or its
+    // configuration, and an excerpt rather than every document's full text.
+    assert.match(documents, /agent\.display_name/i);
+    assert.match(documents, /agent\.avatar_url/i);
+    assert.doesNotMatch(documents, /agent\.owner_id/i);
+    assert.doesNotMatch(documents, /agent\.system_prompt/i);
+    assert.match(documents, /left\(document\.content, \d+\)/i);
+    assert.match(documents, /teammate_is_human_session/i);
+  }
 });
 
 test("hosted realtime separates browser and bridge session capabilities", async () => {

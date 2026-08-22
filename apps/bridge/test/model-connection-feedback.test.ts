@@ -9,6 +9,7 @@ import { parseRuntimeError } from "../../web/src/lib/runtime-error.ts";
 import { formatMessageClock, parseMessageTime } from "../../web/src/lib/message-time.ts";
 import { isBlockedAddress, parseLinkMetadata } from "../../local-server/src/link-preview.ts";
 import { remarkChatBreaks, type MdastNode } from "../../web/src/lib/markdown-breaks.ts";
+import { documentPreview } from "../../web/src/lib/document-preview.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -261,4 +262,24 @@ test("a newline in a message is a line break, except inside code", () => {
   // Code keeps its newlines: they are content, not layout.
   assert.equal(tree.children![1].value, "const a = 1;\nconst b = 2;");
   assert.equal(tree.children![2].children![0].value, "a\nb");
+});
+
+test("a document preview reads as prose, not as markup", () => {
+  const preview = documentPreview(
+    "# 下周排期\n\n- 周一：需求评审\n- 周三：设计评审\n\n有 **冲突** 提前说。",
+  );
+  assert.equal(preview, "下周排期 · 周一：需求评审 · 周三：设计评审 · 有 冲突 提前说。");
+
+  // A code fence says less about the document than its prose does.
+  assert.equal(
+    documentPreview("部署步骤\n```bash\nrm -rf /\n```\n完成后通知我"),
+    "部署步骤 · 完成后通知我",
+  );
+
+  // Links keep their text; the URL is unreadable at this size.
+  assert.equal(documentPreview("见 [排期表](https://example.com/a)"), "见 排期表");
+
+  // Rules and table separators carry nothing to read.
+  assert.equal(documentPreview("标题\n---\n正文"), "标题 · 正文");
+  assert.equal(documentPreview(""), "");
 });
