@@ -5039,6 +5039,10 @@ async function handleRpcRequest(
     case "record_channel_seen":
       data = localRecordChannelSeen(args);
       break;
+    case "channel_unread_counts":
+      requireHumanPrincipal(principal);
+      data = localChannelUnreadCounts(args);
+      break;
     case "claim_task_nudge":
       data = localClaimTaskNudge(args);
       break;
@@ -5046,6 +5050,56 @@ async function handleRpcRequest(
       throw new LocalRequestError(404, "Unknown local RPC");
   }
   return sendJson(response, 200, { data, error: null, count: null });
+}
+
+/**
+ * What each channel owes this person: how many messages they have not read,
+ * and how many of those said their name. Computed in one statement because the
+ * sidebar asks for every channel at once, and a query per channel would make
+ * opening the app quadratic in channels.
+ */
+function localChannelUnreadCounts(argsValue: unknown) {
+  const args = (argsValue ?? {}) as Record<string, unknown>;
+  const serverId = typeof args.server_uuid === "string" ? args.server_uuid : "";
+  if (!serverId) throw new LocalRequestError(400, "server_uuid is required");
+  const displayName = typeof args.display_name === "string" ? args.display_name : "";
+
+  const rows = db
+    .prepare(
+      `SELECT
+         channel.id AS channel_id,
+         count(message.id) AS unread,
+         coalesce(sum(
+           CASE WHEN ?2 <> '' AND lower(message.content) LIKE lower('%@' || ?2 || '%')
+                THEN 1 ELSE 0 END
+         ), 0) AS mentions
+       FROM channels channel
+       JOIN channel_members membership
+         ON membership.channel_id = channel.id
+        AND membership.member_id = ?3
+        AND membership.member_type = 'human'
+       LEFT JOIN channel_read_state readState
+         ON readState.channel_id = channel.id
+        AND readState.user_id = ?3
+       LEFT JOIN messages message
+         ON message.channel_id = channel.id
+        AND message.seq > coalesce(readState.last_read_seq, 0)
+        AND message.sender_id <> ?3
+        AND message.thread_parent_id IS NULL
+       WHERE channel.server_id = ?1
+       GROUP BY channel.id`
+    )
+    .all(serverId, displayName, LOCAL_USER_ID) as Array<{
+      channel_id: string;
+      unread: number;
+      mentions: number;
+    }>;
+
+  return rows.map((row) => ({
+    channel_id: row.channel_id,
+    mentions: Number(row.mentions),
+    unread: Number(row.unread),
+  }));
 }
 
 function authorizeLocalRpc(

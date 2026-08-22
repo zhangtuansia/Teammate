@@ -8,6 +8,7 @@ import {
 import { parseRuntimeError } from "../../web/src/lib/runtime-error.ts";
 import { formatMessageClock, parseMessageTime } from "../../web/src/lib/message-time.ts";
 import { isBlockedAddress, parseLinkMetadata } from "../../local-server/src/link-preview.ts";
+import { remarkChatBreaks, type MdastNode } from "../../web/src/lib/markdown-breaks.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -234,4 +235,30 @@ test("link metadata prefers Open Graph and falls back to the title tag", () => {
   );
   assert.equal(bare.title, "Just a title");
   assert.equal(bare.description, null);
+});
+
+test("a newline in a message is a line break, except inside code", () => {
+  // Shift+Enter has to survive the round trip. CommonMark folds a single
+  // newline into a space, which turned a two-line message into a run-on line.
+  const tree: MdastNode = {
+    type: "root",
+    children: [
+      { type: "paragraph", children: [{ type: "text", value: "first\nsecond" }] },
+      { type: "code", value: "const a = 1;\nconst b = 2;" },
+      { type: "paragraph", children: [{ type: "inlineCode", value: "a\nb" }] },
+    ],
+  };
+  remarkChatBreaks()(tree);
+
+  const paragraph = tree.children![0];
+  assert.deepEqual(
+    paragraph.children!.map((child) => child.type),
+    ["text", "break", "text"],
+  );
+  assert.equal(paragraph.children![0].value, "first");
+  assert.equal(paragraph.children![2].value, "second");
+
+  // Code keeps its newlines: they are content, not layout.
+  assert.equal(tree.children![1].value, "const a = 1;\nconst b = 2;");
+  assert.equal(tree.children![2].children![0].value, "a\nb");
 });

@@ -14,6 +14,7 @@ import {
 import { Children, useEffect, useState, type ComponentProps } from "react";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { remarkChatBreaks } from "@/lib/markdown-breaks";
 import { apiUrl } from "@/lib/api-url";
 import { isLocalAttachmentPath } from "@/lib/local-auth";
 
@@ -365,6 +366,7 @@ const MENTION_COMPONENTS = {
   p: MentionParagraph,
 };
 
+
 export function SafeMarkdown({
   children,
   mentions = false,
@@ -377,7 +379,7 @@ export function SafeMarkdown({
   return (
     <ReactMarkdown
       components={mentions ? MENTION_COMPONENTS : BASE_COMPONENTS}
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkChatBreaks]}
       skipHtml
     >
       {children}

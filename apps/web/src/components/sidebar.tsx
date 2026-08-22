@@ -132,6 +132,7 @@ export function Sidebar({
   const currentChannelIdsRef = useRef<Set<string>>(new Set());
   const currentDocumentIdsRef = useRef<Set<string>>(new Set());
   const currentUserIdRef = useRef("");
+  const [unread, setUnread] = useState<Map<string, { mentions: number; unread: number }>>(new Map());
   const workspaceViewRef = useRef<"home" | "documents" | "tasks" | "settings">("home");
   const sidebarRefreshRef = useRef<ReturnType<typeof createTrailingRefreshScheduler> | null>(null);
   const loadRetryAttemptRef = useRef(0);
@@ -496,6 +497,43 @@ export function Sidebar({
       if (sidebarRefreshRef.current === refresh) sidebarRefreshRef.current = null;
     };
   }, [loadData]);
+
+  // What each channel owes you. Kept beside the channel list rather than in it
+  // so a count landing does not re-run the whole sidebar load.
+  const loadUnread = useCallback(async () => {
+    if (!serverId) return;
+    const { data, error } = await supabase.rpc("channel_unread_counts", {
+      display_name: userName,
+      server_uuid: serverId,
+    });
+    if (error || !Array.isArray(data)) return;
+    const next = new Map<string, { mentions: number; unread: number }>();
+    for (const row of data as Array<{ channel_id: string; mentions: number; unread: number }>) {
+      if (row.unread > 0) next.set(row.channel_id, { mentions: row.mentions, unread: row.unread });
+    }
+    setUnread(next);
+  }, [serverId, supabase, userName]);
+
+  useEffect(() => {
+    if (!serverId) return;
+    const refresh = createTrailingRefreshScheduler(loadUnread, 200);
+    void refresh.runNow();
+    // A new message anywhere in the workspace, or reading one, changes what the
+    // sidebar owes you. Both arrive as ordinary table events.
+    const subscription = supabase
+      .channel(`sidebar-unread:${serverId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () =>
+        refresh.schedule(),
+      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "channel_read_state" }, () =>
+        refresh.schedule(),
+      )
+      .subscribe();
+    return () => {
+      refresh.cancel();
+      void supabase.removeChannel(subscription);
+    };
+  }, [loadUnread, serverId, supabase]);
 
   const refreshSidebarNow = useCallback(
     () => sidebarRefreshRef.current?.runNow() ?? Promise.resolve(),
@@ -930,13 +968,19 @@ export function Sidebar({
             <div className="flex flex-col gap-[2px]">
               {groupChannels.map((channel) => {
               const isActive = activeChannelId === channel.id;
+              // Slack's rule: a channel with something waiting reads at full
+              // strength and in bold; the badge is reserved for messages that
+              // said your name, because those are the ones that need you.
+              const pending = isActive ? undefined : unread.get(channel.id);
               return (
                 <ContextMenu
                   key={channel.id}
                   className={`group flex h-[32px] w-full items-center rounded-lg text-[13px] transition-all ${
                     isActive
                       ? "bg-sanda-3 font-medium text-accent-foreground"
-                      : "text-muted-foreground hover:bg-sanda-3 hover:text-accent-foreground"
+                      : pending
+                        ? "font-bold text-accent-foreground hover:bg-sanda-3"
+                        : "text-muted-foreground hover:bg-sanda-3 hover:text-accent-foreground"
                   }`}
                   items={[
                     {
@@ -951,9 +995,16 @@ export function Sidebar({
                     onClick={() => navigateToChannel(channel)}
                     className="flex min-w-0 flex-1 items-center gap-2 px-2 text-left"
                   >
-                    <span className="text-muted-foreground">#</span>
+                    <span className={pending ? "text-accent-foreground" : "text-muted-foreground"}>
+                      #
+                    </span>
                     <span className="truncate">{channel.name}</span>
                   </button>
+                  {pending && pending.mentions > 0 && (
+                    <span className="mr-1 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-destructive px-1.5 text-[11px] font-bold text-destructive-foreground tabular-nums">
+                      {pending.mentions > 99 ? '99+' : pending.mentions}
+                    </span>
+                  )}
                   <Button
                     type="button"
                     variant="ghost"
