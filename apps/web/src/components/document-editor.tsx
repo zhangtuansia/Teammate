@@ -8,6 +8,7 @@ import Placeholder from "@tiptap/extension-placeholder";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { Markdown } from "@tiptap/markdown";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
+import { DocumentImage } from "@/components/document-image";
 import {
   collapseBlankLines,
   tightenMarkdownLists,
@@ -153,6 +154,9 @@ export function DocumentEditor({
       // Tables are a normal part of a work document, and the official Markdown
       // extension lets each node say how it serialises, so a table an agent
       // wrote now survives being opened and saved.
+      // Without an image node the editor silently drops pictures, which now
+      // matters on every open rather than only when someone chose to edit.
+      DocumentImage,
       Table.configure({ resizable: false }),
       TableRow,
       TableHeader,

@@ -266,7 +266,8 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const saveTimerRef = useRef<number | null>(null);
   // Decided from what was loaded, not from what is being typed: a document that
   // opened as source stays source for the session rather than switching editors
   // under the author the moment they delete the last table row.
@@ -545,7 +546,6 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         setTitle("");
         setContent("");
         setDirty(false);
-        setEditing(false);
         setError("");
         return;
       }
@@ -556,7 +556,6 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       setRichTextEditable(canEditAsRichText(selectedDocument.content));
       setDirty(false);
       if (selectedDocument.id !== draftId) {
-        setEditing(false);
         setError("");
       }
     });
@@ -600,10 +599,15 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         return;
       }
       if (!updatedDocument) {
-        setError(t("documents.conflict"));
+        // A teammate wrote to this document while it was open. Their version
+        // wins the write; the reload puts it on screen rather than letting the
+        // autosave keep retrying over the top of it.
+        setConflict(true);
+        setDirty(false);
         await loadDocument(selectedDocument.id, true);
         return;
       }
+      setConflict(false);
       const updatedRecord = updatedDocument as WorkspaceDocumentRecord;
       const nextDetailSnapshot = {
         serverId,
@@ -634,7 +638,6 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       setTitle(nextTitle);
       setDraftUpdatedAt(updatedRecord.updated_at);
       setDirty(false);
-      setEditing(false);
       scheduleDocumentsRefresh();
     } catch (saveError) {
       if (!isCurrentMutation()) return;
@@ -655,15 +658,26 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     }
   }
 
-  function cancelEditing() {
-    if (!selectedDocument) return;
-    setTitle(selectedDocument.title);
-    setContent(selectedDocument.content);
-    setDirty(false);
-    setEditing(false);
-  }
+  // Nothing is unsaved for long now, so leaving only has to wait for a save
+  // already in flight rather than ask the person to decide about a draft.
+  useUnsavedChangesGuard(saving, () => undefined, false);
 
-  useUnsavedChangesGuard(dirty || saving, cancelEditing, !saving);
+  // Autosave. A pause in typing is the signal — saving on every keystroke would
+  // put a partial sentence in front of whichever teammate reads it next.
+  useEffect(() => {
+    if (!dirty || !selectedDocument) return;
+    const timer = window.setTimeout(() => {
+      void saveDocument();
+    }, 900);
+    saveTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (saveTimerRef.current === timer) saveTimerRef.current = null;
+    };
+    // saveDocument closes over the current draft, which is exactly what should
+    // be written when the pause happens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content, dirty, selectedDocument, title]);
 
   async function deleteDocument() {
     if (!selectedDocument || deletingRef.current || savingRef.current) return;
@@ -705,7 +719,6 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       });
       setConfirmDelete(false);
       setDirty(false);
-      setEditing(false);
       window.requestAnimationFrame(() => {
         router.push(`/s/${serverSlug}/documents`);
       });
@@ -773,7 +786,15 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
           // where you are and what state the document is in instead of saying
           // the title a second time.
           title={t("documents.title")}
-          description={editing && dirty ? t("documents.unsaved") : t("documents.saved")}
+          description={
+            conflict
+              ? t("documents.conflict")
+              : saving
+                ? t("documents.saving")
+                : dirty
+                  ? t("documents.unsaved")
+                  : t("documents.saved")
+          }
           action={(
             <div className="flex items-center gap-1">
               <Button
@@ -785,23 +806,6 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
               >
                 <Trash2Icon />
               </Button>
-              {editing ? (
-                <>
-                  <Button variant="ghost" size="sm" onClick={cancelEditing} disabled={saving}>
-                    <X />
-                    {t("documents.cancelEdit")}
-                  </Button>
-                  <Button size="sm" onClick={() => void saveDocument()} loading={saving} disabled={!dirty}>
-                    <SaveIcon />
-                    {t("documents.save")}
-                  </Button>
-                </>
-              ) : (
-                <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-                  <Pencil />
-                  {t("documents.edit")}
-                </Button>
-              )}
             </div>
           )}
         />
@@ -825,56 +829,39 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 {formatDocumentDate(selectedDocument.updated_at, t)}
               </span>
             </div>
-            {/* The title belongs to the document, not to a header bar, and it
-                stays in the same place whether you are reading or writing. */}
-            {editing ? (
-              <input
-                className="w-full border-0 bg-transparent p-0 text-[28px] font-bold leading-tight outline-none placeholder:text-muted-foreground/60"
-                onChange={(event) => {
-                  setTitle(event.target.value);
+            {/* There is no reading mode and no writing mode. The document is
+                the surface, and it saves itself. */}
+            <input
+              className="w-full border-0 bg-transparent p-0 text-[28px] font-bold leading-tight outline-none placeholder:text-muted-foreground/60"
+              onChange={(event) => {
+                setTitle(event.target.value);
+                setDirty(true);
+              }}
+              placeholder={t("documents.untitled")}
+              value={title}
+            />
+            {richTextEditable ? (
+              <DocumentEditor
+                content={content}
+                onChange={(markdown) => {
+                  setContent(markdown);
                   setDirty(true);
                 }}
-                placeholder={t("documents.untitled")}
-                value={title}
+                placeholder={t("documents.contentPlaceholder")}
               />
             ) : (
-              <h1 className="text-[28px] font-bold leading-tight">
-                {selectedDocument.title || t("documents.untitled")}
-              </h1>
-            )}
-            {editing ? (
-              richTextEditable ? (
-                <DocumentEditor
-                  content={content}
-                  onChange={(markdown) => {
-                    setContent(markdown);
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">{t("documents.sourceOnly")}</p>
+                <Textarea
+                  className="min-h-[55vh] resize-none border-0 bg-transparent p-0 font-mono text-[13px] leading-[20px] shadow-none focus-visible:ring-0"
+                  onChange={(event) => {
+                    setContent(event.target.value);
                     setDirty(true);
                   }}
                   placeholder={t("documents.contentPlaceholder")}
+                  value={content}
                 />
-              ) : (
-                <div className="space-y-2">
-                  <p className="text-xs text-muted-foreground">{t("documents.sourceOnly")}</p>
-                  <Textarea
-                    className="min-h-[55vh] resize-none border-0 bg-transparent p-0 font-mono text-[13px] leading-[20px] shadow-none focus-visible:ring-0"
-                    onChange={(event) => {
-                      setContent(event.target.value);
-                      setDirty(true);
-                    }}
-                    placeholder={t("documents.contentPlaceholder")}
-                    value={content}
-                  />
-                </div>
-              )
-            ) : content ? (
-              <article
-                className="prose-message wrap-break-word text-[15px] subpixel-antialiased"
-                style={{ lineHeight: "22px" }}
-              >
-                <SafeMarkdown mentions>{content}</SafeMarkdown>
-              </article>
-            ) : (
-              <p className="text-sm text-muted-foreground">{t("documents.noContent")}</p>
+              </div>
             )}
             {(error || currentDetailLoadState?.error) && (
               <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
