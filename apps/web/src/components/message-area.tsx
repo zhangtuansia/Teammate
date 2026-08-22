@@ -563,7 +563,7 @@ const MessageRow = memo(function MessageRow({
       <div className="w-9 shrink-0 pt-0.5">
         {sameSender ? (
           <time
-            className="hidden pt-px text-right text-[11px] leading-[22px] text-muted-foreground tabular-nums group-hover:block"
+            className="block text-right text-[11px] leading-[22px] text-muted-foreground opacity-0 tabular-nums group-hover:opacity-100"
             dateTime={message.created_at}
           >
             {formattedTime}
@@ -775,20 +775,6 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
 
-      {sameSender && (
-        <>
-          <time className="sr-only" dateTime={message.created_at}>
-            {formattedTime}
-          </time>
-          <time
-            aria-hidden="true"
-            className="hidden shrink-0 self-center text-xs text-muted-foreground group-hover:block"
-            dateTime={message.created_at}
-          >
-            {formattedTime}
-          </time>
-        </>
-      )}
     </div>
   );
 });
