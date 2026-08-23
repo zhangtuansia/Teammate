@@ -17,6 +17,7 @@ export {
   ListChecks,
   MessageSquare,
   Pencil,
+  Pin,
   Plus,
   RefreshCw,
   SaveIcon,

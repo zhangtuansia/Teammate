@@ -9,7 +9,7 @@ import { apiUrl } from "@/lib/api-url";
 import { documentPreview } from "@/lib/document-preview";
 import { canEditAsRichText } from "@/lib/markdown-round-trip";
 import { DocumentEditor } from "@/components/document-editor";
-import { ArrowDown, ArrowRight, CheckCircle2, Circle, Clock3, FileText, Folder, FolderPlus, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
+import { ArrowDown, ArrowRight, CheckCircle2, Circle, Clock3, FileText, Folder, FolderPlus, Pin, ListChecks, Pencil, Plus, RefreshCw, SaveIcon, ScanEye, Search, Trash2Icon, X } from "@/components/ui/settings-icons";
 import { SafeMarkdown } from "@/components/ui/safe-markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardPanel } from "@/components/ui/card";
@@ -124,13 +124,14 @@ interface WorkspaceDocumentRecord {
   created_by: string | null;
   generated_by_agent_id: string | null;
   folder_path: string;
+  pinned_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
 type WorkspaceDocumentSummaryRecord = Pick<
   WorkspaceDocumentRecord,
-  "id" | "server_id" | "title" | "generated_by_agent_id" | "folder_path" | "created_at" | "updated_at"
+  "id" | "server_id" | "title" | "generated_by_agent_id" | "folder_path" | "pinned_at" | "created_at" | "updated_at"
 >;
 
 /**
@@ -212,8 +213,8 @@ const EMPTY_CHANNELS: ChannelRecord[] = [];
 const EMPTY_ASSIGNEES: AssigneeOption[] = [];
 const EMPTY_MEMBERSHIPS: MembershipRecord[] = [];
 
-/** Title, location, owner, created, updated — one shape for header and rows. */
-const DOCUMENT_COLUMNS = "grid-cols-[1fr_auto_auto_auto_auto]";
+/** Title, location, owner, created, updated, pin — one shape for header and rows. */
+const DOCUMENT_COLUMNS = "grid-cols-[1fr_auto_auto_auto_auto_auto]";
 
 function SectionHeader({ title, description, action }: {
   title: string;
@@ -332,6 +333,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         excerpt: document.excerpt || "",
         generated_by_agent_id: document.generated_by_agent_id,
         folder_path: document.folder_path || "",
+        pinned_at: document.pinned_at || null,
         generatorAvatarUrl: document.generator_avatar_url || null,
         generatorName: document.generator_name || null,
         id: document.id,
@@ -486,6 +488,18 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       );
     } finally {
       setImporting(false);
+    }
+  }
+
+  /** Pinned from either side; the realtime channel brings the list back. */
+  async function togglePin(document: WorkspaceDocumentSummaryViewModel) {
+    const client = createClient();
+    const { error: pinError } = await client
+      .from("documents")
+      .update({ pinned_at: document.pinned_at ? null : new Date().toISOString() })
+      .eq("id", document.id);
+    if (pinError) {
+      setListLoadState({ error: pinError.message, loading: false, refreshing: false, serverId });
     }
   }
 
@@ -1166,18 +1180,25 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                   {sort === column && <ArrowDown className="size-3" />}
                 </button>
               ))}
+              <span className="size-6" />
             </div>
             {sortedDocuments.map((document) => (
               // The whole row opens the document. It used to carry a separate
               // "open" button, which made the row itself dead space and asked
-              // for a decision where there was only one thing to do.
-              <button
-                className={`grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/50 px-3 py-3 text-left transition-colors hover:bg-accent/40`}
+              // for a decision where there was only one thing to do. The pin is
+              // the one thing that has to sit above that, so opening is an
+              // overlay behind the cells rather than a button around them.
+              <div
+                className={`group/row relative grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/50 px-3 py-3 text-left transition-colors hover:bg-accent/40`}
                 key={document.id}
-                onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
-                type="button"
               >
-                <span className="flex min-w-0 items-start gap-2.5">
+                <button
+                  aria-label={document.title || t("documents.untitled")}
+                  className="absolute inset-0 z-0"
+                  onClick={() => router.push(`/s/${serverSlug}/documents?document=${document.id}`)}
+                  type="button"
+                />
+                <span className="pointer-events-none relative z-10 flex min-w-0 items-start gap-2.5">
                   <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 text-primary">
                     <FileText className="size-3.5" />
                   </span>
@@ -1194,7 +1215,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 </span>
                 {/* Where it lives. Two notes can share a name across folders,
                     and this is what tells them apart in a flat list. */}
-                <span className="flex w-36 items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="pointer-events-none relative z-10 flex w-36 items-center gap-1.5 text-xs text-muted-foreground">
                   {document.folder_path ? (
                     <>
                       <Folder className="size-3.5 shrink-0 opacity-70" />
@@ -1204,7 +1225,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                     <span className="truncate opacity-60">{t("documents.locationRoot")}</span>
                   )}
                 </span>
-                <span className="flex w-32 items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="pointer-events-none relative z-10 flex w-32 items-center gap-1.5 text-xs text-muted-foreground">
                   {document.generatorName && document.generated_by_agent_id ? (
                     <>
                       <GeneratedAvatar
@@ -1220,13 +1241,27 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                     <span className="truncate">{t("documents.ownerYou")}</span>
                   )}
                 </span>
-                <span className="w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                <span className="pointer-events-none relative z-10 w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
                   {formatDocumentDate(document.created_at, t)}
                 </span>
-                <span className="w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                <span className="pointer-events-none relative z-10 w-24 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
                   {formatDocumentDate(document.updated_at, t)}
                 </span>
-              </button>
+                <button
+                  aria-label={document.pinned_at ? t("documents.unpin") : t("documents.pin")}
+                  aria-pressed={Boolean(document.pinned_at)}
+                  className={`relative z-10 flex size-6 shrink-0 items-center justify-center rounded transition-opacity hover:bg-accent ${
+                    document.pinned_at
+                      ? "text-primary opacity-100"
+                      : "text-muted-foreground opacity-0 group-hover/row:opacity-70"
+                  }`}
+                  onClick={() => void togglePin(document)}
+                  title={document.pinned_at ? t("documents.unpin") : t("documents.pin")}
+                  type="button"
+                >
+                  <Pin className={`size-3.5 ${document.pinned_at ? "fill-current" : ""}`} />
+                </button>
+              </div>
             ))}
           </div>
         </ScrollArea>

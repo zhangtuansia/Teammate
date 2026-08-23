@@ -422,9 +422,10 @@ test("adding a local folder takes the notes and leaves everything else", () => {
 });
 
 test("folders in the sidebar are the paths the documents claim", () => {
-  const at = (id: string, folder: string) => ({
+  const at = (id: string, folder: string, pinnedAt: string | null = null) => ({
     folder_path: folder,
     id,
+    pinned_at: pinnedAt,
     title: id,
     updated_at: "2026-08-22 10:00:00",
   });
@@ -456,4 +457,31 @@ test("folders in the sidebar are the paths the documents claim", () => {
 
   assert.deepEqual(ancestorPaths("api/v2"), ["api", "api/v2"]);
   assert.deepEqual(ancestorPaths(""), []);
+});
+
+test("a pinned document is reachable twice, not moved", () => {
+  const at = (id: string, folder: string, pinnedAt: string | null = null) => ({
+    folder_path: folder,
+    id,
+    pinned_at: pinnedAt,
+    title: id,
+    updated_at: "2026-08-22 10:00:00",
+  });
+
+  const tree = buildDocumentTree([
+    at("errors", "api/v2", "2026-08-22T09:00:00.000Z"),
+    at("readme", ""),
+    at("overview", "api", "2026-08-22T08:00:00.000Z"),
+  ]);
+
+  // Oldest pin first, so pinning something does not shuffle what is already up
+  // there out from under the pointer.
+  assert.deepEqual(tree.pinned.map((document) => document.id), ["overview", "errors"]);
+
+  // Pinning is a second way to reach a document, so it stays filed where it is.
+  assert.equal(tree.folders[0].totalDocuments, 2);
+  assert.deepEqual(tree.folders[0].documents.map((document) => document.id), ["overview"]);
+  assert.deepEqual(tree.loose.map((document) => document.id), ["readme"]);
+
+  assert.deepEqual(buildDocumentTree([at("readme", "")]).pinned, []);
 });

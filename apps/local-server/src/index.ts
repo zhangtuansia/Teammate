@@ -196,6 +196,7 @@ const tableColumns = {
     "created_by",
     "generated_by_agent_id",
     "folder_path",
+    "pinned_at",
     "created_at",
     "updated_at",
   ],
@@ -1348,6 +1349,7 @@ db.exec(`
     created_by TEXT NOT NULL,
     generated_by_agent_id TEXT,
     folder_path TEXT NOT NULL DEFAULT '',
+    pinned_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -1475,6 +1477,8 @@ ensureColumn("documents", "generated_by_agent_id", "TEXT");
 // distinct paths of the documents in them, so there is no second structure to
 // drift out of step with the first, and a folder cannot outlive its contents.
 ensureColumn("documents", "folder_path", "TEXT NOT NULL DEFAULT ''");
+// When it was pinned, which is also the order pinned documents sit in.
+ensureColumn("documents", "pinned_at", "TEXT");
 const llmConnectionColumns = db.prepare("PRAGMA table_info(llm_connections)").all() as Array<{
   name: string;
 }>;
@@ -5093,8 +5097,8 @@ function localListWorkspaceDocuments(argsValue: unknown) {
            document.server_id,
            document.title,
            document.generated_by_agent_id,
-         document.folder_path,
            document.folder_path,
+           document.pinned_at,
            document.created_at,
            document.updated_at,
            CASE
@@ -5126,6 +5130,7 @@ function localListWorkspaceDocuments(argsValue: unknown) {
          document.title,
          document.generated_by_agent_id,
          document.folder_path,
+         document.pinned_at,
          document.created_at,
          document.updated_at,
          substr(document.content, 1, 240) AS excerpt,
@@ -6616,6 +6621,14 @@ function validateLocalMutation(table: TableName, row: DbRow, previous?: DbRow) {
           !folderPath.split("/").includes("..") &&
           folderPath.split("/").length <= 12,
         "Invalid document folder",
+      );
+    }
+    // Pinned or not, and when. Anything else would sort the pinned group by
+    // a value nothing can order.
+    if (row.pinned_at !== undefined && row.pinned_at !== null) {
+      requireLocalInvariant(
+        typeof row.pinned_at === "string" && !Number.isNaN(Date.parse(row.pinned_at)),
+        "Invalid document pin",
       );
     }
     return;

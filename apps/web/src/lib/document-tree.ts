@@ -13,6 +13,7 @@ export interface DocumentLike {
   id: string;
   title: string;
   folder_path: string;
+  pinned_at: string | null;
   updated_at: string;
 }
 
@@ -32,6 +33,12 @@ export interface DocumentTree<T extends DocumentLike> {
   folders: DocumentFolder<T>[];
   /** Documents filed nowhere in particular. */
   loose: T[];
+  /**
+   * Pinned documents, oldest pin first, shown above everything. A pinned
+   * document stays where it is filed as well — pinning is a second way to
+   * reach a document, not a place to move it to.
+   */
+  pinned: T[];
 }
 
 function segmentsOf(path: string) {
@@ -92,7 +99,11 @@ export function buildDocumentTree<T extends DocumentLike>(documents: readonly T[
   };
   sortFolders(roots);
 
-  return { folders: roots, loose };
+  const pinned = documents
+    .filter((document) => document.pinned_at)
+    .sort((a, b) => (a.pinned_at ?? "").localeCompare(b.pinned_at ?? ""));
+
+  return { folders: roots, loose, pinned };
 }
 
 /** Every folder on the way to this one, so opening a document opens its path. */

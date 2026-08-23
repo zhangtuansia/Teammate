@@ -930,6 +930,8 @@ create table public.documents (
   -- distinct paths of the documents in them, so there is no second structure to
   -- drift out of step with the first, and a folder cannot outlive its contents.
   folder_path text default '' not null,
+  -- When it was pinned, which is also the order pinned documents sit in.
+  pinned_at timestamptz,
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
 );
@@ -986,6 +988,7 @@ returns table (
   title text,
   generated_by_agent_id uuid,
   folder_path text,
+  pinned_at timestamptz,
   created_at timestamptz,
   updated_at timestamptz,
   excerpt text,
@@ -1011,6 +1014,7 @@ begin
     document.title,
     document.generated_by_agent_id,
     document.folder_path,
+    document.pinned_at,
     document.created_at,
     document.updated_at,
     -- When the body is what matched, show why rather than the opening line.

@@ -13,13 +13,13 @@ import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
-import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, SearchIcon, FolderIcon, WrenchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
 import { parseMessageTime } from "@/lib/message-time";
-import { ancestorPaths, buildDocumentTree, type DocumentFolder } from "@/lib/document-tree";
+import { ancestorPaths, buildDocumentTree, folderLabel, type DocumentFolder } from "@/lib/document-tree";
 
 interface Server {
   id: string;
@@ -90,6 +90,7 @@ interface WorkspaceDocument {
   id: string;
   title: string;
   folder_path: string;
+  pinned_at: string | null;
   updated_at: string;
 }
 
@@ -101,54 +102,104 @@ function DocumentRow({
   depth,
   document,
   onOpen,
+  onTogglePin,
   t,
 }: {
   active: boolean;
   depth: number;
   document: WorkspaceDocument;
   onOpen: (id: string) => void;
+  onTogglePin: (document: WorkspaceDocument) => void;
   t: (key: TranslationKey) => string;
 }) {
+  const pinned = Boolean(document.pinned_at);
   return (
-    <button
-      aria-current={active ? "page" : undefined}
-      className={`flex h-8 w-full items-center gap-2 rounded-[6px] pr-2 text-left text-[13px] transition-colors ${
-        active
-          ? "bg-primary/10 font-medium text-primary"
-          : "text-muted-foreground hover:bg-accent/60"
+    <div
+      // The row is what gets dragged; a folder row is what catches it.
+      className={`group/doc relative flex h-8 w-full items-center rounded-[6px] transition-colors ${
+        active ? "bg-primary/10" : "hover:bg-accent/60"
       }`}
-      onClick={() => onOpen(document.id)}
-      style={{ paddingLeft: 10 + depth * TREE_INDENT }}
-      type="button"
+      draggable
+      onDragStart={(event) => {
+        event.dataTransfer.setData("text/x-teammate-document", document.id);
+        event.dataTransfer.effectAllowed = "move";
+      }}
     >
-      <FileTextIcon className={`size-4 shrink-0 ${active ? "" : "opacity-60"}`} />
-      <span className="truncate">{document.title || t("documents.untitled")}</span>
-    </button>
+      <button
+        aria-current={active ? "page" : undefined}
+        className={`flex h-8 min-w-0 flex-1 items-center gap-2 pr-1 text-left text-[13px] ${
+          active ? "font-medium text-primary" : "text-muted-foreground"
+        }`}
+        onClick={() => onOpen(document.id)}
+        style={{ paddingLeft: 10 + depth * TREE_INDENT }}
+        type="button"
+      >
+        <FileTextIcon className={`size-4 shrink-0 ${active ? "" : "opacity-60"}`} />
+        <span className="truncate">{document.title || t("documents.untitled")}</span>
+      </button>
+      {/* A pin stays visible once set; otherwise it waits to be reached for. */}
+      <button
+        aria-label={pinned ? t("documents.unpin") : t("documents.pin")}
+        aria-pressed={pinned}
+        className={`mr-1.5 flex size-5 shrink-0 items-center justify-center rounded transition-opacity hover:bg-accent ${
+          pinned ? "text-primary opacity-100" : "opacity-0 group-hover/doc:opacity-60"
+        }`}
+        onClick={() => onTogglePin(document)}
+        title={pinned ? t("documents.unpin") : t("documents.pin")}
+        type="button"
+      >
+        <PinIcon className={`size-3.5 ${pinned ? "fill-current" : ""}`} />
+      </button>
+    </div>
   );
 }
 
 function DocumentFolderRow({
   activeDocumentId,
   folder,
+  onMoveDocument,
   onOpenDocument,
+  onRenameFolder,
   onToggle,
+  onTogglePin,
   openFolders,
   t,
 }: {
   activeDocumentId: string | null;
   folder: DocumentFolder<WorkspaceDocument>;
+  onMoveDocument: (documentId: string, folder: string) => void;
   onOpenDocument: (id: string) => void;
+  onRenameFolder: (path: string) => void;
   onToggle: (path: string) => void;
+  onTogglePin: (document: WorkspaceDocument) => void;
   openFolders: Set<string>;
   t: (key: TranslationKey) => string;
 }) {
   const open = openFolders.has(folder.path);
+  const [dropTarget, setDropTarget] = useState(false);
   return (
     <>
       <button
         aria-expanded={open}
-        className="group/folder flex h-8 w-full items-center gap-1 rounded-[6px] pr-2 text-left text-[13px] text-foreground/80 transition-colors hover:bg-accent/60"
+        className={`group/folder flex h-8 w-full items-center gap-1 rounded-[6px] pr-2 text-left text-[13px] transition-colors ${
+          dropTarget ? "bg-primary/15 text-primary" : "text-foreground/80 hover:bg-accent/60"
+        }`}
         onClick={() => onToggle(folder.path)}
+        onDoubleClick={() => onRenameFolder(folder.path)}
+        onDragLeave={() => setDropTarget(false)}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes("text/x-teammate-document")) return;
+          // Without this the browser refuses the drop and nothing can land.
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setDropTarget(true);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDropTarget(false);
+          const id = event.dataTransfer.getData("text/x-teammate-document");
+          if (id) onMoveDocument(id, folder.path);
+        }}
         style={{ paddingLeft: 4 + folder.depth * TREE_INDENT }}
         type="button"
       >
@@ -172,8 +223,11 @@ function DocumentFolderRow({
               activeDocumentId={activeDocumentId}
               folder={child}
               key={child.path}
+              onMoveDocument={onMoveDocument}
               onOpenDocument={onOpenDocument}
+              onRenameFolder={onRenameFolder}
               onToggle={onToggle}
+              onTogglePin={onTogglePin}
               openFolders={openFolders}
               t={t}
             />
@@ -185,6 +239,7 @@ function DocumentFolderRow({
               document={document}
               key={document.id}
               onOpen={onOpenDocument}
+              onTogglePin={onTogglePin}
               t={t}
             />
           ))}
@@ -241,6 +296,7 @@ export function Sidebar({
   const [documents, setDocuments] = useState<WorkspaceDocument[]>([]);
   const [documentQuery, setDocumentQuery] = useState("");
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
+  const [looseDropTarget, setLooseDropTarget] = useState(false);
   const [userId, setUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
@@ -337,6 +393,72 @@ export function Sidebar({
       return next;
     });
   }, []);
+
+  /**
+   * Both of these write straight through and let the realtime channel bring the
+   * list back. A document's place and its pin are one column each — there is no
+   * intermediate state worth holding on to locally, and an optimistic copy would
+   * only be a second version of the truth to keep in step.
+   */
+  const applyDocumentChange = useCallback(
+    async (id: string, patch: Record<string, string | null>) => {
+      setDocumentActionError("");
+      const { error } = await supabase.from("documents").update(patch).eq("id", id);
+      if (error) setDocumentActionError(error.message);
+    },
+    [supabase],
+  );
+
+  const togglePin = useCallback(
+    (document: WorkspaceDocument) => {
+      void applyDocumentChange(document.id, {
+        pinned_at: document.pinned_at ? null : new Date().toISOString(),
+      });
+    },
+    [applyDocumentChange],
+  );
+
+  const moveDocument = useCallback(
+    (id: string, folder: string) => {
+      const document = documents.find((entry) => entry.id === id);
+      if (!document || document.folder_path === folder) return;
+      void applyDocumentChange(id, { folder_path: folder });
+      if (folder) setOpenFolders((current) => new Set([...current, ...ancestorPaths(folder)]));
+    },
+    [applyDocumentChange, documents],
+  );
+
+  const renameFolder = useCallback(
+    (path: string) => {
+      const current = folderLabel(path);
+      const parent = path.slice(0, Math.max(0, path.length - current.length - 1));
+      const name = window.prompt(t("documents.renameFolderPrompt"), current)?.trim();
+      // A slash would silently reshape the tree; a rename should rename.
+      if (!name || name === current || name.includes("/")) return;
+      const next = parent ? `${parent}/${name}` : name;
+      // Everything filed under here moves with it, however deep.
+      for (const document of documents) {
+        if (document.folder_path !== path && !document.folder_path.startsWith(`${path}/`)) continue;
+        void applyDocumentChange(document.id, {
+          folder_path: next + document.folder_path.slice(path.length),
+        });
+      }
+      setOpenFolders((current2) => new Set([...current2, ...ancestorPaths(next)]));
+    },
+    [applyDocumentChange, documents, t],
+  );
+
+  /**
+   * A folder holds documents and nothing else, so this makes one with its first
+   * document already in it. There is no folder record to create on its own —
+   * a folder is where documents say they are.
+   */
+  function createFolder() {
+    const name = window.prompt(t("documents.newFolderPrompt"), "")?.trim();
+    if (!name || name.includes("/")) return;
+    setOpenFolders((current) => new Set([...current, name]));
+    void handleCreateDocument(name);
+  }
 
   const openDocument = useCallback(
     (id: string) => {
@@ -570,7 +692,7 @@ export function Sidebar({
           .abortSignal(requestController.signal),
         supabase
           .from("documents")
-          .select("id, title, folder_path, updated_at")
+          .select("id, title, folder_path, pinned_at, updated_at")
           .eq("server_id", serverId)
           .order("updated_at", { ascending: false })
           .abortSignal(requestController.signal),
@@ -955,7 +1077,7 @@ export function Sidebar({
     return () => window.clearTimeout(timer);
   }, [documentQuery, documentSearch, pathname, router, searchParams, workspaceView]);
 
-  async function handleCreateDocument() {
+  async function handleCreateDocument(folder = "") {
     if (!userId || creatingDocumentRef.current) return;
     const generation = documentCreateGenerationRef.current + 1;
     documentCreateGenerationRef.current = generation;
@@ -977,9 +1099,10 @@ export function Sidebar({
           server_id: serverId,
           title: t("documents.untitled"),
           content: "",
+          folder_path: folder,
           created_by: userId,
         })
-        .select("id, title, updated_at")
+        .select("id, title, folder_path, pinned_at, updated_at")
         .abortSignal(requestController.signal)
         .single();
       if (!isCurrentCreate()) return;
@@ -1274,16 +1397,27 @@ export function Sidebar({
               <span className="text-[12px] font-medium text-muted-foreground">
                 {t("documents.title")}
               </span>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                onClick={() => run(() => void handleCreateDocument())}
-                loading={creatingDocument}
-                title={t("documents.new")}
-                aria-label={t("documents.new")}
-              >
-                <PlusIcon />
-              </Button>
+              <div className="flex items-center">
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={createFolder}
+                  title={t("documents.newFolder")}
+                  aria-label={t("documents.newFolder")}
+                >
+                  <FolderPlusIcon />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={() => run(() => void handleCreateDocument())}
+                  loading={creatingDocument}
+                  title={t("documents.new")}
+                  aria-label={t("documents.new")}
+                >
+                  <PlusIcon />
+                </Button>
+              </div>
             </div>
             {visibleDocuments.length === 0 ? (
               <p className="px-2 pt-2 text-xs leading-relaxed text-muted-foreground">
@@ -1291,15 +1425,39 @@ export function Sidebar({
               </p>
             ) : (
               <div className="flex flex-col gap-0.5">
-                {/* Folders first, as a tree you can walk. A document that came
+                {/* Whatever you pinned, above everything and out of any folder.
+                    A pinned document is still filed where it was — this is a
+                    second way to reach it, not a place it moved to. */}
+                {documentTree.pinned.length > 0 && (
+                  <div className="flex flex-col gap-0.5">
+                    <span className="px-2 pt-1 text-[11px] font-medium text-muted-foreground/70">
+                      {t("documents.groupPinned")}
+                    </span>
+                    {documentTree.pinned.map((document) => (
+                      <DocumentRow
+                        active={activeDocumentId === document.id}
+                        depth={0}
+                        document={document}
+                        key={`pinned-${document.id}`}
+                        onOpen={openDocument}
+                        onTogglePin={togglePin}
+                        t={t}
+                      />
+                    ))}
+                  </div>
+                )}
+                {/* Folders next, as a tree you can walk. A document that came
                     from a folder on disk belongs in that folder here too. */}
                 {documentTree.folders.map((folder) => (
                   <DocumentFolderRow
                     activeDocumentId={activeDocumentId}
                     folder={folder}
                     key={folder.path}
+                    onMoveDocument={moveDocument}
                     onOpenDocument={openDocument}
+                    onRenameFolder={renameFolder}
                     onToggle={toggleFolder}
+                    onTogglePin={togglePin}
                     openFolders={openFolders}
                     t={t}
                   />
@@ -1307,23 +1465,52 @@ export function Sidebar({
                 {/* Then whatever is filed nowhere, still cut into the buckets a
                     person thinks in — a flat list by date tells you nothing
                     about which documents are live work. */}
-                {groupDocumentsByAge(documentTree.loose, t).map((group) => (
-                  <div className="flex flex-col gap-0.5" key={group.label}>
-                    <span className="px-2 pt-2 text-[11px] font-medium text-muted-foreground/70">
-                      {group.label}
-                    </span>
-                    {group.documents.map((document) => (
-                      <DocumentRow
-                        active={activeDocumentId === document.id}
-                        depth={0}
-                        document={document}
-                        key={document.id}
-                        onOpen={openDocument}
-                        t={t}
-                      />
-                    ))}
-                  </div>
-                ))}
+                {/* Dropping out here is how a document leaves a folder — every
+                    folder is a target, so the workspace itself has to be one. */}
+                <div
+                  className={`flex flex-col gap-0.5 rounded-[6px] transition-colors ${
+                    looseDropTarget ? "bg-primary/10" : ""
+                  }`}
+                  onDragLeave={() => setLooseDropTarget(false)}
+                  onDragOver={(event) => {
+                    if (!event.dataTransfer.types.includes("text/x-teammate-document")) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    setLooseDropTarget(true);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setLooseDropTarget(false);
+                    const id = event.dataTransfer.getData("text/x-teammate-document");
+                    if (id) moveDocument(id, "");
+                  }}
+                >
+                  {groupDocumentsByAge(documentTree.loose, t).map((group) => (
+                    <div className="flex flex-col gap-0.5" key={group.label}>
+                      <span className="px-2 pt-2 text-[11px] font-medium text-muted-foreground/70">
+                        {group.label}
+                      </span>
+                      {group.documents.map((document) => (
+                        <DocumentRow
+                          active={activeDocumentId === document.id}
+                          depth={0}
+                          document={document}
+                          key={document.id}
+                          onOpen={openDocument}
+                          onTogglePin={togglePin}
+                          t={t}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                  {/* With everything filed away there is nothing left to drop
+                      onto, so the target says it is there. */}
+                  {documentTree.loose.length === 0 && (
+                    <p className="px-2 py-3 text-[11px] text-muted-foreground/60">
+                      {t("documents.dropToUnfile")}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
             {documentActionError && (
