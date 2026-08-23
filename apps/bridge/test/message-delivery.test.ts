@@ -322,6 +322,23 @@ async function drain(bridge: Bridge) {
   await method.call(bridge);
 }
 
+/**
+ * Bring a deferred delivery due. The wave clock runs from the message, so the
+ * message is aged alongside the delivery row.
+ */
+function dueNow(databasePath: string, messageId: string) {
+  const handle = new DatabaseSync(databasePath);
+  handle.exec("PRAGMA busy_timeout = 5000");
+  try {
+    handle.prepare("UPDATE messages SET created_at = ? WHERE id = ?")
+      .run(new Date(Date.now() - 60_000).toISOString(), messageId);
+    handle.prepare("UPDATE message_deliveries SET next_attempt_at = ? WHERE message_id = ?")
+      .run(new Date(Date.now() - 1_000).toISOString(), messageId);
+  } finally {
+    handle.close();
+  }
+}
+
 test("a teammate's plain greeting does not wake the rest of the room", async () => {
   // Greetings are for the room, not a request anyone owes an answer to. The
   // classifier has to stay narrow: anything carrying real content, a question,
@@ -506,7 +523,7 @@ test("same process replay after completion-state loss does not hand the prompt t
 });
 
 test("channel policy: sole agent and mentions deliver, cold multi-agent rows skip, conversations continue", async () => {
-  await withLocalHarness(async ({ client, baseUrl }) => {
+  await withLocalHarness(async ({ client, baseUrl, databasePath }) => {
     // A channel with one agent behaves like a shared DM: no @ required.
     const soleAgent = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "status update only");
     const assigned = await insertHumanMessage(
@@ -578,9 +595,15 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     await drain(bridge);
     assert.equal((await loadDelivery(client, redirected.id))?.status, "skipped");
 
-    // When another agent spoke more recently, they own the exchange.
+    // When another agent spoke more recently they own the exchange, so this
+    // one waits behind them rather than being cut out of it — and the answer
+    // is what stands it down.
     await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "Sure, taking it.");
     const towardHelper = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "thanks, how long will it take?");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, towardHelper.id))?.status, "pending");
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "About a day.");
+    dueNow(databasePath, towardHelper.id);
     await drain(bridge);
     assert.equal((await loadDelivery(client, towardHelper.id))?.status, "skipped");
 
@@ -660,7 +683,7 @@ test("a teammate citing your handle never publishes your decision to stay quiet"
 });
 
 test("an unclaimed thread reaches the room; a teammate's thread stays theirs", async () => {
-  await withLocalHarness(async ({ client, baseUrl }) => {
+  await withLocalHarness(async ({ client, baseUrl, databasePath }) => {
     const created = await localApi<{ agent: { id: string } }>(
       baseUrl,
       "/api/agents",
@@ -684,7 +707,8 @@ test("an unclaimed thread reaches the room; a teammate's thread stays theirs", a
     assert.equal((await loadDelivery(client, opened.id))?.status, "completed");
 
     // Once a teammate answers in the thread it is their conversation, and the
-    // next unmentioned reply goes to them alone.
+    // next unmentioned reply is theirs to take first. The others are not shut
+    // out of it — they are behind them, and will be stood down by the answer.
     await insertAgentMessage(
       client,
       LOCAL_CHANNEL_ID,
@@ -699,11 +723,43 @@ test("an unclaimed thread reaches the room; a teammate's thread stays theirs", a
       root.id,
     );
     await drain(bridge);
-    assert.equal((await loadDelivery(client, followUp.id))?.status, "skipped");
-    assert.match(
-      (await loadDelivery(client, followUp.id))?.last_error || "",
-      /mid-conversation/,
+    const waiting = await loadDelivery(client, followUp.id);
+    assert.equal(waiting?.status, "pending", "outside the thread is a queue place, not a bar");
+    assert.equal(waiting?.attempts, 0, "waiting for a wave must not spend a retry");
+    assert.ok(
+      Date.parse(waiting?.next_attempt_at || "") > Date.now(),
+      "the teammate outside the thread is scheduled behind the one in it",
     );
+
+    // The teammate whose thread it is answers, which stands the rest down
+    // before they have cost a turn.
+    await insertAgentMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      created.agent.id,
+      "Tomorrow morning.",
+      root.id,
+    );
+    dueNow(databasePath, followUp.id);
+    await drain(bridge);
+    const stoodDown = await loadDelivery(client, followUp.id);
+    assert.equal(stoodDown?.status, "skipped");
+    assert.match(stoodDown?.last_error || "", /already answered/);
+
+    // And when nobody answers, the room gets its turn instead of the message
+    // going unanswered by everyone — the case the old hard skip could not
+    // reach, because the delivery was dropped before anyone saw it.
+    const ignored = await insertHumanMessage(
+      client,
+      LOCAL_CHANNEL_ID,
+      "还在吗？",
+      root.id,
+    );
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, ignored.id))?.status, "pending");
+    dueNow(databasePath, ignored.id);
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, ignored.id))?.status, "completed");
   });
 });
 
@@ -729,7 +785,8 @@ test("a broadcast thread reply is addressed to the room, a plain one is not", as
       root.id,
     );
 
-    // A plain reply in a thread that is theirs stays out of everyone else's way.
+    // A plain reply in a thread that is theirs waits behind them rather than
+    // reaching everyone at once.
     const quiet = await insertHumanMessage(
       client,
       LOCAL_CHANNEL_ID,
@@ -737,7 +794,7 @@ test("a broadcast thread reply is addressed to the room, a plain one is not", as
       root.id,
     );
     await drain(bridge);
-    assert.equal((await loadDelivery(client, quiet.id))?.status, "skipped");
+    assert.equal((await loadDelivery(client, quiet.id))?.status, "pending");
 
     // The same reply, sent to the channel as well, is addressed to the room.
     const shared = await insertHumanMessage(
@@ -910,14 +967,18 @@ test("a person talking to a quiet room reaches every teammate in it", async () =
     await drain(bridge);
     assert.equal((await loadDelivery(client, greeting.id))?.status, "completed");
 
-    // Once a teammate is mid-exchange, the follow-up is theirs alone.
+    // Once a teammate is mid-exchange the follow-up is theirs to take first;
+    // the rest of the room is behind them, not shut out.
     await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "在的，我看看。");
     const followUp = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "那你查一下吧");
     await drain(bridge);
-    assert.equal((await loadDelivery(client, followUp.id))?.status, "skipped");
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "pending");
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "查到了，稍等。");
+    dueNow(databasePath, followUp.id);
+    await drain(bridge);
     assert.match(
       (await loadDelivery(client, followUp.id))?.last_error || "",
-      /mid-conversation/,
+      /already answered/,
     );
 
     // Conversations go cold. Once the exchange is old, a new message belongs
@@ -2116,4 +2177,42 @@ test("final hosted RLS keeps agent-owner read access after the documented SQL or
     /DROP POLICY IF EXISTS "Users can view messages in their channels" ON public\.messages/i,
   );
   assert.match(finalRls, /OR public\.user_has_agent_in_channel\(id\)/i);
+});
+
+test("a teammate waiting its turn does not answer over one that is still writing", async () => {
+  await withLocalHarness(async ({ client, baseUrl, databasePath }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    await setChannelAgents(client, [LOCAL_AGENT_ID, created.agent.id]);
+    const bridge = deliveryBridge(client, async () => undefined);
+
+    // Helper owns the exchange, so the follow-up is theirs first and this
+    // teammate waits behind them.
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "在的，我看看。");
+    const followUp = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "那你查一下吧");
+    await drain(bridge);
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "pending");
+
+    // Helper is slow: past the wave interval and still writing, with nothing
+    // posted yet. An agent thinking for longer than a wave is normal, so the
+    // wait extends rather than producing a second answer to one question.
+    const handle = new DatabaseSync(databasePath);
+    handle.exec("PRAGMA busy_timeout = 5000");
+    try {
+      handle.prepare(
+        "UPDATE message_deliveries SET status = 'processing' WHERE message_id = ? AND agent_id = ?",
+      ).run(followUp.id, created.agent.id);
+    } finally {
+      handle.close();
+    }
+    dueNow(databasePath, followUp.id);
+    await drain(bridge);
+    const stillWaiting = await loadDelivery(client, followUp.id);
+    assert.equal(stillWaiting?.status, "pending", "it waits while the other is mid-turn");
+    assert.ok(Date.parse(stillWaiting?.next_attempt_at || "") > Date.now());
+  });
 });

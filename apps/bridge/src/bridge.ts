@@ -625,6 +625,27 @@ export class Bridge {
     return ((replyResult.data || []) as unknown[]).length > 0;
   }
 
+  /**
+   * True while another teammate is still working on this very message.
+   *
+   * `someoneAnswered` only sees an answer once it has been posted, so on its
+   * own it would let a teammate waiting behind a slow one start a second reply
+   * to the same question — the exchange's owner thinking for longer than a
+   * wave interval is normal, not a failure. Their delivery row says so
+   * directly: still pending or processing means still theirs.
+   */
+  private async anotherTeammateIsWorkingOn(delivery: DbMessageDelivery, msg: DbMessage) {
+    const { data, error } = await this.supabase
+      .from("message_deliveries")
+      .select("agent_id, status")
+      .eq("message_id", msg.id)
+      .in("status", ["pending", "processing"]);
+    if (error) throw new Error(error.message);
+    return ((data || []) as Array<{ agent_id: string; status: string }>).some(
+      (row) => row.agent_id !== delivery.agent_id && row.status === "processing",
+    );
+  }
+
   /** True once any agent has spoken after this message. */
   private async someoneAnswered(msg: DbMessage) {
     const { data, error } = await this.supabase
@@ -1231,23 +1252,27 @@ export class Bridge {
           const mine = await this.implicitConversationReason(delivery, msg, channelAgents);
           if (mine) {
             ambientReason = mine;
-          } else if (
-            this.threadScoped(msg)
-              ? await this.threadHasTeammate(msg)
-              : await this.exchangeIsUnderway(msg)
-          ) {
-            // Someone else is already mid-conversation here (or this belongs to
-            // a thread that is not yours). Interrupting is what a person would
-            // not do; the room case below is what they would. A thread with no
-            // teammate in it yet is nobody's, so it falls through to the room.
-            await this.finishDelivery(
-              delivery,
-              "skipped",
-              "Another teammate is mid-conversation here",
-            );
-            return;
           } else {
-            const wave = await this.roomFanoutWave(delivery, msg, channelAgents);
+            // Someone else may already be mid-conversation here, or this may
+            // belong to a thread that is not yours. That used to end it: the
+            // delivery was dropped and the teammate never saw the message at
+            // all, so a thread one teammate had answered once was closed to
+            // every other teammate forever — even when the next question was
+            // plainly for one of them.
+            //
+            // Being outside the conversation is now a place in the queue
+            // rather than a bar. Whoever is in it is asked first and answers;
+            // `someoneAnswered` then stands the rest down before they cost a
+            // turn. What changes is the case where nobody answers — because
+            // the teammate had nothing to say, or was stuck, or the exchange
+            // had simply moved on — where the room now gets its turn instead
+            // of the message going unanswered by everyone.
+            const outsideConversation = this.threadScoped(msg)
+              ? await this.threadHasTeammate(msg)
+              : await this.exchangeIsUnderway(msg);
+            const wave =
+              (await this.roomFanoutWave(delivery, msg, channelAgents)) +
+              (outsideConversation ? 1 : 0);
             if (wave > 0) {
               const readyAt = Date.parse(msg.created_at) + wave * ROOM_FANOUT_INTERVAL_MS;
               if (Date.now() < readyAt) {
@@ -1258,8 +1283,18 @@ export class Bridge {
                 await this.finishDelivery(delivery, "skipped", "A teammate already answered");
                 return;
               }
+              // Nobody has answered yet, but someone may still be writing one.
+              // Waiting another interval costs nothing; two teammates
+              // answering the same question costs the reader.
+              if (await this.anotherTeammateIsWorkingOn(delivery, msg)) {
+                await this.deferDelivery(delivery, Date.now() + ROOM_FANOUT_INTERVAL_MS);
+                return;
+              }
             }
-            ambientReason = "in the room";
+            // The reason is the teammate's cue: "in the room" is a message
+            // addressed to everyone, where "unanswered" means it was somebody
+            // else's and they have not taken it.
+            ambientReason = outsideConversation ? "unanswered" : "in the room";
           }
         }
       }
