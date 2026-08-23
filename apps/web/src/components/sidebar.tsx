@@ -19,6 +19,7 @@ import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
 import { parseMessageTime } from "@/lib/message-time";
+import { InlineRename } from "./inline-rename";
 import { ancestorPaths, buildDocumentTree, folderLabel, type DocumentFolder } from "@/lib/document-tree";
 
 interface Server {
@@ -101,64 +102,117 @@ function DocumentRow({
   active,
   depth,
   document,
+  editing,
+  onDelete,
+  onEdit,
   onOpen,
+  onRename,
   onTogglePin,
   t,
 }: {
   active: boolean;
   depth: number;
   document: WorkspaceDocument;
+  editing: boolean;
+  onDelete: (document: WorkspaceDocument) => void;
+  onEdit: (key: string | null) => void;
   onOpen: (id: string) => void;
+  onRename: (id: string, title: string) => void;
   onTogglePin: (document: WorkspaceDocument) => void;
   t: (key: TranslationKey) => string;
 }) {
   const pinned = Boolean(document.pinned_at);
+  const indent = 10 + depth * TREE_INDENT;
+  const [dragging, setDragging] = useState(false);
+
+  if (editing) {
+    return (
+      <div className="flex h-8 w-full items-center rounded-[6px] bg-accent/60">
+        <FileTextIcon
+          className="size-4 shrink-0 opacity-60"
+          style={{ marginLeft: indent, marginRight: 8 }}
+        />
+        <InlineRename
+          className="h-6 min-w-0 flex-1 rounded-[4px] bg-background px-1.5 text-[13px] outline-none shadow-[0_0_0_1px_var(--border)]"
+          onCancel={() => onEdit(null)}
+          onCommit={(next) => {
+            onEdit(null);
+            onRename(document.id, next);
+          }}
+          value={document.title || ""}
+        />
+        <span className="w-1.5 shrink-0" />
+      </div>
+    );
+  }
+
   return (
-    <div
-      // The row is what gets dragged; a folder row is what catches it.
-      className={`group/doc relative flex h-8 w-full items-center rounded-[6px] transition-colors ${
-        active ? "bg-primary/10" : "hover:bg-accent/60"
-      }`}
-      draggable
-      onDragStart={(event) => {
-        event.dataTransfer.setData("text/x-teammate-document", document.id);
-        event.dataTransfer.effectAllowed = "move";
-      }}
+    <ContextMenu
+      className="w-full"
+      items={[
+        { label: t("documents.rename"), onClick: () => onEdit(`document:${document.id}`) },
+        {
+          label: pinned ? t("documents.unpin") : t("documents.pin"),
+          onClick: () => onTogglePin(document),
+        },
+        { danger: true, label: t("documents.delete"), onClick: () => onDelete(document) },
+      ]}
     >
-      <button
-        aria-current={active ? "page" : undefined}
-        className={`flex h-8 min-w-0 flex-1 items-center gap-2 pr-1 text-left text-[13px] ${
-          active ? "font-medium text-primary" : "text-muted-foreground"
-        }`}
-        onClick={() => onOpen(document.id)}
-        style={{ paddingLeft: 10 + depth * TREE_INDENT }}
-        type="button"
+      <div
+        // The row is what gets dragged; a folder row is what catches it. It
+        // fades while in flight, so the thing under the cursor is clearly the
+        // one that will land somewhere.
+        className={`group/doc relative flex h-8 w-full items-center rounded-[6px] transition-[background-color,opacity] duration-150 ${
+          active ? "bg-primary/10" : "hover:bg-accent/60"
+        } ${dragging ? "opacity-40" : ""}`}
+        draggable
+        onDragEnd={() => setDragging(false)}
+        onDragStart={(event) => {
+          event.dataTransfer.setData("text/x-teammate-document", document.id);
+          event.dataTransfer.effectAllowed = "move";
+          setDragging(true);
+        }}
       >
-        <FileTextIcon className={`size-4 shrink-0 ${active ? "" : "opacity-60"}`} />
-        <span className="truncate">{document.title || t("documents.untitled")}</span>
-      </button>
-      {/* A pin stays visible once set; otherwise it waits to be reached for. */}
-      <button
-        aria-label={pinned ? t("documents.unpin") : t("documents.pin")}
-        aria-pressed={pinned}
-        className={`mr-1.5 flex size-5 shrink-0 items-center justify-center rounded transition-opacity hover:bg-accent ${
-          pinned ? "text-primary opacity-100" : "opacity-0 group-hover/doc:opacity-60"
-        }`}
-        onClick={() => onTogglePin(document)}
-        title={pinned ? t("documents.unpin") : t("documents.pin")}
-        type="button"
-      >
-        <PinIcon className={`size-3.5 ${pinned ? "fill-current" : ""}`} />
-      </button>
-    </div>
+        <button
+          aria-current={active ? "page" : undefined}
+          className={`flex h-8 min-w-0 flex-1 items-center gap-2 pr-1 text-left text-[13px] ${
+            active ? "font-medium text-primary" : "text-muted-foreground"
+          }`}
+          onClick={() => onOpen(document.id)}
+          style={{ paddingLeft: indent }}
+          type="button"
+        >
+          <FileTextIcon className={`size-4 shrink-0 ${active ? "" : "opacity-60"}`} />
+          <span className="truncate">{document.title || t("documents.untitled")}</span>
+        </button>
+        {/* A pin stays visible once set; otherwise it waits to be reached for. */}
+        <button
+          aria-label={pinned ? t("documents.unpin") : t("documents.pin")}
+          aria-pressed={pinned}
+          className={`mr-1.5 flex size-5 shrink-0 items-center justify-center rounded transition-opacity hover:bg-accent ${
+            pinned ? "text-primary opacity-100" : "opacity-0 group-hover/doc:opacity-60"
+          }`}
+          onClick={() => onTogglePin(document)}
+          title={pinned ? t("documents.unpin") : t("documents.pin")}
+          type="button"
+        >
+          <PinIcon className={`size-3.5 ${pinned ? "fill-current" : ""}`} />
+        </button>
+      </div>
+    </ContextMenu>
   );
 }
 
 function DocumentFolderRow({
   activeDocumentId,
+  editingKey,
   folder,
+  onCreateIn,
+  onDeleteDocument,
+  onEdit,
   onMoveDocument,
   onOpenDocument,
+  onRenameDocument,
   onRenameFolder,
   onToggle,
   onTogglePin,
@@ -166,10 +220,15 @@ function DocumentFolderRow({
   t,
 }: {
   activeDocumentId: string | null;
+  editingKey: string | null;
   folder: DocumentFolder<WorkspaceDocument>;
+  onCreateIn: (path: string) => void;
+  onDeleteDocument: (document: WorkspaceDocument) => void;
+  onEdit: (key: string | null) => void;
   onMoveDocument: (documentId: string, folder: string) => void;
   onOpenDocument: (id: string) => void;
-  onRenameFolder: (path: string) => void;
+  onRenameDocument: (id: string, title: string) => void;
+  onRenameFolder: (path: string, name: string) => void;
   onToggle: (path: string) => void;
   onTogglePin: (document: WorkspaceDocument) => void;
   openFolders: Set<string>;
@@ -177,7 +236,30 @@ function DocumentFolderRow({
 }) {
   const open = openFolders.has(folder.path);
   const [dropTarget, setDropTarget] = useState(false);
-  return (
+  const indent = 4 + folder.depth * TREE_INDENT;
+
+  if (editingKey === `folder:${folder.path}`) {
+    return (
+      <div className="flex h-8 w-full items-center rounded-[6px] bg-accent/60">
+        <FolderIcon
+          className="size-4 shrink-0 text-primary/70"
+          style={{ marginLeft: indent + 18, marginRight: 8 }}
+        />
+        <InlineRename
+          className="h-6 min-w-0 flex-1 rounded-[4px] bg-background px-1.5 text-[13px] outline-none shadow-[0_0_0_1px_var(--border)]"
+          onCancel={() => onEdit(null)}
+          onCommit={(next) => {
+            onEdit(null);
+            onRenameFolder(folder.path, next);
+          }}
+          value={folder.name}
+        />
+        <span className="w-2 shrink-0" />
+      </div>
+    );
+  }
+
+  const row = (
     <>
       <button
         aria-expanded={open}
@@ -185,7 +267,6 @@ function DocumentFolderRow({
           dropTarget ? "bg-primary/15 text-primary" : "text-foreground/80 hover:bg-accent/60"
         }`}
         onClick={() => onToggle(folder.path)}
-        onDoubleClick={() => onRenameFolder(folder.path)}
         onDragLeave={() => setDropTarget(false)}
         onDragOver={(event) => {
           if (!event.dataTransfer.types.includes("text/x-teammate-document")) return;
@@ -200,7 +281,7 @@ function DocumentFolderRow({
           const id = event.dataTransfer.getData("text/x-teammate-document");
           if (id) onMoveDocument(id, folder.path);
         }}
-        style={{ paddingLeft: 4 + folder.depth * TREE_INDENT }}
+        style={{ paddingLeft: indent }}
         type="button"
       >
         {open ? (
@@ -221,10 +302,15 @@ function DocumentFolderRow({
           {folder.folders.map((child) => (
             <DocumentFolderRow
               activeDocumentId={activeDocumentId}
+              editingKey={editingKey}
               folder={child}
               key={child.path}
+              onCreateIn={onCreateIn}
+              onDeleteDocument={onDeleteDocument}
+              onEdit={onEdit}
               onMoveDocument={onMoveDocument}
               onOpenDocument={onOpenDocument}
+              onRenameDocument={onRenameDocument}
               onRenameFolder={onRenameFolder}
               onToggle={onToggle}
               onTogglePin={onTogglePin}
@@ -237,8 +323,12 @@ function DocumentFolderRow({
               active={activeDocumentId === document.id}
               depth={folder.depth + 1}
               document={document}
+              editing={editingKey === `document:${document.id}`}
               key={document.id}
+              onDelete={onDeleteDocument}
+              onEdit={onEdit}
               onOpen={onOpenDocument}
+              onRename={onRenameDocument}
               onTogglePin={onTogglePin}
               t={t}
             />
@@ -246,6 +336,18 @@ function DocumentFolderRow({
         </>
       )}
     </>
+  );
+
+  return (
+    <ContextMenu
+      className="w-full"
+      items={[
+        { label: t("documents.rename"), onClick: () => onEdit(`folder:${folder.path}`) },
+        { label: t("documents.newInFolder"), onClick: () => onCreateIn(folder.path) },
+      ]}
+    >
+      <div className="flex w-full flex-col gap-0.5">{row}</div>
+    </ContextMenu>
   );
 }
 
@@ -297,6 +399,9 @@ export function Sidebar({
   const [documentQuery, setDocumentQuery] = useState("");
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
   const [looseDropTarget, setLooseDropTarget] = useState(false);
+  // Which row is being renamed, as "document:<id>" or "folder:<path>".
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [newFolder, setNewFolder] = useState(false);
   const [userId, setUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
@@ -395,16 +500,33 @@ export function Sidebar({
   }, []);
 
   /**
-   * Both of these write straight through and let the realtime channel bring the
-   * list back. A document's place and its pin are one column each — there is no
-   * intermediate state worth holding on to locally, and an optimistic copy would
-   * only be a second version of the truth to keep in step.
+   * The row moves first and the write follows. Waiting for the round trip and
+   * then for the realtime echo puts a visible pause between letting go of a
+   * document and seeing it land, which reads as the app thinking about it —
+   * and it has nothing to think about, since the answer is already known.
+   *
+   * If the write fails the row goes back where it was and the error is shown.
    */
   const applyDocumentChange = useCallback(
-    async (id: string, patch: Record<string, string | null>) => {
+    async (id: string, patch: Partial<WorkspaceDocument>) => {
       setDocumentActionError("");
+      let previous: WorkspaceDocument | undefined;
+      setDocuments((current) =>
+        current.map((document) => {
+          if (document.id !== id) return document;
+          previous = document;
+          return { ...document, ...patch };
+        }),
+      );
       const { error } = await supabase.from("documents").update(patch).eq("id", id);
-      if (error) setDocumentActionError(error.message);
+      if (!error) return;
+      setDocumentActionError(error.message);
+      const restore = previous;
+      if (restore) {
+        setDocuments((current) =>
+          current.map((document) => (document.id === id ? restore : document)),
+        );
+      }
     },
     [supabase],
   );
@@ -429,12 +551,11 @@ export function Sidebar({
   );
 
   const renameFolder = useCallback(
-    (path: string) => {
+    (path: string, name: string) => {
       const current = folderLabel(path);
-      const parent = path.slice(0, Math.max(0, path.length - current.length - 1));
-      const name = window.prompt(t("documents.renameFolderPrompt"), current)?.trim();
       // A slash would silently reshape the tree; a rename should rename.
       if (!name || name === current || name.includes("/")) return;
+      const parent = path.slice(0, Math.max(0, path.length - current.length - 1));
       const next = parent ? `${parent}/${name}` : name;
       // Everything filed under here moves with it, however deep.
       for (const document of documents) {
@@ -443,21 +564,47 @@ export function Sidebar({
           folder_path: next + document.folder_path.slice(path.length),
         });
       }
-      setOpenFolders((current2) => new Set([...current2, ...ancestorPaths(next)]));
+      setOpenFolders((open) => new Set([...open, ...ancestorPaths(next)]));
     },
-    [applyDocumentChange, documents, t],
+    [applyDocumentChange, documents],
+  );
+
+  const renameDocument = useCallback(
+    (id: string, title: string) => {
+      if (title) void applyDocumentChange(id, { title });
+    },
+    [applyDocumentChange],
+  );
+
+  const deleteDocument = useCallback(
+    async (document: WorkspaceDocument) => {
+      setDocumentActionError("");
+      // Gone from the list at once; a document you deleted should not sit there
+      // while the write travels.
+      setDocuments((current) => current.filter((entry) => entry.id !== document.id));
+      const { error } = await supabase.from("documents").delete().eq("id", document.id);
+      if (error) {
+        setDocumentActionError(error.message);
+        setDocuments((current) => [document, ...current]);
+        return;
+      }
+      if (activeDocumentId === document.id) navigate(`/s/${serverSlug}/documents`);
+    },
+    [activeDocumentId, navigate, serverSlug, supabase],
   );
 
   /**
-   * A folder holds documents and nothing else, so this makes one with its first
-   * document already in it. There is no folder record to create on its own —
-   * a folder is where documents say they are.
+   * A folder holds documents and nothing else, so making one means making its
+   * first document in it. The name is typed in the tree where the folder will
+   * appear, rather than in a box over the top of it.
+   *
+   * Not memoised: it calls handleCreateDocument, which is redeclared each
+   * render and closes over the signed-in user. Holding the first render's copy
+   * would mean holding the empty user id it had before anyone had loaded.
    */
-  function createFolder() {
-    const name = window.prompt(t("documents.newFolderPrompt"), "")?.trim();
-    if (!name || name.includes("/")) return;
-    setOpenFolders((current) => new Set([...current, name]));
-    void handleCreateDocument(name);
+  function createInFolder(path: string) {
+    setOpenFolders((current) => new Set([...current, ...ancestorPaths(path)]));
+    void handleCreateDocument(path);
   }
 
   const openDocument = useCallback(
@@ -1401,7 +1548,7 @@ export function Sidebar({
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  onClick={createFolder}
+                  onClick={() => setNewFolder(true)}
                   title={t("documents.newFolder")}
                   aria-label={t("documents.newFolder")}
                 >
@@ -1438,8 +1585,12 @@ export function Sidebar({
                         active={activeDocumentId === document.id}
                         depth={0}
                         document={document}
+                        editing={editingKey === `document:${document.id}`}
                         key={`pinned-${document.id}`}
+                        onDelete={deleteDocument}
+                        onEdit={setEditingKey}
                         onOpen={openDocument}
+                        onRename={renameDocument}
                         onTogglePin={togglePin}
                         t={t}
                       />
@@ -1448,13 +1599,35 @@ export function Sidebar({
                 )}
                 {/* Folders next, as a tree you can walk. A document that came
                     from a folder on disk belongs in that folder here too. */}
+                {/* A folder being named appears where it will live, so you can
+                    see what you are naming it next to. */}
+                {newFolder && (
+                  <div className="flex h-8 w-full items-center rounded-[6px] bg-accent/60">
+                    <FolderIcon className="ml-[22px] mr-2 size-4 shrink-0 text-primary/70" />
+                    <InlineRename
+                      className="h-6 min-w-0 flex-1 rounded-[4px] bg-background px-1.5 text-[13px] outline-none shadow-[0_0_0_1px_var(--border)]"
+                      onCancel={() => setNewFolder(false)}
+                      onCommit={(name) => {
+                        setNewFolder(false);
+                        if (!name.includes("/")) createInFolder(name);
+                      }}
+                      value={t("documents.newFolder")}
+                    />
+                    <span className="w-2 shrink-0" />
+                  </div>
+                )}
                 {documentTree.folders.map((folder) => (
                   <DocumentFolderRow
                     activeDocumentId={activeDocumentId}
+                    editingKey={editingKey}
                     folder={folder}
                     key={folder.path}
+                    onCreateIn={createInFolder}
+                    onDeleteDocument={deleteDocument}
+                    onEdit={setEditingKey}
                     onMoveDocument={moveDocument}
                     onOpenDocument={openDocument}
+                    onRenameDocument={renameDocument}
                     onRenameFolder={renameFolder}
                     onToggle={toggleFolder}
                     onTogglePin={togglePin}
@@ -1495,8 +1668,12 @@ export function Sidebar({
                           active={activeDocumentId === document.id}
                           depth={0}
                           document={document}
+                          editing={editingKey === `document:${document.id}`}
                           key={document.id}
+                          onDelete={deleteDocument}
+                          onEdit={setEditingKey}
                           onOpen={openDocument}
+                          onRename={renameDocument}
                           onTogglePin={togglePin}
                           t={t}
                         />

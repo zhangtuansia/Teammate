@@ -491,14 +491,35 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     }
   }
 
-  /** Pinned from either side; the realtime channel brings the list back. */
+  /**
+   * The pin fills in before the write leaves. Waiting for the round trip and
+   * the realtime echo puts a pause between the click and the pin, which reads
+   * as the app deciding whether to allow it.
+   */
+  function patchDocumentLocally(id: string, patch: Partial<WorkspaceDocumentSummaryViewModel>) {
+    setListSnapshot((current) => {
+      if (!current) return current;
+      const next = {
+        ...current,
+        documents: current.documents.map((document) =>
+          document.id === id ? { ...document, ...patch } : document,
+        ),
+      };
+      listSnapshotRef.current = next;
+      return next;
+    });
+  }
+
   async function togglePin(document: WorkspaceDocumentSummaryViewModel) {
+    const pinnedAt = document.pinned_at ? null : new Date().toISOString();
+    patchDocumentLocally(document.id, { pinned_at: pinnedAt });
     const client = createClient();
     const { error: pinError } = await client
       .from("documents")
-      .update({ pinned_at: document.pinned_at ? null : new Date().toISOString() })
+      .update({ pinned_at: pinnedAt })
       .eq("id", document.id);
     if (pinError) {
+      patchDocumentLocally(document.id, { pinned_at: document.pinned_at });
       setListLoadState({ error: pinError.message, loading: false, refreshing: false, serverId });
     }
   }
