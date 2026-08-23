@@ -291,10 +291,6 @@
     opacity: 1;
   }
 }
-  to {
-    translate: 55% 0;
-  }
-}
 
 @keyframes teammate-thinking-pulse {
   to { stroke-dashoffset: -59; }
