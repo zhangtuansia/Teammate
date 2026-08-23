@@ -2216,3 +2216,60 @@ test("a teammate waiting its turn does not answer over one that is still writing
     assert.ok(Date.parse(stillWaiting?.next_attempt_at || "") > Date.now());
   });
 });
+
+test("a teammate named in a document hears about it once", async () => {
+  await withLocalHarness(async ({ client }) => {
+    const agentRow = await client.from("agents").select("name").eq("id", LOCAL_AGENT_ID).single();
+    assertQuery(agentRow);
+    const handle = (agentRow.data as { name: string }).name;
+
+    const created = await client
+      .from("documents")
+      .insert({
+        content: "",
+        created_by: LOCAL_USER_ID,
+        server_id: LOCAL_SERVER_ID,
+        title: "会议纪要",
+      })
+      .select("id")
+      .single();
+    assertQuery(created);
+    const documentId = (created.data as { id: string }).id;
+
+    const countMessages = async () => {
+      const rows = await client.from("messages").select("id, content");
+      assertQuery(rows);
+      return (rows.data || []) as Array<{ id: string; content: string }>;
+    };
+    const before = (await countMessages()).length;
+
+    // Naming a teammate reaches them. A document is not a channel, so the
+    // notice is a DM — which is also where a person would look for it, and it
+    // goes through the ordinary delivery pipeline from there.
+    await client
+      .from("documents")
+      .update({ content: `请 @${handle} 帮忙看一下这段。` })
+      .eq("id", documentId);
+    const afterMention = await countMessages();
+    assert.equal(afterMention.length, before + 1);
+    const notice = afterMention[afterMention.length - 1];
+    assert.match(notice.content, new RegExp(`@${handle}`));
+    assert.match(notice.content, /teammate:document\//, "the notice links the document");
+
+    // Editing around a name that is already there must not summon them again.
+    await client
+      .from("documents")
+      .update({ content: `请 @${handle} 帮忙看一下这段。\n\n另外补充一句。` })
+      .eq("id", documentId);
+    assert.equal((await countMessages()).length, before + 1, "an existing mention is not re-sent");
+
+    // Taking the name out and putting it back is a new ask, and does notify.
+    await client.from("documents").update({ content: "先不用了。" }).eq("id", documentId);
+    assert.equal((await countMessages()).length, before + 1);
+    await client
+      .from("documents")
+      .update({ content: `还是麻烦 @${handle} 看一下。` })
+      .eq("id", documentId);
+    assert.equal((await countMessages()).length, before + 2);
+  });
+});

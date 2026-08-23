@@ -5974,6 +5974,67 @@ function runAtomicMutationTransaction<T>(
   }
 }
 
+/**
+ * A teammate named in a document should hear about it. Documents are not a
+ * channel, so there is nowhere for a delivery to be queued against — but a DM
+ * is, and it is also where a person would look for "someone wants me to read
+ * this". The notice is an ordinary message, so it goes through the same
+ * delivery pipeline, shows up in the transcript, and can simply be answered.
+ *
+ * Only newly added mentions notify. Editing a paragraph three lines below a
+ * teammate's name must not summon them again, and saving twice must not send
+ * two notices.
+ */
+function notifyDocumentMentions(previousContent: string, stored: DbRow) {
+  const serverId = String(stored.server_id ?? "");
+  const documentId = String(stored.id ?? "");
+  const title = String(stored.title ?? "").trim() || "Untitled";
+  if (!serverId || !documentId) return;
+
+  const handles = (text: string) => {
+    const found = new Set<string>();
+    for (const match of text.matchAll(/@([A-Za-z0-9][A-Za-z0-9._-]*)/g)) {
+      found.add(match[1].toLowerCase());
+    }
+    return found;
+  };
+  const before = handles(previousContent);
+  const added = [...handles(String(stored.content ?? ""))].filter((h) => !before.has(h));
+  if (added.length === 0) return;
+
+  const agents = db
+    .prepare("SELECT id, name FROM agents WHERE server_id = ?")
+    .all(toSqlValue(serverId)) as Array<{ id: string; name: string }>;
+  const writer = String(stored.generated_by_agent_id ?? "") || null;
+
+  for (const handle of added) {
+    const agent = agents.find((entry) => entry.name.toLowerCase() === handle);
+    // A teammate cannot summon themselves by editing their own document.
+    if (!agent || agent.id === writer) continue;
+    const channel = db
+      .prepare(
+        `SELECT c.id FROM channels c
+         JOIN channel_members cm ON cm.channel_id = c.id
+          AND cm.member_id = ? AND cm.member_type = 'agent'
+         WHERE c.type = 'dm' AND c.server_id = ?
+         LIMIT 1`,
+      )
+      .get(toSqlValue(agent.id), toSqlValue(serverId)) as { id: string } | undefined;
+    if (!channel) continue;
+
+    executeQuery({
+      table: "messages",
+      action: "insert",
+      values: {
+        channel_id: channel.id,
+        content: `@${agent.name} 你在文档里被提到了：[${title.replace(/[[\]]/g, "")}](teammate:document/${documentId.slice(0, 8)})`,
+        sender_id: writer ?? LOCAL_USER_ID,
+        sender_type: writer ? "agent" : "human",
+      },
+    });
+  }
+}
+
 function localRowExists(sql: string, ...params: SQLInputValue[]) {
   return Boolean(db.prepare(sql).get(...params));
 }
@@ -6997,6 +7058,7 @@ function executeQuery(query: QueryRequest): QueryExecutionResult {
           emitDatabaseEvent("INSERT", "message_deliveries", delivery);
         }
       }
+      if (table === "documents") notifyDocumentMentions("", stored);
     }
     return {
       data: query.single ? inserted[0] || null : inserted,
@@ -7034,6 +7096,12 @@ function executeQuery(query: QueryRequest): QueryExecutionResult {
         ...whereParams
       ) as DbRow[];
     for (const row of rows) emitDatabaseEvent("UPDATE", table, row);
+    if (table === "documents") {
+      for (const row of rows) {
+        const was = previousRows.find((entry) => entry.id === row.id);
+        notifyDocumentMentions(String(was?.content ?? ""), row);
+      }
+    }
     return {
       data: query.single ? rows[0] || null : rows,
       error: null,

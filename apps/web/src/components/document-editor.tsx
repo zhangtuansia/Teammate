@@ -9,6 +9,7 @@ import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { Markdown } from "@tiptap/markdown";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { DocumentImage } from "@/components/document-image";
+import { documentLinkHref } from "@/lib/teammate-link";
 import {
   collapseBlankLines,
   tightenMarkdownLists,
@@ -72,30 +73,74 @@ const BLOCKS: BlockChoice[] = [
  */
 export function DocumentEditor({
   content,
+  documents = [],
   onChange,
   placeholder,
+  teammates = [],
 }: {
   content: string;
+  /** Offered by "/" so a document can point at another one. */
+  documents?: Array<{ id: string; title: string; folder_path: string }>;
   onChange: (markdown: string) => void;
   placeholder: string;
+  /** Offered by "@" — writing a teammate's handle here reaches them. */
+  teammates?: Array<{ id: string; name: string; display_name: string }>;
 }) {
   // The "/" menu. Its state lives here rather than in the editor because the
   // list that renders it is React's, and the keyboard has to reach both.
   const [slash, setSlash] = useState<
-    { from: number; query: string; left: number; top: number } | null
+    { from: number; query: string; left: number; top: number; trigger: "/" | "@" } | null
   >(null);
   const [slashIndex, setSlashIndex] = useState(0);
-  const slashRef = useRef<{ from: number; query: string } | null>(null);
+  const slashRef = useRef<{ from: number; query: string; trigger: "/" | "@" } | null>(null);
   const slashIndexRef = useRef(0);
-  const matches = useMemo(
-    () =>
-      slash
-        ? BLOCKS.filter((block) =>
-            block.label.toLowerCase().includes(slash.query.toLowerCase()),
-          )
-        : [],
-    [slash],
-  );
+  const matches = useMemo(() => {
+    if (!slash) return [];
+    const needle = slash.query.toLowerCase();
+    // "@" names a person, "/" points at a thing — a block to insert or a
+    // document to link. The same list machinery serves both.
+    if (slash.trigger === "@") {
+      return teammates
+        .filter((teammate) =>
+          `${teammate.display_name} ${teammate.name}`.toLowerCase().includes(needle),
+        )
+        .slice(0, 8)
+        .map<BlockChoice>((teammate) => ({
+          hint: `@${teammate.name}`,
+          key: `teammate:${teammate.id}`,
+          label: teammate.display_name,
+          run: (editorInstance) =>
+            editorInstance.chain().focus().insertContent(`@${teammate.name} `).run(),
+        }));
+    }
+    const blocks = BLOCKS.filter((block) => block.label.toLowerCase().includes(needle));
+    const linked = documents
+      .filter((document) =>
+        `${document.folder_path}/${document.title}`.toLowerCase().includes(needle),
+      )
+      .slice(0, 6)
+      .map<BlockChoice>((document) => ({
+        hint: document.folder_path || "",
+        key: `document:${document.id}`,
+        label: document.title || "Untitled",
+        run: (editorInstance) =>
+          editorInstance
+            .chain()
+            .focus()
+            .insertContent([
+              {
+                marks: [{ attrs: { href: documentLinkHref(document.id) }, type: "link" }],
+                text: document.title || "Untitled",
+                type: "text",
+              },
+              { text: " ", type: "text" },
+            ])
+            .run(),
+      }));
+    // With a query typed, a named document is more likely what was meant than
+    // a block whose name happens to contain the same letters.
+    return needle ? [...linked, ...blocks] : [...blocks, ...linked];
+  }, [documents, slash, teammates]);
   const matchesRef = useRef<BlockChoice[]>([]);
 
   useEffect(() => {
@@ -146,7 +191,14 @@ export function DocumentEditor({
         gapcursor: false,
         link: false,
       }),
-      Link.configure({ autolink: true, linkOnPaste: true, openOnClick: false }),
+      // `teammate` is in the protocol list because a document reference is a link
+      // with our own scheme; without it the extension strips the href on save.
+      Link.configure({
+        autolink: true,
+        linkOnPaste: true,
+        openOnClick: false,
+        protocols: ["teammate"],
+      }),
       // Work documents are full of things to do; Slack's canvas puts a
       // checkbox in reach for the same reason.
       TaskList,
@@ -189,12 +241,13 @@ export function DocumentEditor({
         return;
       }
       const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "\ufffc");
-      const match = /(?:^|\s)\/([^\s/]*)$/.exec(before);
+      const match = /(?:^|\s)([/@])([^\s/@]*)$/.exec(before);
       if (!match) {
         closeSlash();
         return;
       }
-      const from = $from.pos - match[1].length - 1;
+      const trigger = match[1] as "/" | "@";
+      const from = $from.pos - match[2].length - 1;
       // Position is taken here, where the view is already in hand and the caret
       // is exactly where the menu should hang from.
       const box = instance.view.dom.getBoundingClientRect();
@@ -202,8 +255,9 @@ export function DocumentEditor({
       const next = {
         from,
         left: at.left - box.left,
-        query: match[1],
+        query: match[2],
         top: at.bottom - box.top + 4,
+        trigger,
       };
       slashRef.current = next;
       setSlash(next);

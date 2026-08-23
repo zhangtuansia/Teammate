@@ -284,6 +284,10 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  // Who "@" can reach from inside a document. Loaded once per workspace.
+  const [teammates, setTeammates] = useState<
+    Array<{ id: string; name: string; display_name: string }>
+  >([]);
   const [importStatus, setImportStatus] = useState("");
   const folderInputRef = useRef<HTMLInputElement>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -548,6 +552,27 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       setCreating(false);
     }
   }
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      const { data, error: directoryError } = await createClient().rpc(
+        "list_workspace_agent_directory",
+        { server_uuid: serverId },
+      );
+      if (!active || directoryError || !data) return;
+      setTeammates(
+        (data as Array<{ id: string; name: string; display_name: string }>).map((agent) => ({
+          display_name: agent.display_name || agent.name,
+          id: agent.id,
+          name: agent.name,
+        })),
+      );
+    })();
+    return () => {
+      active = false;
+    };
+  }, [serverId]);
 
   // The address only changes once typing has settled, so this can run on it.
   useEffect(() => {
@@ -1029,11 +1054,21 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
             {useRichText ? (
               <DocumentEditor
                 content={content}
+                // "/" offers the other documents here; the one being edited is
+                // left out, since a document pointing at itself is a loop.
+                documents={documents
+                  .filter((entry) => entry.id !== selectedDocument?.id)
+                  .map((entry) => ({
+                    folder_path: entry.folder_path,
+                    id: entry.id,
+                    title: entry.title,
+                  }))}
                 onChange={(markdown) => {
                   setContent(markdown);
                   setDirty(true);
                 }}
                 placeholder={t("documents.contentPlaceholder")}
+                teammates={teammates}
               />
             ) : (
               <div className="space-y-2">
