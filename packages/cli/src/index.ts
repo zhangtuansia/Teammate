@@ -35,6 +35,7 @@
 
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { createLocalClient } from "@teammate/local-client";
+import { documentLinkMarkdown } from "@teammate/shared";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { readFile } from "fs/promises";
 import { basename, join, resolve as resolvePath } from "path";
@@ -1789,6 +1790,9 @@ async function cmdDocumentCreate(flags: Record<string, string>) {
   console.log(
     `Document ${shortId(data.id)} created: ${data.title}. updated_at=${data.updated_at}`
   );
+  // Telling someone where a document is only helps if they can get to it, and
+  // an id in prose is not a way to get anywhere. This is the line to paste.
+  console.log(`Link to it in chat as: ${documentLinkMarkdown(shortId(data.id), data.title)}`);
 }
 
 async function cmdDocumentUpdate(flags: Record<string, string>) {
@@ -1844,6 +1848,7 @@ async function cmdDocumentUpdate(flags: Record<string, string>) {
   console.log(
     `Document ${shortId(data.id)} updated: ${data.title}. updated_at=${data.updated_at}`
   );
+  console.log(`Link to it in chat as: ${documentLinkMarkdown(shortId(data.id), data.title)}`);
 }
 
 /**

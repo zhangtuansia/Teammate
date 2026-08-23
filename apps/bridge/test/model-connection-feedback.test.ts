@@ -24,6 +24,10 @@ import {
   planFolderImport,
 } from "../../web/src/lib/folder-import.ts";
 import { ancestorPaths, buildDocumentTree } from "../../web/src/lib/document-tree.ts";
+import {
+  documentIdFromHref,
+  documentLinkMarkdown,
+} from "../../../packages/shared/src/index.ts";
 
 const appFile = (path: string) => new URL(`../../${path}`, import.meta.url);
 
@@ -541,4 +545,35 @@ test("dropping a folder reads what is inside it", async () => {
     items: [{ kind: "file", webkitGetAsEntry: () => null }],
   } as unknown as DataTransfer);
   assert.deepEqual(loose.map((file) => file.name), ["note.md"]);
+});
+
+test("a document reference is one format across chat, documents and the CLI", () => {
+  // The CLI prints this for an agent to paste and the renderer reads it back,
+  // so the two have to agree exactly — they are different processes.
+  assert.equal(
+    documentLinkMarkdown("02ea4fb3", "关于会议场景的一些看法"),
+    "[关于会议场景的一些看法](teammate:document/02ea4fb3)",
+  );
+  assert.equal(documentIdFromHref("teammate:document/02ea4fb3"), "02ea4fb3");
+
+  // Brackets in a title would end the link text early and break the reference.
+  assert.equal(
+    documentLinkMarkdown("abc123", "Q3 [draft] plan"),
+    "[Q3 draft plan](teammate:document/abc123)",
+  );
+  assert.equal(documentLinkMarkdown("abc123", ""), "[Untitled](teammate:document/abc123)");
+
+  // Anything that is not one of ours stays out of the document renderer, which
+  // navigates without asking. A crafted href must not reach it.
+  for (const href of [
+    "https://example.com",
+    "teammate:document/../../etc",
+    "teammate:document/<script>",
+    "teammate:agent/02ea4fb3",
+    "javascript:alert(1)",
+    "",
+    undefined,
+  ]) {
+    assert.equal(documentIdFromHref(href), null, `should not resolve: ${String(href)}`);
+  }
 });

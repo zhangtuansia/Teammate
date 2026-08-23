@@ -180,3 +180,40 @@ export type CliCommand =
   | { action: "task_claim"; taskNumber?: number; messageId?: string }
   | { action: "task_update"; taskNumber: number; status: TaskStatus }
   | { action: "server_info" };
+
+/**
+ * Documents are referred to across the app — in messages, in other documents,
+ * and by teammates writing through the CLI — so they need one way of being
+ * named that survives all three.
+ *
+ * A reference is an ordinary Markdown link with a `teammate:` scheme:
+ *
+ *     [关于会议场景的一些看法](teammate:document/02ea4fb3)
+ *
+ * Nothing new to parse. It is already a link everywhere Markdown is rendered,
+ * it carries the title as its text so it stays readable if it is ever pasted
+ * somewhere that knows nothing about us, and the renderer turns it into an
+ * in-app navigation instead of a trip to the browser.
+ *
+ * An id prefix is enough, which is what the CLI hands agents.
+ */
+const DOCUMENT_PREFIX = "teammate:document/";
+
+export function documentLinkHref(id: string) {
+  return `${DOCUMENT_PREFIX}${id}`;
+}
+
+/** The document a link points at, or null when it points somewhere else. */
+export function documentIdFromHref(href: string | undefined | null): string | null {
+  if (!href || !href.startsWith(DOCUMENT_PREFIX)) return null;
+  const id = href.slice(DOCUMENT_PREFIX.length).trim();
+  // Ids and their prefixes are hex and dashes; anything else is not one of ours
+  // and must not become a link that navigates.
+  return /^[0-9a-f-]{4,64}$/i.test(id) ? id : null;
+}
+
+/** The Markdown to paste. Titles with brackets would otherwise break the link. */
+export function documentLinkMarkdown(id: string, title: string) {
+  const safeTitle = title.replace(/[[\]]/g, "").trim() || "Untitled";
+  return `[${safeTitle}](${documentLinkHref(id)})`;
+}

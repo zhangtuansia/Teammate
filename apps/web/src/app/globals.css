@@ -803,3 +803,28 @@
   float: left;
   height: 0;
 }
+
+/* A document reference inside a message or another document. It reads as part
+   of the sentence — a link, not a button — but carries an icon so you can tell
+   at a glance that it goes somewhere inside the workspace rather than out. */
+.teammate-document-ref {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25em;
+  max-width: 100%;
+  padding: 0 2px;
+  border-radius: 3px;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, transparent);
+  text-align: left;
+  vertical-align: baseline;
+}
+
+.teammate-document-ref:hover {
+  background: color-mix(in oklab, var(--primary) 16%, transparent);
+  text-decoration: underline;
+}
+
+.teammate-document-ref svg {
+  align-self: center;
+}

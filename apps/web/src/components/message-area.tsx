@@ -25,6 +25,15 @@ import TiptapMessageInput, {
 } from './tiptap-message-input';
 import { Popover, PopoverPopup, PopoverTrigger } from '@/components/ui/popover';
 import { preferredEmojiForm, reactionKey } from '@/lib/emoji';
+import { documentLinkMarkdown } from '@/lib/teammate-link';
+
+/** What the "/" picker needs to show a document and link to it. */
+interface WorkspaceDocumentChoice {
+  id: string;
+  title: string;
+  folder_path: string;
+  updated_at: string;
+}
 
 // Every emoji there is, with its names in two languages, is a quarter of a
 // megabyte — worth having, but not worth carrying in the bundle that has to
@@ -994,6 +1003,9 @@ function MessageAreaContent({
   const [olderMessagesError, setOlderMessagesError] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [docQuery, setDocQuery] = useState<string | null>(null);
+  const [docIndex, setDocIndex] = useState(0);
+  const [documents, setDocuments] = useState<WorkspaceDocumentChoice[] | null>(null);
   const requestControllersRef = useRef(
     new Map<AbortController, ReturnType<typeof setTimeout>>(),
   );
@@ -1351,6 +1363,7 @@ function MessageAreaContent({
     );
   }, [channel?.type, channelAgents, mentionQuery]);
   const mentionListboxId = channel ? `mention-suggestions-${channel.id}` : undefined;
+  const docListboxId = channel ? `document-suggestions-${channel.id}` : undefined;
   const mentionOpen = mentionAgents.length > 0;
   const activeMentionId = mentionOpen
     ? mentionAgents[Math.min(mentionIndex, mentionAgents.length - 1)]?.id
@@ -1583,10 +1596,21 @@ function MessageAreaContent({
     const nextQuery = channel?.type === 'dm'
       ? null
       : textBeforeCursor.match(/@([^\s@]*)$/)?.[1] ?? null;
-    if (nextQuery === mentionQuery) return;
-    setMentionQuery(nextQuery);
-    setMentionIndex(0);
-  }, [channel?.type, mentionQuery]);
+    if (nextQuery !== mentionQuery) {
+      setMentionQuery(nextQuery);
+      setMentionIndex(0);
+    }
+    // "@" is for people and "/" is for documents — you are naming someone in
+    // one case and pointing at something in the other. A slash only opens the
+    // list where a word could start, so a date or a path is just a date or a
+    // path. Unlike a mention this works in a DM: saying where a document is
+    // makes as much sense one-to-one as it does in a room.
+    const nextDoc = textBeforeCursor.match(/(?:^|\s)\/([^\s/]*)$/)?.[1] ?? null;
+    if (nextDoc !== docQuery) {
+      setDocQuery(nextDoc);
+      setDocIndex(0);
+    }
+  }, [channel?.type, docQuery, mentionQuery]);
 
   const markAgentsResponded = useCallback((respondingIds: Iterable<string>) => {
     const responding = new Set(respondingIds);
@@ -2603,6 +2627,50 @@ function MessageAreaContent({
     void deliverMessage(outgoing, resolveMessageTargets(outgoing.content), true);
   }, [channel?.id, deliverMessage, messages, resolveMessageTargets]);
 
+  // The list is fetched the first time someone reaches for it rather than on
+  // every composer mount — most messages never name a document.
+  useEffect(() => {
+    const serverId = channel?.server_id;
+    if (docQuery === null || documents !== null || !serverId) return;
+    let active = true;
+    void (async () => {
+      const { data, error } = await supabase
+        .from('documents')
+        .select('id, title, folder_path, updated_at')
+        .eq('server_id', serverId)
+        .order('updated_at', { ascending: false })
+        .limit(200);
+      if (!active) return;
+      setDocuments(error || !data ? [] : (data as WorkspaceDocumentChoice[]));
+    })();
+    return () => {
+      active = false;
+    };
+  }, [channel?.server_id, docQuery, documents, supabase]);
+
+  const docMatches = useMemo(() => {
+    if (docQuery === null || !documents) return [];
+    const needle = docQuery.trim().toLowerCase();
+    const matches = needle
+      ? documents.filter((document) =>
+          `${document.folder_path}/${document.title}`.toLowerCase().includes(needle),
+        )
+      : documents;
+    return matches.slice(0, 8);
+  }, [docQuery, documents]);
+
+  const commitDocument = useCallback((document: WorkspaceDocumentChoice) => {
+    if (docQuery === null) return;
+    inputRef.current?.replaceMention(
+      docQuery,
+      `${documentLinkMarkdown(document.id, document.title)} `,
+      '/',
+    );
+    setDocQuery(null);
+    setDocIndex(0);
+    inputRef.current?.focus();
+  }, [docQuery]);
+
   const commitMention = useCallback((handle: string) => {
     if (mentionQuery === null) return;
     inputRef.current?.replaceMention(mentionQuery, `@${handle} `);
@@ -3214,6 +3282,49 @@ function MessageAreaContent({
             {t('message.agentLoading')}
           </p>
         )}
+        {/* "/" picks a document to point at. */}
+        {docQuery !== null && docMatches.length > 0 && (
+          <div
+            aria-label={t('message.documentSuggestions')}
+            className="absolute bottom-full left-4 right-4 z-50 mb-1 max-h-48 overflow-y-auto rounded-lg border bg-popover py-1 shadow-lg"
+            id={docListboxId}
+            role="listbox"
+          >
+            {docMatches.map((document, index) => (
+              <button
+                aria-selected={index === docIndex}
+                className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-colors ${
+                  index === docIndex
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-accent/50'
+                }`}
+                id={`document-option-${document.id}`}
+                key={document.id}
+                onMouseDown={(event) => {
+                  // The composer would lose the cursor the replacement needs.
+                  event.preventDefault();
+                  commitDocument(document);
+                }}
+                role="option"
+                type="button"
+              >
+                <span className="flex size-5 shrink-0 items-center justify-center rounded bg-primary/10 text-primary">
+                  <TypeIcon className="size-3" />
+                </span>
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block truncate text-foreground">
+                    {document.title || t('documents.untitled')}
+                  </span>
+                  {document.folder_path && (
+                    <span className="block truncate text-[10px] text-muted-foreground">
+                      {document.folder_path}
+                    </span>
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
         {/* @mention autocomplete dropdown */}
         {mentionQuery !== null &&
           channel.type !== 'dm' &&
@@ -3297,6 +3408,24 @@ function MessageAreaContent({
               }}
               onSelectionUpdate={updateMentionFromCursor}
               onKeyDown={(event) => {
+                if (docQuery !== null && docMatches.length > 0) {
+                  if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+                    commitDocument(docMatches[Math.min(docIndex, docMatches.length - 1)]);
+                    return true;
+                  }
+                  if (event.key === 'ArrowDown') {
+                    setDocIndex((prev) => (prev + 1) % docMatches.length);
+                    return true;
+                  }
+                  if (event.key === 'ArrowUp') {
+                    setDocIndex((prev) => (prev - 1 + docMatches.length) % docMatches.length);
+                    return true;
+                  }
+                  if (event.key === 'Escape') {
+                    setDocQuery(null);
+                    return true;
+                  }
+                }
                 if (mentionQuery !== null && channel.type !== 'dm') {
                   if (mentionAgents.length > 0) {
                     if (event.key === 'Enter' && !event.shiftKey) {

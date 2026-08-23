@@ -12,11 +12,13 @@ import {
   LoaderCircleIcon,
 } from "lucide-react";
 import { Children, useEffect, useState, type ComponentProps } from "react";
-import ReactMarkdown, { type ExtraProps } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { remarkChatBreaks } from "@/lib/markdown-breaks";
 import { apiUrl } from "@/lib/api-url";
 import { isLocalAttachmentPath } from "@/lib/local-auth";
+import { documentIdFromHref, documentPath } from "@/lib/teammate-link";
+import { useParams, useRouter } from "next/navigation";
 
 const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
@@ -182,6 +184,34 @@ function AttachmentImage({ alt, path }: { alt: string; path: string }) {
   );
 }
 
+/**
+ * A reference to a document in this workspace. It opens the document rather
+ * than the browser: a teammate that wrote something up and then said where it
+ * is should be one click from the thing itself.
+ *
+ * The slug comes from the route because a reference only ever names a document
+ * id — the workspace is wherever you are reading it.
+ */
+function DocumentLink({ children, id }: { children: React.ReactNode; id: string }) {
+  const params = useParams();
+  const router = useRouter();
+  const slug = typeof params?.slug === "string" ? params.slug : "";
+  const label = typeof children === "string" ? children : null;
+
+  if (!slug) return <span className="teammate-document-ref">{children}</span>;
+  return (
+    <button
+      className="teammate-document-ref"
+      onClick={() => router.push(documentPath(slug, id))}
+      title={label ?? undefined}
+      type="button"
+    >
+      <FileTextIcon aria-hidden className="size-3.5 shrink-0 opacity-70" />
+      <span className="truncate">{children}</span>
+    </button>
+  );
+}
+
 function AttachmentLink({
   children,
   path,
@@ -255,6 +285,8 @@ function SafeMarkdownLink({
   if (href && isLocalAttachmentPath(href)) {
     return <AttachmentLink path={href}>{children}</AttachmentLink>;
   }
+  const documentId = documentIdFromHref(href);
+  if (documentId) return <DocumentLink id={documentId}>{children}</DocumentLink>;
   const safeHref = safeExternalLink(href);
   if (!safeHref) return <span>{children}</span>;
   return (
@@ -381,6 +413,13 @@ export function SafeMarkdown({
       components={mentions ? MENTION_COMPONENTS : BASE_COMPONENTS}
       remarkPlugins={[remarkGfm, remarkChatBreaks]}
       skipHtml
+      // The default transform drops every scheme it does not recognise, which
+      // includes ours — a document reference would arrive at the link renderer
+      // with an empty href and render as plain text. Everything else still goes
+      // through it, so javascript: and friends are still dropped.
+      urlTransform={(url) =>
+        documentIdFromHref(url) ? url : defaultUrlTransform(url)
+      }
     >
       {children}
     </ReactMarkdown>

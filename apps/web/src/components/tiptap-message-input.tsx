@@ -26,8 +26,8 @@ export interface TiptapMessageInputHandle {
   getMarkdown: () => string;
   /** Insert text at the cursor and focus, for composer shortcuts like "@". */
   insertText: (text: string) => void;
-  /** Replace @query text near cursor with replacement string */
-  replaceMention: (query: string, replacement: string) => void;
+  /** Replace a `<trigger><query>` run near the cursor with the replacement. */
+  replaceMention: (query: string, replacement: string, trigger?: string) => void;
 }
 
 interface TiptapMessageInputProps {
@@ -472,12 +472,12 @@ const TiptapMessageInput = forwardRef<
     insertText: (text: string) => {
       editor?.chain().focus().insertContent(text).run();
     },
-    replaceMention: (query: string, replacement: string) => {
+    replaceMention: (query: string, replacement: string, trigger = "@") => {
       if (!editor) return;
       const { from } = editor.state.selection;
       const $from = editor.state.doc.resolve(from);
       const textBefore = $from.parent.textBetween(0, $from.parentOffset);
-      const searchStr = `@${query}`;
+      const searchStr = `${trigger}${query}`;
       const idx = textBefore.lastIndexOf(searchStr);
       if (idx === -1) return;
       const start = $from.start() + idx;
