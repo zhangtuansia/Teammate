@@ -392,11 +392,22 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
 
     const client = createClient();
     try {
-      const { data, error: queryError } = await client
+      const columns =
+        "id, server_id, title, content, created_by, generated_by_agent_id, folder_path, pinned_at, created_at, updated_at";
+      // Short ids are the currency here: the CLI prints them, agents write
+      // them into links, and message headers carry them. A reference is
+      // therefore as likely to name the first eight characters as the whole
+      // UUID, and a reader that only understood the latter answered "Document
+      // not found" to a link a teammate had just handed over.
+      const isFullId = nextDocumentId.length >= 36;
+      const lookup = client
         .from("documents")
-        .select("id, server_id, title, content, created_by, generated_by_agent_id, created_at, updated_at")
-        .eq("id", nextDocumentId)
-        .eq("server_id", serverId)
+        .select(columns)
+        .eq("server_id", serverId);
+      const { data, error: queryError } = await (isFullId
+        ? lookup.eq("id", nextDocumentId)
+        : lookup.ilike("id", `${nextDocumentId}%`)
+      )
         .abortSignal(requestController.signal)
         .maybeSingle();
       if (requestController.signal.aborted) throw new Error("Request aborted");
