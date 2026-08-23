@@ -84,7 +84,6 @@
 }
 
 @theme inline {
-  --animate-skeleton: skeleton 2s -1s infinite linear;
   --animate-caret-blink: 1s ease-out infinite caret-blink;
   --animate-toast-success-odd: toast-success-odd 0.32s cubic-bezier(0.5, 1, 0.89, 1);
   --animate-toast-success-even: toast-success-even 0.32s cubic-bezier(0.5, 1, 0.89, 1);
@@ -149,11 +148,6 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-  @keyframes skeleton {
-    to {
-      background-position: -200% 0;
-    }
-  }
   @keyframes caret-blink {
     0%,
     70%,
@@ -276,26 +270,37 @@
 }
 
 .teammate-thinking-label {
-  color: transparent;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--muted-foreground) 68%, transparent) 0%,
-    var(--foreground) 50%,
-    color-mix(in srgb, var(--muted-foreground) 68%, transparent) 100%
-  );
-  background-size: 260% 100%;
-  background-clip: text;
-  animation: teammate-thinking-shimmer 1.6s ease-in-out infinite;
+  /* This used to sweep a gradient across the glyphs with background-position.
+     A per-glyph shimmer cannot be composited — the highlight has to be clipped
+     to the text, and clipping moves the text with it — so it repainted the
+     label every frame on the main thread, and hitched while a teammate was
+     composing, which is the one moment it exists to reassure you about.
+
+     A breathe is a different effect, and it is one the compositor can hold on
+     its own: the label keeps its rhythm no matter what the page is doing. */
+  color: var(--foreground);
+  animation: teammate-thinking-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes teammate-thinking-breathe {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+  to {
+    translate: 55% 0;
+  }
 }
 
 @keyframes teammate-thinking-pulse {
   to { stroke-dashoffset: -59; }
 }
 
-@keyframes teammate-thinking-shimmer {
-  from { background-position: 100% 0; }
-  to { background-position: -100% 0; }
-}
+
 
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -320,7 +325,6 @@
 
   .teammate-thinking-label {
     color: var(--foreground);
-    background: none;
   }
 
   .animate-message-send,
@@ -334,7 +338,6 @@
 @media (forced-colors: active) {
   .teammate-thinking-label {
     color: CanvasText;
-    background: none;
   }
 }
 
@@ -848,6 +851,49 @@
 
 @media (prefers-reduced-motion: reduce) {
   .teammate-pop-in {
+    animation: none;
+  }
+}
+
+/* Skeletons and the thinking label used to sweep by moving a gradient's
+   background-position, which repaints the whole element every frame on the
+   main thread. Both are on screen precisely when that thread is busiest —
+   during a load, or while a teammate is composing — so the sweep hitched at
+   exactly the moment it was meant to say "still working".
+
+   The gradient is now a band that rasterizes once and moves with `translate`,
+   which the compositor owns. It keeps its own timing however busy the page
+   is, at whatever the display can do. */
+.teammate-sweep {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.teammate-sweep::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline: -50%;
+  background: linear-gradient(
+    100deg,
+    transparent 42%,
+    var(--teammate-sweep-highlight, transparent),
+    transparent 58%
+  );
+  translate: -60% 0;
+  animation: teammate-sweep 2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes teammate-sweep {
+  to {
+    translate: 60% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .teammate-sweep::after {
     animation: none;
   }
 }
