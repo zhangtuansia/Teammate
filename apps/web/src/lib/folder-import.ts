@@ -47,6 +47,59 @@ function relativePath(file: File) {
   return cut === -1 ? full : full.slice(cut + 1);
 }
 
+/**
+ * The files behind a drop. `dataTransfer.files` flattens a dropped folder to
+ * nothing — a directory is not a file, so it simply is not there — and the only
+ * way to see inside one is to walk its entries, which is asynchronous and has
+ * to be started before the drop handler returns or the items go stale.
+ *
+ * Files dropped directly keep their own names; files inside a dropped folder
+ * keep the path they had under it, so dropping a folder files its notes the
+ * same way choosing that folder would.
+ */
+export async function filesFromDrop(dataTransfer: DataTransfer): Promise<File[]> {
+  const entries: FileSystemEntry[] = [];
+  for (const item of dataTransfer.items) {
+    if (item.kind !== 'file') continue;
+    const entry = item.webkitGetAsEntry?.();
+    if (entry) entries.push(entry);
+  }
+  // Without entry support there is nothing to walk, so take what is offered.
+  if (entries.length === 0) return [...dataTransfer.files];
+
+  const collected: File[] = [];
+  const walk = async (entry: FileSystemEntry, prefix: string): Promise<void> => {
+    if (entry.isFile) {
+      const file = await new Promise<File | null>((resolve) => {
+        (entry as FileSystemFileEntry).file(resolve, () => resolve(null));
+      });
+      if (!file) return;
+      // planFolderImport strips the first segment, the way a chosen folder's
+      // own name is stripped, so paths line up whichever way the files arrived.
+      Object.defineProperty(file, 'webkitRelativePath', {
+        value: prefix ? `${prefix}/${file.name}` : file.name,
+      });
+      collected.push(file);
+      return;
+    }
+    if (!entry.isDirectory) return;
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    // readEntries returns at most a batchful, so it is called until it is dry.
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve) => {
+        reader.readEntries(resolve, () => resolve([]));
+      });
+      if (batch.length === 0) break;
+      for (const child of batch) {
+        await walk(child, prefix ? `${prefix}/${entry.name}` : entry.name);
+      }
+    }
+  };
+
+  for (const entry of entries) await walk(entry, '');
+  return collected;
+}
+
 export function planFolderImport(files: readonly File[]): FolderImportPlan {
   const readable: FolderImportCandidate[] = [];
   for (const file of files) {

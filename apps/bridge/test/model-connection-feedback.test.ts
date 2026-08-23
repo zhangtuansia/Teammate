@@ -20,6 +20,7 @@ import { preferredEmojiForm, reactionKey } from "../../web/src/lib/emoji.ts";
 import {
   FOLDER_IMPORT_FILE_LIMIT,
   documentPlacement,
+  filesFromDrop,
   planFolderImport,
 } from "../../web/src/lib/folder-import.ts";
 import { ancestorPaths, buildDocumentTree } from "../../web/src/lib/document-tree.ts";
@@ -484,4 +485,60 @@ test("a pinned document is reachable twice, not moved", () => {
   assert.deepEqual(tree.loose.map((document) => document.id), ["readme"]);
 
   assert.deepEqual(buildDocumentTree([at("readme", "")]).pinned, []);
+});
+
+test("dropping a folder reads what is inside it", async () => {
+  // dataTransfer.files is empty for a dropped directory — a directory is not a
+  // file — so the entries have to be walked instead.
+  const fileEntry = (name: string) => ({
+    file: (resolve: (file: File) => void) => resolve(new File(["body"], name)),
+    isDirectory: false,
+    isFile: true,
+    name,
+  });
+  const dirEntry = (name: string, children: unknown[]) => {
+    let drained = false;
+    return {
+      createReader: () => ({
+        // readEntries returns a batch at a time and must be called until dry.
+        readEntries: (resolve: (entries: unknown[]) => void) => {
+          resolve(drained ? [] : children);
+          drained = true;
+        },
+      }),
+      isDirectory: true,
+      isFile: false,
+      name,
+    };
+  };
+
+  const tree = dirEntry("库", [
+    fileEntry("readme.md"),
+    dirEntry("接口", [fileEntry("v2.md")]),
+  ]);
+  const dropped = await filesFromDrop({
+    files: [],
+    items: [{ kind: "file", webkitGetAsEntry: () => tree }],
+  } as unknown as DataTransfer);
+
+  assert.deepEqual(
+    dropped.map((file) => (file as File & { webkitRelativePath: string }).webkitRelativePath),
+    ["库/readme.md", "库/接口/v2.md"],
+  );
+
+  // The dropped folder's own name is stripped, the same way a chosen folder's
+  // is, so a note lands in the same place whichever way it arrived.
+  const plan = planFolderImport(dropped);
+  assert.deepEqual(
+    plan.candidates.map((candidate) => documentPlacement(candidate.path)),
+    // Sorted by path, so the Latin name sorts ahead of the CJK folder.
+    [{ folder: "", title: "readme" }, { folder: "接口", title: "v2" }],
+  );
+
+  // Plain files dropped on their own have no entries to walk.
+  const loose = await filesFromDrop({
+    files: [new File(["x"], "note.md")],
+    items: [{ kind: "file", webkitGetAsEntry: () => null }],
+  } as unknown as DataTransfer);
+  assert.deepEqual(loose.map((file) => file.name), ["note.md"]);
 });

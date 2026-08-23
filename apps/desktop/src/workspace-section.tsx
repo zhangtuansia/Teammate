@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FOLDER_IMPORT_FILE_LIMIT, documentPlacement, planFolderImport } from "@/lib/folder-import";
+import { planFolderImport } from "@/lib/folder-import";
+import { FOLDER_IMPORT_FILE_LIMIT, importFilesAsDocuments } from "@/lib/import-documents";
 import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
@@ -282,6 +283,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const [sort, setSort] = useState<"created_at" | "updated_at">("updated_at");
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
   const [importStatus, setImportStatus] = useState("");
   const folderInputRef = useRef<HTMLInputElement>(null);
   const saveTimerRef = useRef<number | null>(null);
@@ -454,32 +456,24 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     setImporting(true);
     setImportStatus(t("documents.importReading", { count: String(plan.candidates.length) }));
     try {
-      const client = createClient();
-      const { data: auth } = await client.auth.getUser();
-      if (!auth.user) throw new Error(t("documents.createFailed"));
-      const rows = await Promise.all(
-        plan.candidates.map(async (candidate) => {
-          const placement = documentPlacement(candidate.path);
-          return {
-            content: await candidate.file.text(),
-            created_by: auth.user!.id,
-            // The folder the note was in on disk is the folder it lands in
-            // here — that is what the tree in the sidebar is drawn from.
-            folder_path: placement.folder,
-            server_id: serverId,
-            title: placement.title,
-          };
-        }),
-      );
-      const { error: insertError } = await client.from("documents").insert(rows);
-      if (insertError) throw new Error(insertError.message);
+      const outcome = await importFilesAsDocuments({
+        client: createClient() as unknown as Parameters<
+          typeof importFilesAsDocuments
+        >[0]["client"],
+        files,
+        // The folder the note was in on disk is the folder it lands in here —
+        // that is what the tree in the sidebar is drawn from.
+        intoFolder: "",
+        serverId,
+      });
+      if (outcome.error) throw new Error(outcome.error);
       setImportStatus(
-        plan.skippedOverLimit > 0
+        outcome.skippedOverLimit > 0
           ? t("documents.importedSome", {
-              count: String(rows.length),
+              count: String(outcome.added),
               limit: String(FOLDER_IMPORT_FILE_LIMIT),
             })
-          : t("documents.imported", { count: String(rows.length) }),
+          : t("documents.imported", { count: String(outcome.added) }),
       );
       void loadDocuments(true);
     } catch (importError) {
@@ -1210,8 +1204,20 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
               // the one thing that has to sit above that, so opening is an
               // overlay behind the cells rather than a button around them.
               <div
-                className={`group/row relative grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/50 px-3 py-3 text-left transition-colors hover:bg-accent/40`}
+                className={`group/row relative grid w-full ${DOCUMENT_COLUMNS} items-center gap-x-4 border-b border-border/50 px-3 py-3 text-left transition-[background-color,opacity] hover:bg-accent/40 ${
+                  draggingId === document.id ? "opacity-40" : ""
+                }`}
+                // The list is where you can see everything, so it is where you
+                // would reach for a document to file — the folders it can be
+                // dropped on are right there in the sidebar.
+                draggable
                 key={document.id}
+                onDragEnd={() => setDraggingId(null)}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData("text/x-teammate-document", document.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  setDraggingId(document.id);
+                }}
               >
                 <button
                   aria-label={document.title || t("documents.untitled")}

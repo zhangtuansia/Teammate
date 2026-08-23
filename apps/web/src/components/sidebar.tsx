@@ -20,6 +20,8 @@ import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
 import { parseMessageTime } from "@/lib/message-time";
 import { InlineRename } from "./inline-rename";
+import { filesFromDrop } from "@/lib/folder-import";
+import { importFilesAsDocuments } from "@/lib/import-documents";
 import { ancestorPaths, buildDocumentTree, folderLabel, type DocumentFolder } from "@/lib/document-tree";
 
 interface Server {
@@ -210,6 +212,7 @@ function DocumentFolderRow({
   onCreateIn,
   onDeleteDocument,
   onEdit,
+  onImportInto,
   onMoveDocument,
   onOpenDocument,
   onRenameDocument,
@@ -225,6 +228,7 @@ function DocumentFolderRow({
   onCreateIn: (path: string) => void;
   onDeleteDocument: (document: WorkspaceDocument) => void;
   onEdit: (key: string | null) => void;
+  onImportInto: (path: string, files: Promise<File[]>) => void;
   onMoveDocument: (documentId: string, folder: string) => void;
   onOpenDocument: (id: string) => void;
   onRenameDocument: (id: string, title: string) => void;
@@ -269,17 +273,27 @@ function DocumentFolderRow({
         onClick={() => onToggle(folder.path)}
         onDragLeave={() => setDropTarget(false)}
         onDragOver={(event) => {
-          if (!event.dataTransfer.types.includes("text/x-teammate-document")) return;
+          const { types } = event.dataTransfer;
+          // A document being filed, or notes arriving from the disk.
+          if (!types.includes("text/x-teammate-document") && !types.includes("Files")) return;
           // Without this the browser refuses the drop and nothing can land.
           event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
+          event.dataTransfer.dropEffect = types.includes("Files") ? "copy" : "move";
           setDropTarget(true);
         }}
         onDrop={(event) => {
           event.preventDefault();
           setDropTarget(false);
           const id = event.dataTransfer.getData("text/x-teammate-document");
-          if (id) onMoveDocument(id, folder.path);
+          if (id) {
+            onMoveDocument(id, folder.path);
+            return;
+          }
+          // Walking a dropped folder is asynchronous, and the items go stale
+          // the moment this handler returns — so it starts here, not later.
+          if (event.dataTransfer.types.includes("Files")) {
+            onImportInto(folder.path, filesFromDrop(event.dataTransfer));
+          }
         }}
         style={{ paddingLeft: indent }}
         type="button"
@@ -308,6 +322,7 @@ function DocumentFolderRow({
               onCreateIn={onCreateIn}
               onDeleteDocument={onDeleteDocument}
               onEdit={onEdit}
+              onImportInto={onImportInto}
               onMoveDocument={onMoveDocument}
               onOpenDocument={onOpenDocument}
               onRenameDocument={onRenameDocument}
@@ -605,6 +620,30 @@ export function Sidebar({
   function createInFolder(path: string) {
     setOpenFolders((current) => new Set([...current, ...ancestorPaths(path)]));
     void handleCreateDocument(path);
+  }
+
+  /** Notes dropped from the disk onto a folder land in that folder. */
+  function importInto(path: string, pending: Promise<File[]>) {
+    setDocumentActionError("");
+    void (async () => {
+      const files = await pending;
+      const outcome = await importFilesAsDocuments({
+        client: supabase as unknown as Parameters<typeof importFilesAsDocuments>[0]["client"],
+        files,
+        intoFolder: path,
+        serverId,
+      });
+      if (outcome.error) {
+        setDocumentActionError(t("documents.importFailed"));
+        return;
+      }
+      if (outcome.added === 0) {
+        setDocumentActionError(t("documents.importNothing"));
+        return;
+      }
+      if (path) setOpenFolders((current) => new Set([...current, ...ancestorPaths(path)]));
+      void loadData();
+    })();
   }
 
   const openDocument = useCallback(
@@ -1625,6 +1664,7 @@ export function Sidebar({
                     onCreateIn={createInFolder}
                     onDeleteDocument={deleteDocument}
                     onEdit={setEditingKey}
+                    onImportInto={importInto}
                     onMoveDocument={moveDocument}
                     onOpenDocument={openDocument}
                     onRenameDocument={renameDocument}
@@ -1646,16 +1686,25 @@ export function Sidebar({
                   }`}
                   onDragLeave={() => setLooseDropTarget(false)}
                   onDragOver={(event) => {
-                    if (!event.dataTransfer.types.includes("text/x-teammate-document")) return;
+                    const { types } = event.dataTransfer;
+                    if (!types.includes("text/x-teammate-document") && !types.includes("Files")) {
+                      return;
+                    }
                     event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
+                    event.dataTransfer.dropEffect = types.includes("Files") ? "copy" : "move";
                     setLooseDropTarget(true);
                   }}
                   onDrop={(event) => {
                     event.preventDefault();
                     setLooseDropTarget(false);
                     const id = event.dataTransfer.getData("text/x-teammate-document");
-                    if (id) moveDocument(id, "");
+                    if (id) {
+                      moveDocument(id, "");
+                      return;
+                    }
+                    if (event.dataTransfer.types.includes("Files")) {
+                      importInto("", filesFromDrop(event.dataTransfer));
+                    }
                   }}
                 >
                   {groupDocumentsByAge(documentTree.loose, t).map((group) => (
