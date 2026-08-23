@@ -311,8 +311,14 @@ function DocumentFolderRow({
           {folder.totalDocuments}
         </span>
       </button>
-      {open && (
-        <>
+      {/* Opening a folder should look like it opened, not like the rows were
+          always there. A `0fr`→`1fr` row is the one way to animate to a height
+          nobody has measured; it stays mounted so the close animates too. */}
+      <div
+        className="grid transition-[grid-template-rows] duration-200 ease-out"
+        style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
+      >
+        <div className="flex min-h-0 flex-col gap-0.5 overflow-hidden">
           {folder.folders.map((child) => (
             <DocumentFolderRow
               activeDocumentId={activeDocumentId}
@@ -348,8 +354,8 @@ function DocumentFolderRow({
               t={t}
             />
           ))}
-        </>
-      )}
+        </div>
+      </div>
     </>
   );
 

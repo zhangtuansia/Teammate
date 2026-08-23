@@ -828,3 +828,26 @@
 .teammate-document-ref svg {
   align-self: center;
 }
+
+/* Menus that appear under the cursor — the "@" and "/" pickers, the reaction
+   row. They rise and fade rather than blinking into place. Both properties are
+   composited, so the animation keeps its own timing at the display's refresh
+   rate however busy the main thread is. */
+@keyframes teammate-pop-in {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+    scale: 0.985;
+  }
+}
+
+.teammate-pop-in {
+  animation: teammate-pop-in 120ms cubic-bezier(0.2, 0, 0.13, 1);
+  transform-origin: var(--teammate-pop-origin, bottom center);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .teammate-pop-in {
+    animation: none;
+  }
+}

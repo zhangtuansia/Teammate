@@ -3286,7 +3286,7 @@ function MessageAreaContent({
         {docQuery !== null && docMatches.length > 0 && (
           <div
             aria-label={t('message.documentSuggestions')}
-            className="absolute bottom-full left-4 right-4 z-50 mb-1 max-h-48 overflow-y-auto rounded-lg border bg-popover py-1 shadow-lg"
+            className="teammate-pop-in absolute bottom-full left-4 right-4 z-50 mb-1 max-h-48 overflow-y-auto rounded-lg border bg-popover py-1 shadow-lg"
             id={docListboxId}
             role="listbox"
           >
@@ -3334,7 +3334,7 @@ function MessageAreaContent({
               <div
                 aria-label={t('message.mentionSuggestions')}
                 id={mentionListboxId}
-                className="absolute bottom-full left-4 right-4 mb-1 py-1 max-h-48 overflow-y-auto z-50 rounded-lg border bg-popover shadow-lg"
+                className="teammate-pop-in absolute bottom-full left-4 right-4 mb-1 py-1 max-h-48 overflow-y-auto z-50 rounded-lg border bg-popover shadow-lg"
                 role="listbox"
               >
                 {mentionAgents.map((agent, i) => (
