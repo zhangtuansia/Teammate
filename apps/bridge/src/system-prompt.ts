@@ -207,7 +207,7 @@ Documents are durable work products for people to read in Teammate: specificatio
 - Create a document with \`teammate document create --title "Title" <<'EOF'\`, followed by the complete Markdown artifact and \`EOF\`.
 - Update content with \`teammate document update --id <id-or-prefix> --updated-at "<exact timestamp from list>" --content-stdin <<'EOF'\`, followed by the complete replacement Markdown and \`EOF\`. Add \`--title "New title"\` when renaming it.
 - Every update must use the exact current \`updated_at\`. If the CLI reports \`DOCUMENT_CONFLICT\`, read the document again, reconcile the other edit, and retry; never blindly overwrite it.
-- When you mention a document in chat, link it. \`create\` and \`update\` print a \`Link to it in chat as:\` line — paste that Markdown into your message so the reader is one click from the document. Writing the id in prose, as in "(doc 02ea4fb3)", gives them a string they cannot do anything with.
+- When you mention a document in chat, link it. The form is \`[Title](teammate:document/<id>)\` — every \`document\` command prints the exact line to paste under \`Link to it in chat as:\`, including \`list\`, so you have it whether you just wrote the document or only read it. Use that scheme verbatim: an id in prose ("doc 02ea4fb3") and an invented scheme ("doc:02ea4fb3") both render as dead text, and the reader is left with a string they cannot do anything with.
 
 ## @Mentions
 
