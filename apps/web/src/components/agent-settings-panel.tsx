@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { buildSystemPrompt } from '@teammate/shared/system-prompt';
 import { createClient } from '@/lib/supabase/client';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import {
@@ -611,6 +612,24 @@ function SettingsTab({
   const [connectionsError, setConnectionsError] = useState('');
   const [connectionsReloadToken, setConnectionsReloadToken] = useState(0);
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [assembledPrompt, setAssembledPrompt] = useState<string | null>(null);
+  // The handle is only on the full record, and the preview quotes it.
+  const [handle, setHandle] = useState('');
+  // Built on demand: it is a few hundred lines, and most visits to this screen
+  // are not about reading them.
+  const loadAssembledPrompt = useCallback(() => {
+    setAssembledPrompt(
+      buildSystemPrompt(
+        {
+          description: description.trim() || null,
+          display_name: displayName.trim() || agent.display_name,
+          name: handle,
+          system_prompt: systemPrompt.trim() || null,
+        },
+        t('agentSettings.promptPreviewMemory'),
+      ),
+    );
+  }, [agent.display_name, description, displayName, handle, systemPrompt, t]);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [avatarData, setAvatarData] = useState<string | null>(null);
   const [avatarFileName, setAvatarFileName] = useState('');
@@ -712,6 +731,7 @@ function SettingsTab({
       }
 
       const nextBaseline = settingsBaselineFromAgent(result.agent);
+      setHandle(result.agent.name);
       setBaseline(nextBaseline);
       applyBaseline(nextBaseline);
       setError('');
@@ -1681,7 +1701,27 @@ function SettingsTab({
             placeholder={t('agentSettings.systemPromptPlaceholder')}
             className="min-h-[120px]"
           />
+          {/* What you write here is the opening of a much longer brief. Without
+              saying so, people write rules Teammate already gives — or rules
+              that contradict them — and cannot tell why the agent ignores them. */}
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t('agentSettings.systemPromptHelp')}
+          </p>
         </Field>
+
+        <details
+          className="rounded-lg border bg-card/40 px-3 py-2"
+          onToggle={(event) => {
+            if ((event.currentTarget as HTMLDetailsElement).open) loadAssembledPrompt();
+          }}
+        >
+          <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground">
+            {t('agentSettings.promptPreview')}
+          </summary>
+          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-muted-foreground">
+            {assembledPrompt ?? t('agentSettings.promptPreviewLoading')}
+          </pre>
+        </details>
       </section>
 
       {/* Save button */}

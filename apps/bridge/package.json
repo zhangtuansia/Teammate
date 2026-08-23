@@ -25,14 +25,15 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@teammate/execution-core": "workspace:*",
-    "@teammate/cli": "workspace:*",
     "@mariozechner/pi-agent-core": "0.66.1",
     "@mariozechner/pi-ai": "0.66.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@sinclair/typebox": "^0.34.52",
     "@supabase/supabase-js": "^2.104.1",
+    "@teammate/cli": "workspace:*",
+    "@teammate/execution-core": "workspace:*",
     "@teammate/local-client": "workspace:*",
+    "@teammate/shared": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
