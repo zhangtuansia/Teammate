@@ -11,7 +11,14 @@ import {
   FileVideoIcon,
   LoaderCircleIcon,
 } from "lucide-react";
-import { Children, useEffect, useState, type ComponentProps } from "react";
+import {
+  Children,
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ComponentProps,
+} from "react";
 import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { remarkChatBreaks } from "@/lib/markdown-breaks";
@@ -352,6 +359,14 @@ function ScrollableTable({
 
 const MENTION_PATTERN = /(@[^\s,.:!?，。！？]+)/g;
 
+/**
+ * Handle to display name. A mention is stored as the stable handle, which for
+ * a teammate whose name does not transliterate is something like
+ * `@agent-19647d87` — correct to store and useless to read. The reader is
+ * shown the name; the handle stays as the tooltip.
+ */
+const MentionNames = createContext<Map<string, string> | null>(null);
+
 /** Highlights @mentions inside the text of a rendered block. Markdown gives
  * plain text back as string children, so only those need splitting. */
 function highlightMentions(children: React.ReactNode): React.ReactNode {
@@ -363,17 +378,25 @@ function highlightMentions(children: React.ReactNode): React.ReactNode {
       part.startsWith("@") ? (
         // Slack's mention chip: a tint and a 3px radius, at the same weight as
         // the surrounding text. Bolding it makes every mention shout.
-        <span
-          className="rounded-[3px] bg-primary/10 px-[2px] py-px font-normal text-primary"
-          key={index}
-        >
-          {part}
-        </span>
+        <MentionChip handle={part} key={index} />
       ) : (
         part
       ),
     );
   });
+}
+
+function MentionChip({ handle }: { handle: string }) {
+  const names = useContext(MentionNames);
+  const display = names?.get(handle.slice(1).toLowerCase());
+  return (
+    <span
+      className="rounded-[3px] bg-primary/10 px-[2px] py-px font-normal text-primary"
+      title={display ? handle : undefined}
+    >
+      {display ? `@${display}` : handle}
+    </span>
+  );
 }
 
 function MentionParagraph({
@@ -409,14 +432,17 @@ const MENTION_COMPONENTS = {
 
 export function SafeMarkdown({
   children,
+  mentionNames,
   mentions = false,
 }: {
   children: string;
+  /** Handle to display name, so a mention reads as a person and not an id. */
+  mentionNames?: Map<string, string>;
   /** Highlight @mentions — on for messages people write, where a mention is
    * addressed at someone rather than quoted from a transcript. */
   mentions?: boolean;
 }) {
-  return (
+  const body = (
     <ReactMarkdown
       components={mentions ? MENTION_COMPONENTS : BASE_COMPONENTS}
       remarkPlugins={[remarkGfm, remarkChatBreaks]}
@@ -431,5 +457,10 @@ export function SafeMarkdown({
     >
       {children}
     </ReactMarkdown>
+  );
+  return mentions ? (
+    <MentionNames.Provider value={mentionNames ?? null}>{body}</MentionNames.Provider>
+  ) : (
+    body
   );
 }

@@ -497,6 +497,10 @@ export function ConnectionsSection({
           ),
           savedConnection,
         ]);
+        // An endpoint knows its own catalogue and we have just been handed the
+        // key to ask it. Leaving that behind an "…" menu meant a new connection
+        // arrived with no models, and no sign that asking was possible.
+        void refreshModels(savedConnection);
         setName("");
         setProvider("openai-compatible");
         setBaseUrl("");

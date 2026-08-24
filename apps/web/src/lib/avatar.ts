@@ -18,6 +18,16 @@ function hash2(str: string): number {
     h ^= str.charCodeAt(i);
     h = (h * 0x01000193) | 0;
   }
+  // FNV-1a leaves its low bits barely mixed, and everything below reads them:
+  // `% 4` came out 0 for four inputs in five, so the "one in four" gates that
+  // are meant to make beards and glasses rare gave every avatar a beard and
+  // almost none a detail, and the small ranges — face, nose — clustered too.
+  // A final avalanche spreads the entropy so any slice of the word is usable.
+  h ^= h >>> 16;
+  h = (h * 0x7feb352d) | 0;
+  h ^= h >>> 15;
+  h = (h * 0x846ca68b) | 0;
+  h ^= h >>> 16;
   return Math.abs(h);
 }
 

@@ -2637,9 +2637,12 @@ async function handleConnectionsRequest(
   const baseUrl = normalizeBaseUrl(body.baseUrl);
   const model = normalizeConnectionModel(body.model);
   const apiKey = body.apiKey?.trim();
-  if (!name || name.length > 80 || !baseUrl || !model || !apiKey || apiKey.length > 8192) {
+  // The model is optional: an endpoint that answers GET /models can be asked
+  // what it runs, and requiring one up front meant typing an id from memory
+  // before anything had fetched the catalogue it would come from.
+  if (!name || name.length > 80 || !baseUrl || !apiKey || apiKey.length > 8192) {
     return sendJson(response, 400, {
-      error: "Name, base URL, API key, and model are required",
+      error: "Name, base URL, and API key are required",
     });
   }
 
@@ -2654,8 +2657,8 @@ async function handleConnectionsRequest(
     api_format: provider === "openai-compatible"
       ? "openai-completions"
       : "anthropic-messages",
-    default_model: model,
-    models_json: JSON.stringify([{ id: model, name: model }]),
+    default_model: model ?? "",
+    models_json: JSON.stringify(model ? [{ id: model, name: model }] : []),
     model_selection_mode: "user-defined",
     models_refreshed_at: now,
     status: "connected",

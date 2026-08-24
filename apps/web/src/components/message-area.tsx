@@ -588,6 +588,7 @@ interface MessageRowProps {
   onOpenThread?: () => void;
   avatarUrl: string | null | undefined;
   agentBadgeLabel: string;
+  mentionNames?: Map<string, string>;
   runtimeErrorLabel: string;
   runtimeErrorDescription: (detail: string) => string;
   deliveryPendingLabel: string;
@@ -603,6 +604,7 @@ const MessageRow = memo(function MessageRow({
   senderName,
   avatarUrl,
   agentBadgeLabel,
+  mentionNames,
   runtimeErrorLabel,
   runtimeErrorDescription,
   deliveryPendingLabel,
@@ -812,7 +814,7 @@ const MessageRow = memo(function MessageRow({
             // Everyone writes Markdown here, and a mention is a mention whoever
             // typed it — a teammate naming someone should read the same way.
             <>
-              <SafeMarkdown mentions>{message.content}</SafeMarkdown>
+              <SafeMarkdown mentionNames={mentionNames} mentions>{message.content}</SafeMarkdown>
               {message.edited_at && (
                 <span className="ml-1 align-baseline text-xs text-muted-foreground">
                   {editedLabel}
@@ -1206,6 +1208,19 @@ function MessageAreaContent({
       active = false;
     };
   }, [channel?.server_id, supabase]);
+
+  // Handle to display name for the mention chips. Both maps, so a mention of
+  // someone who has left still reads as their name.
+  const mentionNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const source of [pastAgents, channelAgents]) {
+      for (const agent of source.values()) {
+        const handle = (agent as { name?: string }).name;
+        if (handle) names.set(handle.toLowerCase(), agent.display_name || handle);
+      }
+    }
+    return names;
+  }, [channelAgents, pastAgents]);
 
   const toggleReaction = useCallback(
     (messageId: string, emoji: string) => {
@@ -3057,6 +3072,7 @@ function MessageAreaContent({
           const thread = threads.get(msg.id);
           const row = (
             <MessageRow
+              mentionNames={mentionNames}
               agentBadgeLabel={
                 msg.sender_type === 'agent' &&
                 !channelAgents.has(msg.sender_id) &&
