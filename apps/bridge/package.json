@@ -1,7 +1,7 @@
 {
   "name": "@teammate/runtime",
   "version": "0.1.5",
-  "description": "Teammate agent runtime — runs AI teammates and connects them to a workspace",
+  "description": "Teammate agent runtime \u2014 runs AI teammates and connects them to a workspace",
   "type": "module",
   "bin": {
     "teammate-runtime": "./dist/index.js"
@@ -14,7 +14,8 @@
     "build": "tsc",
     "test": "tsx --test test/**/*.test.ts",
     "start": "node dist/index.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "lint": "tsc --noEmit"
   },
   "keywords": [
     "teammate",

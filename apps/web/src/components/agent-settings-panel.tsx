@@ -2065,9 +2065,17 @@ function WorkspaceTab({ agentId, bridgeRpc }: { agentId: string; bridgeRpc: Brid
   }
 
   function handleCopyPath() {
-    navigator.clipboard.writeText(workspacePath);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    // Saying "copied" before knowing whether it was is how someone pastes
+    // nothing and does not find out until it matters.
+    void navigator.clipboard
+      ?.writeText(workspacePath)
+      .then(() => {
+        setCopied(true);
+        // The reset waits for the confirmation it is resetting, rather than
+        // starting alongside a write that may not have finished.
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => setCopied(false));
   }
 
   function formatSize(bytes: number): string {

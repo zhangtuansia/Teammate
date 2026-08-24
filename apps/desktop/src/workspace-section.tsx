@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { planFolderImport } from "@/lib/folder-import";
+import { filesFromDrop, planFolderImport } from "@/lib/folder-import";
 import { FOLDER_IMPORT_FILE_LIMIT, importFilesAsDocuments } from "@/lib/import-documents";
 import { createClient } from "@/lib/supabase/client";
 import { withRequestDeadline } from "@/lib/request-deadline";
@@ -290,6 +290,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     Array<{ id: string; name: string; display_name: string }>
   >([]);
   const [importStatus, setImportStatus] = useState("");
+  const [folderDropTarget, setFolderDropTarget] = useState(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const saveTimerRef = useRef<number | null>(null);
   // Decided from what was loaded, not from what is being typed: a document that
@@ -463,7 +464,8 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
    * file on disk — or went missing when one was renamed — would be a surprise
    * nobody asked for. Importing the same folder twice makes second copies.
    */
-  async function handleImportFolder(files: File[]) {
+  async function handleImportFolder(incoming: File[] | Promise<File[]>) {
+    const files = await incoming;
     if (importing || files.length === 0) return;
     const plan = planFolderImport(files);
     if (plan.candidates.length === 0) {
@@ -1202,10 +1204,29 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
               {/* There is no server to upload to — the workspace is a file on
                   this disk. So the gesture is to point at a folder already on
                   it, which is what "upload" was ever standing in for. */}
+              {/* Both ways in. The picker is the obvious one; dropping a folder
+                  is the one that works without the browser's directory-picking
+                  support, which not every shell provides. */}
               <button
-                className="flex flex-1 items-center gap-3 rounded-xl border bg-card px-4 py-3 text-left transition-colors hover:border-muted-foreground/30 hover:bg-accent/40 disabled:opacity-60"
+                className={`flex flex-1 items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors disabled:opacity-60 ${
+                  folderDropTarget
+                    ? "border-primary/50 bg-primary/5"
+                    : "border-border bg-card hover:border-muted-foreground/30 hover:bg-accent/40"
+                }`}
                 disabled={importing}
                 onClick={() => folderInputRef.current?.click()}
+                onDragLeave={() => setFolderDropTarget(false)}
+                onDragOver={(event) => {
+                  if (!event.dataTransfer.types.includes("Files")) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "copy";
+                  setFolderDropTarget(true);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setFolderDropTarget(false);
+                  void handleImportFolder(filesFromDrop(event.dataTransfer));
+                }}
                 type="button"
               >
                 <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">

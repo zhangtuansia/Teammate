@@ -144,8 +144,16 @@ async function downloadAttachment(path: string, fileName: string) {
   const anchor = document.createElement("a");
   anchor.href = objectUrl;
   anchor.download = fileName;
+  // In the document, because a detached anchor's click is ignored by some
+  // engines — and revoked on a later task, because revoking in the same one
+  // races the download that the click has only just started.
+  anchor.style.display = "none";
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(objectUrl);
+  setTimeout(() => {
+    anchor.remove();
+    URL.revokeObjectURL(objectUrl);
+  }, 60_000);
 }
 
 function AttachmentImage({ alt, path }: { alt: string; path: string }) {

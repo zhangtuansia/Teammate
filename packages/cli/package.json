@@ -1,7 +1,7 @@
 {
   "name": "@teammate/cli",
   "version": "0.1.0",
-  "description": "Teammate CLI — agent communication tool for Teammate",
+  "description": "Teammate CLI \u2014 agent communication tool for Teammate",
   "type": "module",
   "bin": {
     "teammate": "./dist/index.js"
@@ -13,7 +13,8 @@
     "build": "tsc --noEmit && node scripts/build.mjs",
     "check": "tsc --noEmit",
     "dev": "tsx src/index.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "lint": "tsc --noEmit"
   },
   "keywords": [
     "teammate",
