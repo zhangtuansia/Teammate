@@ -13,6 +13,58 @@ export type AppTheme = "system" | "light" | "dark";
  */
 export type AppPalette = "sand" | "aubergine" | "forest" | "ocean" | "ink";
 export const APP_PALETTES: AppPalette[] = ["sand", "aubergine", "forest", "ocean", "ink"];
+
+/**
+ * Fonts, split into the three roles MiaoYan uses: the interface, the thing you
+ * read, and code. They are separate because they answer different questions —
+ * an interface font should disappear, a transcript font is one you sit with for
+ * an hour, and code needs fixed advance widths.
+ *
+ * Every option here is a face macOS already ships, checked by measurement
+ * rather than assumed: width comparison against three generics, since the
+ * Font Loading API answers true for any name you give it. Nothing is bundled,
+ * so this costs no download and no licence.
+ *
+ * `system` means "whatever the stack in globals.css already resolves to" and is
+ * expressed by setting no override at all.
+ */
+export interface FontChoice {
+  id: string;
+  /** The CSS font-family list, or null for the built-in stack. */
+  stack: string | null;
+  label: string;
+}
+
+const CJK_TAIL = `'PingFang SC', 'Hiragino Sans GB', sans-serif`;
+
+export const INTERFACE_FONTS: FontChoice[] = [
+  { id: "system", label: "系统默认", stack: null },
+  { id: "pingfang", label: "苹方", stack: `'PingFang SC', ${CJK_TAIL}` },
+  { id: "hiragino", label: "冬青黑体", stack: `'Hiragino Sans GB', ${CJK_TAIL}` },
+  { id: "heiti", label: "黑体", stack: `'Heiti SC', ${CJK_TAIL}` },
+  { id: "yuanti", label: "圆体", stack: `'Yuanti SC', ${CJK_TAIL}` },
+];
+
+export const READING_FONTS: FontChoice[] = [
+  { id: "system", label: "系统默认", stack: null },
+  { id: "pingfang", label: "苹方", stack: `'PingFang SC', ${CJK_TAIL}` },
+  { id: "songti", label: "宋体", stack: `'Songti SC', 'STSong', serif` },
+  { id: "kaiti", label: "楷体", stack: `'Kaiti SC', 'STKaiti', serif` },
+  { id: "yuanti", label: "圆体", stack: `'Yuanti SC', ${CJK_TAIL}` },
+  { id: "hiragino", label: "冬青黑体", stack: `'Hiragino Sans GB', ${CJK_TAIL}` },
+];
+
+export const CODE_FONTS: FontChoice[] = [
+  { id: "system", label: "系统默认", stack: null },
+  { id: "menlo", label: "Menlo", stack: `Menlo, ui-monospace, monospace` },
+  { id: "monaco", label: "Monaco", stack: `Monaco, ui-monospace, monospace` },
+  { id: "jetbrains", label: "JetBrains Mono", stack: `'JetBrains Mono', ui-monospace, monospace` },
+  { id: "courier", label: "Courier New", stack: `'Courier New', ui-monospace, monospace` },
+];
+
+export function fontStack(options: FontChoice[], id: string | undefined) {
+  return options.find((option) => option.id === id)?.stack ?? null;
+}
 export type AgentModel = string;
 export type AgentRuntime = AgentRuntimeId;
 export type ThinkingLevel = "low" | "medium" | "high";
@@ -21,6 +73,9 @@ export interface AppSettings {
   language: AppLanguage;
   theme: AppTheme;
   palette: AppPalette;
+  interfaceFont: string;
+  readingFont: string;
+  codeFont: string;
   defaultRuntime: AgentRuntime;
   defaultModel: AgentModel;
   defaultConnectionId: string | null;
@@ -433,6 +488,10 @@ const en = {
   "settings.paletteForest": "Forest",
   "settings.paletteOcean": "Ocean",
   "settings.paletteInk": "Ink",
+  "settings.fontInterface": "Interface font",
+  "settings.fontReading": "Reading font",
+  "settings.fontReadingHint": "Used for messages and document bodies.",
+  "settings.fontCode": "Code font",
   "settings.agentRuntime": "Agent runtime",
   "settings.runtimeDescription": "Choose the local engine used by new agents and check CLI availability.",
   "settings.availableRuntimes": "Available runtimes",
@@ -988,6 +1047,10 @@ const zh: Record<TranslationKey, string> = {
   "settings.paletteForest": "松林",
   "settings.paletteOcean": "深海",
   "settings.paletteInk": "墨",
+  "settings.fontInterface": "界面字体",
+  "settings.fontReading": "阅读字体",
+  "settings.fontReadingHint": "用于消息正文和文档正文。",
+  "settings.fontCode": "代码字体",
   "settings.agentRuntime": "智能体运行时",
   "settings.runtimeDescription": "选择新智能体使用的本地引擎，并检查 CLI 是否可用。",
   "settings.availableRuntimes": "可用运行时",
@@ -1143,6 +1206,9 @@ export const defaultAppSettings: AppSettings = {
   language: "en-US",
   theme: "system",
   palette: "sand",
+  interfaceFont: "system",
+  readingFont: "system",
+  codeFont: "system",
   defaultRuntime: "codex",
   defaultModel: "default",
   defaultConnectionId: null,

@@ -105,9 +105,22 @@
   --animate-message-receive: message-receive 0.28s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-response-label: response-label 0.3s ease-out;
   --animate-tabs-panel-enter: tabs-panel-enter 0.14s cubic-bezier(0.22, 1, 0.36, 1);
-  --font-sans: var(--font-sn-pro), 'SN Pro', 'BlinkMacSystemFont', 'Segoe UI',
-    'Helvetica', 'Arial', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-    'Segoe UI Symbol';
+  /* Three roles, following MiaoYan: the interface, the thing you read, and
+     code. They are separate because they answer different questions — the
+     interface wants a font that disappears, a transcript wants one you can sit
+     with, and code wants fixed advance widths. Each resolves to the stack
+     below unless a preference overrides --font-interface / --font-reading /
+     --font-code on the root element, so the default costs nothing. */
+  --font-sans: var(
+    --font-pref-interface,
+    var(--font-sn-pro), 'SN Pro', 'BlinkMacSystemFont', 'Segoe UI', 'Helvetica',
+    'Arial', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol'
+  );
+  --font-reading: var(--font-pref-reading, var(--font-sans));
+  --font-mono: var(
+    --font-pref-code,
+    ui-monospace, 'SF Mono', Menlo, Monaco, monospace
+  );
   --font-heading: var(--font-sn-pro), 'SN Pro', 'BlinkMacSystemFont',
     'Segoe UI', 'Helvetica', 'Arial', sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
@@ -465,6 +478,10 @@
 .prose-message {
   overflow-wrap: anywhere;
   color: var(--foreground);
+  /* Message bodies and document bodies are the reading surface, so this is
+     where the reading font applies. Chrome — labels, buttons, timestamps —
+     stays on the interface font, which is the split MiaoYan draws too. */
+  font-family: var(--font-reading);
 }
 
 /* The "edited" marker has to sit at the end of the sentence, not under it.

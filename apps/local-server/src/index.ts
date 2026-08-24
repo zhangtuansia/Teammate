@@ -1977,6 +1977,9 @@ function seedDatabase() {
   insertSetting.run("language", "zh-CN", now);
   insertSetting.run("theme", "system", now);
   insertSetting.run("palette", "sand", now);
+  insertSetting.run("interface_font", "system", now);
+  insertSetting.run("reading_font", "system", now);
+  insertSetting.run("code_font", "system", now);
   insertSetting.run("default_runtime", "codex", now);
   insertSetting.run("default_model", "default", now);
   insertSetting.run("default_connection_id", "", now);
@@ -3337,6 +3340,9 @@ function readAppSettings() {
     language: values.get("language") || "zh-CN",
     theme: values.get("theme") || "system",
     palette: values.get("palette") || "sand",
+    interfaceFont: values.get("interface_font") || "system",
+    readingFont: values.get("reading_font") || "system",
+    codeFont: values.get("code_font") || "system",
     defaultRuntime,
     defaultModel: normalizeModel(defaultRuntime, values.get("default_model")),
     defaultConnectionId,
@@ -5435,6 +5441,9 @@ async function handleSettingsRequest(request: IncomingMessage, response: ServerR
     language?: string;
     theme?: string;
     palette?: string;
+    interfaceFont?: string;
+    readingFont?: string;
+    codeFont?: string;
     defaultRuntime?: string;
     defaultModel?: string;
     defaultConnectionId?: string | null;
@@ -5462,6 +5471,20 @@ async function handleSettingsRequest(request: IncomingMessage, response: ServerR
       return sendJson(response, 400, { error: "Unsupported palette" });
     }
     updates.push(["palette", body.palette]);
+  }
+  // The font list is the client's to know; the service only has to refuse
+  // anything that is not a plain identifier, since these end up in CSS.
+  for (const [field, column] of [
+    ["interfaceFont", "interface_font"],
+    ["readingFont", "reading_font"],
+    ["codeFont", "code_font"],
+  ] as const) {
+    const value = body[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(value)) {
+      return sendJson(response, 400, { error: `Invalid ${field}` });
+    }
+    updates.push([column, value]);
   }
   if (body.showActivityDetails !== undefined) {
     if (typeof body.showActivityDetails !== "boolean") {

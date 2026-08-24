@@ -21,6 +21,10 @@ import {
   useAppSettings,
   type AgentModel,
   type AgentRuntime,
+  CODE_FONTS,
+  INTERFACE_FONTS,
+  READING_FONTS,
+  fontStack,
   type AppPalette,
   type AppLanguage,
   type AppSettings,
@@ -269,6 +273,17 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
       } else {
         delete document.documentElement.dataset.palette;
       }
+      // "System" is the absence of an override rather than a value, so the
+      // stack in globals.css stays the single definition of the default.
+      const style = document.documentElement.style;
+      for (const [property, stack] of [
+        ["--font-pref-interface", fontStack(INTERFACE_FONTS, settings.interfaceFont)],
+        ["--font-pref-reading", fontStack(READING_FONTS, settings.readingFont)],
+        ["--font-pref-code", fontStack(CODE_FONTS, settings.codeFont)],
+      ] as const) {
+        if (stack) style.setProperty(property, stack);
+        else style.removeProperty(property);
+      }
     };
     applyTheme();
     media.addEventListener("change", applyTheme);
@@ -276,7 +291,10 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
   }, [
     hasLastGoodSettings,
     settings.language,
+    settings.codeFont,
+    settings.interfaceFont,
     settings.palette,
+    settings.readingFont,
     settings.theme,
     settingsLoaded,
   ]);
@@ -347,6 +365,9 @@ export function DesktopSettingsPage() {
   const [language, setLanguage] = useState<AppLanguage>(settings.language);
   const [theme, setTheme] = useState<AppTheme>(settings.theme);
   const [palette, setPalette] = useState<AppPalette>(settings.palette || "sand");
+  const [interfaceFont, setInterfaceFont] = useState(settings.interfaceFont || "system");
+  const [readingFont, setReadingFont] = useState(settings.readingFont || "system");
+  const [codeFont, setCodeFont] = useState(settings.codeFont || "system");
   const [defaultRuntime, setDefaultRuntime] = useState<AgentRuntime>(settings.defaultRuntime);
   const [defaultModel, setDefaultModel] = useState<AgentModel>(settings.defaultModel);
   const [defaultConnectionId, setDefaultConnectionId] = useState<string | null>(
@@ -451,6 +472,9 @@ export function DesktopSettingsPage() {
     language !== settings.language ||
     theme !== settings.theme ||
     palette !== (settings.palette || "sand") ||
+    interfaceFont !== (settings.interfaceFont || "system") ||
+    readingFont !== (settings.readingFont || "system") ||
+    codeFont !== (settings.codeFont || "system") ||
     defaultRuntime !== settings.defaultRuntime ||
     defaultModel !== settings.defaultModel ||
     defaultConnectionId !== settings.defaultConnectionId ||
@@ -502,6 +526,9 @@ export function DesktopSettingsPage() {
       setLanguage(settings.language);
       setTheme(settings.theme);
       setPalette(settings.palette || "sand");
+      setInterfaceFont(settings.interfaceFont || "system");
+      setReadingFont(settings.readingFont || "system");
+      setCodeFont(settings.codeFont || "system");
       setDefaultRuntime(settings.defaultRuntime);
       setDefaultModel(settings.defaultModel);
       setDefaultConnectionId(settings.defaultConnectionId);
@@ -668,6 +695,9 @@ export function DesktopSettingsPage() {
             language,
             theme,
             palette,
+            interfaceFont,
+            readingFont,
+            codeFont,
             ...(aiSettingsChanged ? {
               defaultRuntime: resolvedDefault.selection.runtime,
               defaultModel: resolvedDefault.selection.model,
@@ -943,6 +973,31 @@ export function DesktopSettingsPage() {
                           })}
                         </div>
                         <FieldDescription>{t("settings.paletteHint")}</FieldDescription>
+                      </Field>
+                      <Field>
+                        <FieldLabel>{t("settings.fontInterface")}</FieldLabel>
+                        <SettingsSelect
+                          items={INTERFACE_FONTS.map((f) => ({ value: f.id, label: f.label }))}
+                          value={interfaceFont}
+                          onValueChange={setInterfaceFont}
+                        />
+                      </Field>
+                      <Field>
+                        <FieldLabel>{t("settings.fontReading")}</FieldLabel>
+                        <SettingsSelect
+                          items={READING_FONTS.map((f) => ({ value: f.id, label: f.label }))}
+                          value={readingFont}
+                          onValueChange={setReadingFont}
+                        />
+                        <FieldDescription>{t("settings.fontReadingHint")}</FieldDescription>
+                      </Field>
+                      <Field>
+                        <FieldLabel>{t("settings.fontCode")}</FieldLabel>
+                        <SettingsSelect
+                          items={CODE_FONTS.map((f) => ({ value: f.id, label: f.label }))}
+                          value={codeFont}
+                          onValueChange={setCodeFont}
+                        />
                       </Field>
                     </CardPanel>
                   </Card>
