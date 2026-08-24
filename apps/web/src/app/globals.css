@@ -19,6 +19,18 @@
   --card: var(--color-sand-2);
   --popover: var(--color-sand-2);
   --code: var(--color-sand-2);
+  /* The base the workspace rail sits on. Slack paints no fill on the rail at
+     all — its theme background is the rail's colour, and the panels to the
+     right are a lighter slab lifted off it. That only reads if the base is a
+     clear step darker than the card, which --background is not, and the sand
+     steps that are dark enough have gone grey by the time they get there. Hand
+     picked warm, the same way --background above it is. */
+  --rail: #ebe5db;
+  /* What sits on the rail, kept apart from --foreground so a theme can darken
+     the rail without turning its labels invisible. Slack separates these too —
+     its inverted roles are the ones that survive a deep-coloured sidebar — and
+     it is the whole reason a dark rail beside white panels is expressible. */
+  --rail-foreground: var(--color-sand-12);
 
   /* Interactive backgrounds */
   --accent: var(--color-sand-3);
@@ -130,6 +142,8 @@
   --color-mention-foreground: var(--mention-foreground);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
+  --color-rail: var(--rail);
+  --color-rail-foreground: var(--rail-foreground);
   --color-background: var(--background);
   --color-border: var(--border);
   --color-accent: var(--accent);
@@ -354,6 +368,9 @@
   --background: var(--color-sanddark-1);
   --border: var(--color-sanddark-6);
   --card: var(--color-sanddark-2);
+  /* Dark keeps the same relationship: the rail recedes, the slab lifts. */
+  --rail: var(--color-sanddark-1);
+  --rail-foreground: var(--color-sanddark-12);
   --card-foreground: var(--color-sanddark-12);
   --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
   --foreground: var(--color-sanddark-12);
@@ -892,4 +909,125 @@
   .teammate-sweep::after {
     animation: none;
   }
+}
+
+/* ── Elevation, taken from Slack's own rules ──────────────────────────────
+   Their whole system runs on one value: the foreground at 13%. It is the fill
+   behind a selected rail tab, the fill of the search field, and the hairline
+   ring around anything that floats. Nothing here uses a border — the ring is
+   part of the shadow, so an elevated surface never shifts by a pixel when it
+   gains or loses elevation.
+
+   These are classes rather than arbitrary Tailwind utilities because a leading
+   `-` inside `shadow-[…]` is read as a negative-utility prefix, and the shadow
+   then silently never lands. */
+
+/* Everything right of the rail, lifted off the base. Slack rounds and shadows
+   only the leading top corner, so the slab reads as sliding out from under the
+   rail rather than as a floating card. */
+.workspace-slab {
+  border-start-start-radius: 6px;
+  box-shadow: -4px -4px 16px rgb(0 0 0 / 0.09);
+}
+
+/* The chat panel casts onto the list column beside it. That shadow, not a
+   border, is what separates the two — which is why the fills either side of it
+   are nearly the same colour and it still reads as an edge. */
+.workspace-primary {
+  box-shadow:
+    0 4px 0 0 rgb(0 0 0 / 0.05),
+    0 0 20px 0 rgb(0 0 0 / 0.1);
+}
+
+/* Menus, and the search results under the top bar. */
+.workspace-popover {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--foreground) 13%, transparent),
+    0 18px 48px 0 rgb(0 0 0 / 0.12);
+}
+
+/* A workspace avatar is a photo on a coloured ground, so it gets the ring to
+   keep a pale one from bleeding into the rail behind it. */
+.workspace-avatar-ring {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--foreground) 13%, transparent),
+    0 1px 3px 0 rgb(0 0 0 / 0.08);
+}
+
+/* Dark ground swallows a 9%-black drop, so only the drops are restated; the
+   13% ring already follows --foreground and inverts on its own. */
+.dark .workspace-slab {
+  box-shadow: -4px -4px 16px rgb(0 0 0 / 0.34);
+}
+
+.dark .workspace-primary {
+  box-shadow:
+    0 4px 0 0 rgb(0 0 0 / 0.18),
+    0 0 20px 0 rgb(0 0 0 / 0.36);
+}
+
+.dark .workspace-popover {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--foreground) 13%, transparent),
+    0 18px 48px 0 rgb(0 0 0 / 0.5);
+}
+
+/* ── Themes ───────────────────────────────────────────────────────────────
+   A theme here changes the rail and what sits on it, and nothing else. That
+   is not a shortcut — it is how Slack's own classic themes work: the panels
+   stay near-white in every one of them, and the whole character comes from
+   the coloured column on the left. Keeping the panels out of it means a new
+   theme cannot quietly break contrast in the transcript, which is where the
+   reading actually happens.
+
+   Two roles per theme, because that is the pair that has to move together:
+   --rail is the surface, --rail-foreground is everything drawn on it. Every
+   fill on the rail is --rail-foreground at one of Slack's alphas (13% for a
+   selected tab and for the search field, 6% for hover), so the pair is all a
+   theme needs to supply.
+
+   The default (sand) is the :root block far above and carries no attribute,
+   so nothing here can change how the app looks until a theme is chosen. */
+
+[data-palette='aubergine'] {
+  --rail: #3f0e40;
+  --rail-foreground: #f7edf7;
+}
+
+[data-palette='forest'] {
+  --rail: #1b3a2b;
+  --rail-foreground: #e8f3ec;
+}
+
+[data-palette='ocean'] {
+  --rail: #10314f;
+  --rail-foreground: #e6f0f8;
+}
+
+[data-palette='ink'] {
+  --rail: #2b2b2e;
+  --rail-foreground: #ededee;
+}
+
+/* Dark mode keeps each theme's hue but drops it to a depth that sits below
+   the panels rather than beside them — a rail that stays brighter than the
+   transcript reads as the foreground of the window, which is backwards. */
+.dark[data-palette='aubergine'] {
+  --rail: #24081f;
+  --rail-foreground: #efdcef;
+}
+
+.dark[data-palette='forest'] {
+  --rail: #0e2019;
+  --rail-foreground: #d9e8df;
+}
+
+.dark[data-palette='ocean'] {
+  --rail: #081a2b;
+  --rail-foreground: #d8e6f2;
+}
+
+.dark[data-palette='ink'] {
+  --rail: #17171a;
+  --rail-foreground: #dcdcde;
 }

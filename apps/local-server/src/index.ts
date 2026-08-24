@@ -1814,6 +1814,18 @@ async function dispatchLocalRequest(
       );
     }
 
+    if (request.method === "GET" && url.pathname === "/api/search") {
+      requireHumanPrincipal(principal);
+      return sendJson(
+        response,
+        200,
+        searchWorkspace(
+          url.searchParams.get("server_id") || LOCAL_SERVER_ID,
+          url.searchParams.get("q") || "",
+        ),
+      );
+    }
+
     const rpcRoute = url.pathname.match(/^\/api\/rpc\/([a-z][a-z0-9_]*)$/);
     if (request.method === "POST" && rpcRoute) {
       return await handleRpcRequest(request, response, rpcRoute[1], principal);
@@ -1964,6 +1976,7 @@ function seedDatabase() {
   );
   insertSetting.run("language", "zh-CN", now);
   insertSetting.run("theme", "system", now);
+  insertSetting.run("palette", "sand", now);
   insertSetting.run("default_runtime", "codex", now);
   insertSetting.run("default_model", "default", now);
   insertSetting.run("default_connection_id", "", now);
@@ -3323,6 +3336,7 @@ function readAppSettings() {
   return {
     language: values.get("language") || "zh-CN",
     theme: values.get("theme") || "system",
+    palette: values.get("palette") || "sand",
     defaultRuntime,
     defaultModel: normalizeModel(defaultRuntime, values.get("default_model")),
     defaultConnectionId,
@@ -3330,6 +3344,83 @@ function readAppSettings() {
     showActivityDetails: values.get("show_activity_details") !== "false",
     messageSounds: values.get("message_sounds") !== "false",
     documentEditor: values.get("document_editor") === "source" ? "source" : "rich",
+  };
+}
+
+/** Longest run of the query a haystack contains, used to place a snippet. */
+function snippetAround(text: string, query: string, radius = 60) {
+  const at = text.toLowerCase().indexOf(query.toLowerCase());
+  if (at === -1) return text.slice(0, radius * 2);
+  const from = Math.max(0, at - radius);
+  return (from > 0 ? "…" : "") + text.slice(from, at + query.length + radius);
+}
+
+/**
+ * Everything in a workspace that matches a phrase, in one pass.
+ *
+ * Search is the one thing that has to reach across the areas the rail keeps
+ * apart — you remember that something was said, not whether it was said in a
+ * channel, a DM, or written down in a document. Doing it here rather than as
+ * four queries from the client is what keeps that honest: one round trip, one
+ * ordering, and message hits arrive already carrying the channel and the name
+ * of whoever said it, which is what makes a result readable enough to click.
+ */
+function searchWorkspace(serverId: string, rawQuery: string) {
+  const query = rawQuery.trim();
+  const empty = { agents: [], channels: [], documents: [], messages: [] };
+  // One character matches most of the workspace; it is noise, not a search.
+  if (query.length < 2) return empty;
+  const like = `%${query.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+
+  const channels = db
+    .prepare(
+      `SELECT id, name, type, description FROM channels
+       WHERE server_id = ? AND type != 'dm' AND (name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')
+       ORDER BY name LIMIT 8`,
+    )
+    .all(serverId, like, like) as DbRow[];
+
+  const agents = db
+    .prepare(
+      `SELECT id, name, display_name, description, departed_at FROM agents
+       WHERE server_id = ? AND (display_name LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')
+       ORDER BY departed_at IS NOT NULL, display_name LIMIT 8`,
+    )
+    .all(serverId, like, like, like) as DbRow[];
+
+  const documents = db
+    .prepare(
+      `SELECT id, title, folder_path, format, content, updated_at FROM documents
+       WHERE server_id = ? AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')
+       ORDER BY title LIKE ? ESCAPE '\\' DESC, updated_at DESC LIMIT 10`,
+    )
+    .all(serverId, like, like, like) as DbRow[];
+
+  const messages = db
+    .prepare(
+      `SELECT m.id, m.channel_id, m.content, m.created_at, m.sender_id, m.sender_type,
+              c.name AS channel_name, c.type AS channel_type,
+              COALESCE(a.display_name, p.display_name) AS sender_name
+       FROM messages m
+       JOIN channels c ON c.id = m.channel_id
+       LEFT JOIN agents a ON a.id = m.sender_id AND m.sender_type = 'agent'
+       LEFT JOIN profiles p ON p.id = m.sender_id AND m.sender_type = 'human'
+       WHERE c.server_id = ? AND m.content LIKE ? ESCAPE '\\'
+       ORDER BY m.created_at DESC LIMIT 20`,
+    )
+    .all(serverId, like) as DbRow[];
+
+  return {
+    agents,
+    channels,
+    documents: documents.map(({ content, ...document }) => ({
+      ...document,
+      snippet: snippetAround(String(content || ""), query),
+    })),
+    messages: messages.map((message) => ({
+      ...message,
+      snippet: snippetAround(String(message.content || ""), query),
+    })),
   };
 }
 
@@ -5343,6 +5434,7 @@ async function handleSettingsRequest(request: IncomingMessage, response: ServerR
   const body = (await readJson(request)) as {
     language?: string;
     theme?: string;
+    palette?: string;
     defaultRuntime?: string;
     defaultModel?: string;
     defaultConnectionId?: string | null;
@@ -5364,6 +5456,12 @@ async function handleSettingsRequest(request: IncomingMessage, response: ServerR
       return sendJson(response, 400, { error: "Unsupported theme" });
     }
     updates.push(["theme", body.theme]);
+  }
+  if (body.palette !== undefined) {
+    if (!["sand", "aubergine", "forest", "ocean", "ink"].includes(body.palette)) {
+      return sendJson(response, 400, { error: "Unsupported palette" });
+    }
+    updates.push(["palette", body.palette]);
   }
   if (body.showActivityDetails !== undefined) {
     if (typeof body.showActivityDetails !== "boolean") {

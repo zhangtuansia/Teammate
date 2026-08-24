@@ -25,7 +25,7 @@
         "acceptFirstMouse": true,
         "trafficLightPosition": {
           "x": 16,
-          "y": 16
+          "y": 20
         },
         "dragDropEnabled": false
       }

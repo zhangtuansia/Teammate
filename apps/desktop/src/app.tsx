@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Sidebar } from "@/components/sidebar";
+import { WorkspaceRail } from "@/components/workspace-rail";
+import { WorkspaceTopBar } from "@/components/workspace-top-bar";
 import { MessageArea } from "@/components/message-area";
 import { AgentSettingsPanel } from "@/components/agent-settings-panel";
 import { AgentActivityProvider } from "@/hooks/use-agent-activity";
@@ -575,21 +577,33 @@ export function App() {
   return (
     <WorkspaceServerProvider server={server}>
       <AgentActivityProvider key={server.id} serverId={server.id}>
-        <div className="desktop-shell relative flex h-full overflow-hidden bg-background">
-          <Sidebar serverSlug={server.slug} serverId={server.id} serverName={server.name} />
-          <main className="flex flex-1 overflow-hidden bg-card">
-            {workspaceSection === "home" ? (
-              <Conversation server={server} />
-            ) : workspaceSection === "settings" ? (
-              <DesktopSettingsPage />
-            ) : (
-              <WorkspaceSection
-                section={workspaceSection}
-                serverId={server.id}
-                serverSlug={server.slug}
-              />
-            )}
-          </main>
+        <div className="desktop-shell relative flex h-full flex-col overflow-hidden bg-rail">
+          <WorkspaceTopBar
+            serverId={server.id}
+            serverName={server.name}
+            serverSlug={server.slug}
+          />
+          <div className="flex min-h-0 flex-1">
+            <WorkspaceRail serverSlug={server.slug} />
+            {/* Everything right of the rail is one slab lifted off it, the way
+                Slack rounds and shadows only that leading top corner. */}
+            <div className="workspace-slab flex min-w-0 flex-1 overflow-hidden bg-card">
+              <Sidebar serverSlug={server.slug} serverId={server.id} />
+              <main className="workspace-primary relative flex flex-1 overflow-hidden bg-card">
+                {workspaceSection === "home" ? (
+                  <Conversation server={server} />
+                ) : workspaceSection === "settings" ? (
+                  <DesktopSettingsPage />
+                ) : (
+                  <WorkspaceSection
+                    section={workspaceSection}
+                    serverId={server.id}
+                    serverSlug={server.slug}
+                  />
+                )}
+              </main>
+            </div>
+          </div>
         </div>
       </AgentActivityProvider>
     </WorkspaceServerProvider>

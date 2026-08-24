@@ -33,15 +33,18 @@ body {
   user-select: none;
 }
 
-.desktop-sidebar-header {
-  padding-inline: 8px;
+/* The window controls live in the top bar now, so the leading gap is only as
+   wide as they are — and only on the platform that draws them there. */
+.desktop-top-bar-lead {
+  width: 12px;
 }
 
-.desktop-sidebar-titlebar-spacer {
-  display: none;
+html[data-platform="macos"] .desktop-top-bar-lead {
+  width: 78px;
 }
 
-html[data-platform="macos"] .desktop-sidebar-titlebar-spacer {
-  display: block;
-  height: 32px;
+/* Controls inside a drag region need to opt back out, or the window moves
+   instead of the button being pressed. */
+.desktop-no-drag {
+  -webkit-app-region: no-drag;
 }

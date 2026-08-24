@@ -5,30 +5,23 @@ import { createClient } from "@/lib/supabase/client";
 import { useRouter, useParams, usePathname, useSearchParams } from "next/navigation";
 import { CreateAgentDialog } from "./create-agent-dialog";
 import { CreateChannelDialog } from "./create-channel-dialog";
-import { CreateServerDialog } from "./create-server-dialog";
 import { EditChannelDialog } from "./edit-channel-dialog";
 import { ContextMenu } from "./context-menu";
 import { useAgentActivity } from "@/hooks/use-agent-activity";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
-import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
+import { afterPaint } from "@/lib/after-paint";
 import { parseMessageTime } from "@/lib/message-time";
 import { InlineRename } from "./inline-rename";
 import { filesFromDrop } from "@/lib/folder-import";
 import { importFilesAsDocuments } from "@/lib/import-documents";
 import { ancestorPaths, buildDocumentTree, folderLabel, type DocumentFolder } from "@/lib/document-tree";
-
-interface Server {
-  id: string;
-  name: string;
-  slug: string;
-}
 
 interface Channel {
   id: string;
@@ -408,11 +401,9 @@ function clampSidebarWidth(width: number, viewportWidth: number) {
 export function Sidebar({
   serverSlug,
   serverId,
-  serverName,
 }: {
   serverSlug: string;
   serverId: string;
-  serverName: string;
 }) {
   const [dmChannels, setDmChannels] = useState<DmChannel[]>([]);
   const [groupChannels, setGroupChannels] = useState<Channel[]>([]);
@@ -428,7 +419,6 @@ export function Sidebar({
   const [userName, setUserName] = useState("");
   const [showCreateAgent, setShowCreateAgent] = useState(false);
   const [showCreateChannel, setShowCreateChannel] = useState(false);
-  const [showCreateServer, setShowCreateServer] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(true);
   const [channelsOpen, setChannelsOpen] = useState(true);
   const [creatingDocument, setCreatingDocument] = useState(false);
@@ -465,7 +455,6 @@ export function Sidebar({
   const loadRetryTimerRef = useRef<number | null>(null);
   const [loadRetryToken, setLoadRetryToken] = useState(0);
   const [sidebarLoadError, setSidebarLoadError] = useState("");
-  const [servers, setServers] = useState<Server[]>([]);
   const [editingChannel, setEditingChannel] = useState<Channel | null>(null);
   const supabase = createClient();
   const router = useRouter();
@@ -666,13 +655,13 @@ export function Sidebar({
   // Searching digs through folders, so it opens them: a match three levels down
   // that stays behind a closed folder has not really been found.
   const foldersWithMatches = documentQuery.trim()
-    ? visibleDocuments.flatMap((document) => ancestorPaths(document.folder_path || "")).join(" ")
+    ? visibleDocuments.flatMap((document) => ancestorPaths(document.folder_path || "")).join("\u0000")
     : "";
   const [lastFoldersWithMatches, setLastFoldersWithMatches] = useState(foldersWithMatches);
   if (lastFoldersWithMatches !== foldersWithMatches) {
     setLastFoldersWithMatches(foldersWithMatches);
     if (foldersWithMatches) {
-      setOpenFolders((current) => new Set([...current, ...foldersWithMatches.split(" ")]));
+      setOpenFolders((current) => new Set([...current, ...foldersWithMatches.split("\u0000")]));
     }
   }
 
@@ -866,7 +855,6 @@ export function Sidebar({
       if (!user) throw new Error("Not authenticated");
       const [
         profileResult,
-        serverMembershipsResult,
         documentsResult,
         membershipsResult,
         agentsResult,
@@ -876,12 +864,6 @@ export function Sidebar({
           .eq("id", user.id)
           .abortSignal(requestController.signal)
           .single(),
-        supabase
-          .from("server_members")
-          .select("server_id")
-          .eq("member_id", user.id)
-          .eq("member_type", "human")
-          .abortSignal(requestController.signal),
         supabase
           .from("documents")
           .select("id, title, folder_path, pinned_at, updated_at")
@@ -905,7 +887,6 @@ export function Sidebar({
       if (!isCurrent()) return;
       const primaryError = [
         profileResult.error,
-        serverMembershipsResult.error,
         documentsResult.error,
         membershipsResult.error,
         agentsResult.error,
@@ -919,22 +900,6 @@ export function Sidebar({
       const nextDocuments = (documentsResult.data || []) as WorkspaceDocument[];
       currentDocumentIdsRef.current = new Set(nextDocuments.map((document) => document.id));
       setDocuments(nextDocuments);
-
-      const serverMemberships = (serverMembershipsResult.data || []) as Array<{ server_id: string }>;
-      if (serverMemberships.length > 0) {
-        const { data: allServers, error: serversError } = await supabase
-          .from("servers")
-          .select("id, name, slug")
-          .in("id", serverMemberships.map((membership) => membership.server_id))
-          .order("created_at")
-          .abortSignal(requestController.signal);
-        if (requestController.signal.aborted) throw new Error("Request aborted");
-        if (!isCurrent()) return;
-        if (serversError) throw serversError;
-        setServers((allServers || []) as Server[]);
-      } else {
-        setServers([]);
-      }
 
       const memberships = (membershipsResult.data || []) as Array<{ channel_id: string }>;
       if (memberships.length === 0) {
@@ -1101,10 +1066,10 @@ export function Sidebar({
   }, [serverId]);
 
   // Load sidebar data on mount (realtime subscriptions handle subsequent updates)
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => void refreshSidebarNow());
-    return () => window.cancelAnimationFrame(frame);
-  }, [loadRetryToken, refreshSidebarNow, workspaceView]);
+  useEffect(
+    () => afterPaint(() => void refreshSidebarNow()),
+    [loadRetryToken, refreshSidebarNow, workspaceView],
+  );
 
   useEffect(() => () => {
     documentCreateGenerationRef.current += 1;
@@ -1342,60 +1307,10 @@ export function Sidebar({
   return (
     <aside
       ref={sidebarRef}
-      className="desktop-sidebar relative flex h-full shrink-0 flex-col"
+      className="desktop-sidebar relative flex h-full shrink-0 flex-col bg-rail/10"
       style={{ width: `var(${SIDEBAR_WIDTH_CSS_PROPERTY}, ${DEFAULT_SIDEBAR_WIDTH}px)` }}
     >
-      <div
-        className="desktop-sidebar-titlebar-spacer desktop-native-drag flex-none"
-        data-tauri-drag-region
-        aria-hidden="true"
-      />
-
-      {/* Workspace switcher stays above the workspace navigation. */}
-      <div
-        className="desktop-sidebar-header flex h-9 items-center"
-        data-tauri-drag-region="deep">
-        <Menu>
-          <MenuTrigger className="group flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground">
-              {serverName}
-            </span>
-            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground transition-transform group-data-popup-open:rotate-180" />
-          </MenuTrigger>
-          <MenuPopup align="start" className="max-h-64 w-(--anchor-width)">
-            {servers.map((server) => (
-              <MenuItem
-                key={server.id}
-                className={server.slug === serverSlug ? "bg-accent font-medium" : undefined}
-                onClick={() => {
-                  if (server.slug !== serverSlug) navigate(`/s/${server.slug}`);
-                }}
-              >
-                <GeneratedAvatar
-                  className="rounded-md"
-                  id={server.id}
-                  initials
-                  name={server.name}
-                  size="xs"
-                />
-                <span className="min-w-0 flex-1 truncate">{server.name}</span>
-                {server.slug === serverSlug && (
-                  <CheckIcon className="ml-auto size-3.5 shrink-0" strokeWidth={2.5} />
-                )}
-              </MenuItem>
-            ))}
-            <MenuSeparator />
-            <MenuItem onClick={() => setShowCreateServer(true)}>
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground">
-                <PlusIcon className="size-3" />
-              </span>
-              <span>{t("workspace.create")}</span>
-            </MenuItem>
-          </MenuPopup>
-        </Menu>
-      </div>
-
-      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-4">
+      <div className="flex-1 overflow-y-auto px-2 pt-3 pb-2 space-y-4">
         {sidebarLoadError && (
           <div
             role="alert"
@@ -1831,61 +1746,6 @@ export function Sidebar({
 
       </div>
 
-      {localMode && (
-        <nav
-          className="grid grid-cols-4 justify-items-center gap-1 px-2 py-2"
-          aria-label={t("nav.workspace")}
-        >
-          {[
-            {
-              id: "home",
-              label: t("nav.home"),
-              icon: HomeIcon,
-              active: workspaceView === "home",
-              onClick: () => navigate(`/s/${serverSlug}`),
-            },
-            {
-              id: "documents",
-              label: t("nav.documents"),
-              icon: FileTextIcon,
-              active: workspaceView === "documents",
-              onClick: () => navigate(`/s/${serverSlug}/documents`),
-            },
-            {
-              id: "tasks",
-              label: t("nav.tasks"),
-              icon: ListChecksIcon,
-              active: workspaceView === "tasks",
-              onClick: () => navigate(`/s/${serverSlug}/tasks`),
-            },
-            {
-              id: "settings",
-              label: t("nav.settings"),
-              icon: SettingsIcon,
-              active: workspaceView === "settings",
-              onClick: () => navigate(`/s/${serverSlug}/settings`),
-            },
-          ].map((item) => {
-            const Icon = item.icon;
-            return (
-              <Button
-                key={item.id}
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className={item.active ? "bg-accent text-foreground shadow-xs/5" : "text-muted-foreground"}
-                onClick={item.onClick}
-                title={item.label}
-                aria-label={item.label}
-                aria-current={item.active ? "page" : undefined}
-              >
-                <Icon className="size-4" strokeWidth={item.active ? 2.2 : 1.8} />
-              </Button>
-            );
-          })}
-        </nav>
-      )}
-
       {!localMode && (
         <div className="mx-2 mb-1 flex items-center gap-2 rounded-lg px-3 py-2.5">
           <GeneratedAvatar id={userId || userEmail} name={userName || userEmail} size="xs" />
@@ -1924,10 +1784,6 @@ export function Sidebar({
         onClose={() => setShowCreateChannel(false)}
         onCreated={handleChannelCreated}
         serverId={serverId}
-      />
-      <CreateServerDialog
-        open={showCreateServer}
-        onClose={() => setShowCreateServer(false)}
       />
       {editingChannel && (
         <EditChannelDialog

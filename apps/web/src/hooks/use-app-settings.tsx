@@ -5,6 +5,14 @@ import type { AgentRuntimeId } from "@/lib/agent-runtime";
 
 export type AppLanguage = "zh-CN" | "en-US";
 export type AppTheme = "system" | "light" | "dark";
+/**
+ * The colour of the rail, kept separate from light/dark the way Slack keeps its
+ * theme picker separate from its appearance setting. Each palette supplies both
+ * a light and a dark version of itself, so the two settings compose instead of
+ * fighting: someone on aubergine who switches to dark stays on aubergine.
+ */
+export type AppPalette = "sand" | "aubergine" | "forest" | "ocean" | "ink";
+export const APP_PALETTES: AppPalette[] = ["sand", "aubergine", "forest", "ocean", "ink"];
 export type AgentModel = string;
 export type AgentRuntime = AgentRuntimeId;
 export type ThinkingLevel = "low" | "medium" | "high";
@@ -12,6 +20,7 @@ export type ThinkingLevel = "low" | "medium" | "high";
 export interface AppSettings {
   language: AppLanguage;
   theme: AppTheme;
+  palette: AppPalette;
   defaultRuntime: AgentRuntime;
   defaultModel: AgentModel;
   defaultConnectionId: string | null;
@@ -37,6 +46,11 @@ const en = {
   "sidebar.loadFailed": "Couldn't load the sidebar",
   "sidebar.loadTimedOut": "Loading the sidebar timed out. Teammate will retry automatically.",
   "workspace.create": "Create workspace",
+  "workspace.switch": "Switch workspace",
+  "nav.back": "Back",
+  "nav.forward": "Forward",
+  "search.placeholder": "Search",
+  "search.empty": "No matches",
   "createWorkspace.title": "Create workspace",
   "createWorkspace.description": "Set up a focused space for people and agents to collaborate.",
   "createWorkspace.name": "Workspace name",
@@ -412,6 +426,13 @@ const en = {
   "settings.themeSystem": "Follow system",
   "settings.themeLight": "Light",
   "settings.themeDark": "Dark",
+  "settings.palette": "Theme",
+  "settings.paletteHint": "Colours the rail. The panels stay light so the transcript reads the same in every theme.",
+  "settings.paletteSand": "Sand",
+  "settings.paletteAubergine": "Aubergine",
+  "settings.paletteForest": "Forest",
+  "settings.paletteOcean": "Ocean",
+  "settings.paletteInk": "Ink",
   "settings.agentRuntime": "Agent runtime",
   "settings.runtimeDescription": "Choose the local engine used by new agents and check CLI availability.",
   "settings.availableRuntimes": "Available runtimes",
@@ -580,6 +601,11 @@ const zh: Record<TranslationKey, string> = {
   "sidebar.loadFailed": "侧边栏加载失败",
   "sidebar.loadTimedOut": "侧边栏加载超时，Teammate 会自动重试。",
   "workspace.create": "新建工作区",
+  "workspace.switch": "切换工作区",
+  "nav.back": "后退",
+  "nav.forward": "前进",
+  "search.placeholder": "搜索",
+  "search.empty": "没有匹配结果",
   "createWorkspace.title": "新建工作区",
   "createWorkspace.description": "为人与智能体创建一个专注协作的空间。",
   "createWorkspace.name": "工作区名称",
@@ -955,6 +981,13 @@ const zh: Record<TranslationKey, string> = {
   "settings.themeSystem": "跟随系统",
   "settings.themeLight": "浅色",
   "settings.themeDark": "深色",
+  "settings.palette": "主题配色",
+  "settings.paletteHint": "只改左侧导航条的颜色。面板保持浅色，各主题下正文的观感一致。",
+  "settings.paletteSand": "沙",
+  "settings.paletteAubergine": "茄紫",
+  "settings.paletteForest": "松林",
+  "settings.paletteOcean": "深海",
+  "settings.paletteInk": "墨",
   "settings.agentRuntime": "智能体运行时",
   "settings.runtimeDescription": "选择新智能体使用的本地引擎，并检查 CLI 是否可用。",
   "settings.availableRuntimes": "可用运行时",
@@ -1109,6 +1142,7 @@ const zh: Record<TranslationKey, string> = {
 export const defaultAppSettings: AppSettings = {
   language: "en-US",
   theme: "system",
+  palette: "sand",
   defaultRuntime: "codex",
   defaultModel: "default",
   defaultConnectionId: null,

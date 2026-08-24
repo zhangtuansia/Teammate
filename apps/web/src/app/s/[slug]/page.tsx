@@ -9,6 +9,7 @@ import { ApiKeysSection } from "@/components/api-keys-section";
 import { SetupWizard } from "@/components/setup-wizard";
 import { useAppSettings } from "@/hooks/use-app-settings";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
+import { afterPaint } from "@/lib/after-paint";
 
 interface ServerStats {
   slug: string;
@@ -108,9 +109,9 @@ export default function ServerHomePage() {
   }, [request, slug, t]);
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => void loadStats());
+    const cancel = afterPaint(() => void loadStats());
     return () => {
-      window.cancelAnimationFrame(frame);
+      cancel();
       loadGenerationRef.current += 1;
     };
   }, [loadStats]);

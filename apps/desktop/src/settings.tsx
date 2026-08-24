@@ -21,6 +21,7 @@ import {
   useAppSettings,
   type AgentModel,
   type AgentRuntime,
+  type AppPalette,
   type AppLanguage,
   type AppSettings,
   type AppTheme,
@@ -49,6 +50,7 @@ import {
 import { ConnectionsSection } from "./model-connections";
 import { useSearchParams } from "next/navigation";
 import { apiUrl } from "@/lib/api-url";
+import { afterPaint } from "@/lib/after-paint";
 import { useUnsavedChangesGuard } from "@/hooks/use-navigation-guard";
 import { WorkspaceMembersSection } from "@/components/workspace-members-section";
 import { useWorkspaceServer } from "@/components/workspace-server-context";
@@ -108,6 +110,23 @@ interface RuntimeStatus {
 }
 
 type SettingsSection = "profile" | "workspace" | "general" | "models" | "chat" | "advanced";
+
+/**
+ * The swatch shown for each theme is its light-mode rail, because that is the
+ * surface the theme actually colours. Kept beside the palette blocks in
+ * globals.css — if one moves, the other has to.
+ */
+const PALETTE_SWATCHES: Array<{
+  value: AppPalette;
+  label: Parameters<typeof translate>[1];
+  swatch: string;
+}> = [
+  { value: "sand", label: "settings.paletteSand", swatch: "#ebe5db" },
+  { value: "aubergine", label: "settings.paletteAubergine", swatch: "#3f0e40" },
+  { value: "forest", label: "settings.paletteForest", swatch: "#1b3a2b" },
+  { value: "ocean", label: "settings.paletteOcean", swatch: "#10314f" },
+  { value: "ink", label: "settings.paletteInk", swatch: "#2b2b2e" },
+];
 
 interface LocalProfile {
   id: string;
@@ -243,11 +262,24 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
       document.documentElement.classList.toggle("dark", dark);
       document.documentElement.style.colorScheme = dark ? "dark" : "light";
       document.documentElement.lang = settings.language;
+      // The default palette carries no attribute, so nothing in the theme
+      // blocks can apply until one is actually chosen.
+      if (settings.palette && settings.palette !== "sand") {
+        document.documentElement.dataset.palette = settings.palette;
+      } else {
+        delete document.documentElement.dataset.palette;
+      }
     };
     applyTheme();
     media.addEventListener("change", applyTheme);
     return () => media.removeEventListener("change", applyTheme);
-  }, [hasLastGoodSettings, settings.language, settings.theme, settingsLoaded]);
+  }, [
+    hasLastGoodSettings,
+    settings.language,
+    settings.palette,
+    settings.theme,
+    settingsLoaded,
+  ]);
 
   const value = useMemo(
     () => ({
@@ -314,6 +346,7 @@ export function DesktopSettingsPage() {
     : "profile";
   const [language, setLanguage] = useState<AppLanguage>(settings.language);
   const [theme, setTheme] = useState<AppTheme>(settings.theme);
+  const [palette, setPalette] = useState<AppPalette>(settings.palette || "sand");
   const [defaultRuntime, setDefaultRuntime] = useState<AgentRuntime>(settings.defaultRuntime);
   const [defaultModel, setDefaultModel] = useState<AgentModel>(settings.defaultModel);
   const [defaultConnectionId, setDefaultConnectionId] = useState<string | null>(
@@ -417,6 +450,7 @@ export function DesktopSettingsPage() {
   const settingsChanged =
     language !== settings.language ||
     theme !== settings.theme ||
+    palette !== (settings.palette || "sand") ||
     defaultRuntime !== settings.defaultRuntime ||
     defaultModel !== settings.defaultModel ||
     defaultConnectionId !== settings.defaultConnectionId ||
@@ -464,9 +498,10 @@ export function DesktopSettingsPage() {
 
   useEffect(() => {
     if (!settingsLoaded) return;
-    const frame = window.requestAnimationFrame(() => {
+    return afterPaint(() => {
       setLanguage(settings.language);
       setTheme(settings.theme);
+      setPalette(settings.palette || "sand");
       setDefaultRuntime(settings.defaultRuntime);
       setDefaultModel(settings.defaultModel);
       setDefaultConnectionId(settings.defaultConnectionId);
@@ -475,7 +510,6 @@ export function DesktopSettingsPage() {
       setMessageSounds(settings.messageSounds);
       setFormHydratedFor(settings);
     });
-    return () => window.cancelAnimationFrame(frame);
   }, [settings, settingsLoaded]);
 
   useEffect(() => {
@@ -513,7 +547,7 @@ export function DesktopSettingsPage() {
       setSupportLoading(false);
     }
 
-    const frame = window.requestAnimationFrame(() => {
+    const cancel = afterPaint(() => {
       timeout = window.setTimeout(() => controller.abort(), 10_000);
       setSupportLoading(true);
       setSupportLoadError("");
@@ -521,7 +555,7 @@ export function DesktopSettingsPage() {
     });
     return () => {
       cancelled = true;
-      window.cancelAnimationFrame(frame);
+      cancel();
       if (timeout !== null) window.clearTimeout(timeout);
       controller.abort();
     };
@@ -633,6 +667,7 @@ export function DesktopSettingsPage() {
           body: JSON.stringify({
             language,
             theme,
+            palette,
             ...(aiSettingsChanged ? {
               defaultRuntime: resolvedDefault.selection.runtime,
               defaultModel: resolvedDefault.selection.model,
@@ -875,6 +910,39 @@ export function DesktopSettingsPage() {
                       <Field>
                         <FieldLabel>{t("settings.appearance")}</FieldLabel>
                         <SettingsSelect items={themeItems} value={theme} onValueChange={setTheme} />
+                      </Field>
+                      <Field>
+                        <FieldLabel>{t("settings.palette")}</FieldLabel>
+                        {/* Swatches rather than a dropdown: the thing being
+                            chosen is a colour, and a list of names makes you
+                            pick one to find out what it looks like. */}
+                        <div className="flex flex-wrap gap-2">
+                          {PALETTE_SWATCHES.map((option) => {
+                            const active = palette === option.value;
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setPalette(option.value)}
+                                aria-pressed={active}
+                                title={t(option.label)}
+                                className={`flex items-center gap-2 rounded-lg border py-1.5 pr-3 pl-1.5 text-[13px] transition-colors ${
+                                  active
+                                    ? "border-foreground/25 bg-accent text-foreground"
+                                    : "border-transparent text-muted-foreground hover:bg-accent/60"
+                                }`}
+                              >
+                                <span
+                                  aria-hidden="true"
+                                  className="size-6 rounded-md"
+                                  style={{ backgroundColor: option.swatch }}
+                                />
+                                {t(option.label)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <FieldDescription>{t("settings.paletteHint")}</FieldDescription>
                       </Field>
                     </CardPanel>
                   </Card>

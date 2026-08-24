@@ -1327,6 +1327,39 @@ function MessageAreaContent({
   const { settings, t } = useAppSettings();
 
   const readStateChannelId = channel?.id;
+
+  /**
+   * Whether the backlog banner has done its job in this channel.
+   *
+   * The boundary it counts from is read once, when the channel opens, and never
+   * again — which is right, because the divider has to stay put while you read
+   * rather than creeping down the transcript ahead of you. But the banner is a
+   * different thing: it exists to carry you to a message you have not seen, so
+   * once that message has been on screen it has nothing left to offer, and
+   * leaving it up is what makes it look stuck.
+   *
+   * Held as the channel it was cleared in rather than a boolean plus an effect
+   * to reset it — arriving somewhere new is then just a value that no longer
+   * matches.
+   */
+  const [backlogSeenIn, setBacklogSeenIn] = useState<string | null>(null);
+  const backlogSeen = backlogSeenIn === readStateChannelId;
+
+  useEffect(() => {
+    if (!unread || backlogSeen || !readStateChannelId) return;
+    const target = document.getElementById(`message-${unread.id}`);
+    if (!target) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setBacklogSeenIn(readStateChannelId);
+        }
+      },
+      { root: scrollContainerRef.current, threshold: 0.5 },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [backlogSeen, readStateChannelId, unread]);
   const latestSeq = useMemo(() => {
     let highest = 0;
     for (const message of messages) {
@@ -3263,9 +3296,10 @@ function MessageAreaContent({
 
         <div ref={bottomRef} />
       </div>
-      {unread && (
+      {unread && !backlogSeen && (
         // Slack's unread banner: it says how far behind you are and takes you
-        // to the first message you have not read, not to the newest one.
+        // to the first message you have not read, not to the newest one. It
+        // retires as soon as that message has been on screen.
         <div className="absolute inset-x-0 top-0 z-30 flex justify-center px-4 pt-2">
           <button
             className="pointer-events-auto flex items-center gap-2 rounded-full bg-primary px-3 py-1 text-[13px] font-bold text-primary-foreground shadow-lg"

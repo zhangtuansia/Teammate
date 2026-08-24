@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Sidebar } from "@/components/sidebar";
+import { WorkspaceRail } from "@/components/workspace-rail";
+import { WorkspaceTopBar } from "@/components/workspace-top-bar";
 import { AgentActivityProvider } from "@/hooks/use-agent-activity";
 import { DesktopSettingsProvider } from "../../../../../desktop/src/settings";
 import { WorkspaceServerProvider } from "@/components/workspace-server-context";
@@ -125,10 +127,21 @@ export default function ServerLayout({
     <WorkspaceNavigationGuardProvider>
       <WorkspaceServerProvider server={server}>
         <AgentActivityProvider key={server.id} serverId={server.id}>
-          <div className="flex h-full bg-background p-2">
-            <Sidebar serverSlug={server.slug} serverId={server.id} serverName={server.name} />
-            <div className="flex flex-1 overflow-hidden rounded-xl bg-card shadow-border">
-              {children}
+          <div className="flex h-full flex-col bg-rail">
+            <WorkspaceTopBar
+              serverId={server.id}
+              serverName={server.name}
+              serverSlug={server.slug}
+            />
+            <div className="flex min-h-0 flex-1">
+              <WorkspaceRail serverSlug={server.slug} />
+              {/* One slab lifted off the rail, matching the desktop frame. */}
+              <div className="workspace-slab flex min-w-0 flex-1 overflow-hidden bg-card">
+                <Sidebar serverSlug={server.slug} serverId={server.id} />
+                <div className="workspace-primary relative flex flex-1 overflow-hidden bg-card">
+                  {children}
+                </div>
+              </div>
             </div>
           </div>
         </AgentActivityProvider>
