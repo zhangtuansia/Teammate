@@ -107,7 +107,7 @@ interface RuntimeStatus {
   installed: boolean;
 }
 
-type SettingsSection = "profile" | "workspace" | "general" | "models" | "runtimes" | "chat" | "advanced";
+type SettingsSection = "profile" | "workspace" | "general" | "models" | "chat" | "advanced";
 
 interface LocalProfile {
   id: string;
@@ -309,7 +309,7 @@ export function DesktopSettingsPage() {
   const workspaceServer = useWorkspaceServer();
   const searchParams = useSearchParams();
   const requestedSection = searchParams.get("section");
-  const activeSection: SettingsSection = requestedSection && ["profile", "workspace", "general", "models", "runtimes", "chat", "advanced"].includes(requestedSection)
+  const activeSection: SettingsSection = requestedSection && ["profile", "workspace", "general", "models", "chat", "advanced"].includes(requestedSection)
     ? requestedSection as SettingsSection
     : "profile";
   const [language, setLanguage] = useState<AppLanguage>(settings.language);
@@ -747,12 +747,12 @@ export function DesktopSettingsPage() {
       <fieldset aria-busy={saving} className="contents" disabled={saving}>
       <ScrollArea className="min-w-0 flex-1">
             <div className="mx-auto w-full max-w-3xl space-y-6 p-5 sm:p-7">
-              {(["models", "runtimes", "advanced"] as SettingsSection[]).includes(activeSection) && supportLoading && (
+              {(["models", "advanced"] as SettingsSection[]).includes(activeSection) && supportLoading && (
                 <p aria-live="polite" className="text-sm text-muted-foreground" role="status">
                   {t("settings.loading")}
                 </p>
               )}
-              {(["models", "runtimes", "advanced"] as SettingsSection[]).includes(activeSection) && supportLoadError && (
+              {(["models", "advanced"] as SettingsSection[]).includes(activeSection) && supportLoadError && (
                 <Alert variant="error">
                   <AlertCircle />
                   <AlertTitle>{t("settings.loadFailed")}</AlertTitle>
@@ -891,6 +891,90 @@ export function DesktopSettingsPage() {
                   </div>
                   <div className="space-y-2">
                     <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      {t("settings.engineHeading")}
+                    </h4>
+                    <Card>
+                      <CardPanel className="p-0">
+                        <div className="flex items-center justify-between gap-5 px-4 py-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium">{t("settings.runtime")}</p>
+                            <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.runtimeHint")}</p>
+                          </div>
+                          <SettingsSelect
+                            items={runtimeItems}
+                            value={defaultRuntime}
+                            onValueChange={(runtime) => {
+                              if (runtime === "pi") {
+                                const first = connections.find((connection) => connection.hasCredential);
+                                applyDefaultSelection(resolveAgentRuntimeSelection({
+                                  runtime,
+                                  connectionId: first?.id,
+                                }, connections, installedRuntimeIds));
+                              } else {
+                                applyDefaultSelection(resolveAgentRuntimeSelection(
+                                  { runtime },
+                                  connections,
+                                  installedRuntimeIds,
+                                ));
+                              }
+                            }}
+                          />
+                        </div>
+                        {/* Two of these are CLIs on this machine and one is built
+                            in, so "installed" only means something for the first
+                            two. The built-in one reports what it is waiting on
+                            instead: a connection to talk to. */}
+                        <div className="divide-y border-t">
+                          {runtimes.map((runtime) => {
+                            const embedded = runtime.id === "pi";
+                            const backing = embedded
+                              ? connections.find((connection) => connection.id === defaultConnectionId)
+                                ?? connections.find((connection) => connection.hasCredential)
+                              : null;
+                            return (
+                              <div
+                                className="flex items-center justify-between gap-4 px-4 py-2.5"
+                                key={runtime.id}
+                              >
+                                <div className="min-w-0">
+                                  <p className="text-[13px] font-medium">
+                                    {runtime.name}
+                                    {runtime.id === defaultRuntime && (
+                                      <span className="ml-2 text-[11px] font-normal text-primary">
+                                        {t("settings.engineInUse")}
+                                      </span>
+                                    )}
+                                  </p>
+                                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                                    {embedded
+                                      ? backing
+                                        ? `${t("settings.engineVia")} ${backing.name}`
+                                        : t("settings.engineNeedsConnection")
+                                      : runtime.executable || t("settings.runtimeMissing")}
+                                  </p>
+                                </div>
+                                {embedded ? (
+                                  <Badge variant={backing ? "success" : "secondary"}>
+                                    {backing ? <Check /> : <AlertCircle />}
+                                    {backing ? t("settings.engineReady") : t("settings.engineUnconfigured")}
+                                  </Badge>
+                                ) : (
+                                  <Badge variant={runtime.installed ? "success" : "error"}>
+                                    {runtime.installed ? <Check /> : <AlertCircle />}
+                                    {runtime.installed
+                                      ? t("settings.runtimeInstalled")
+                                      : t("settings.runtimeMissing")}
+                                  </Badge>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </CardPanel>
+                    </Card>
+                  </div>
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       {t("settings.defaultSettings")}
                     </h4>
                     <Card>
@@ -1002,72 +1086,6 @@ export function DesktopSettingsPage() {
                       }
                     }}
                   />
-                </section>
-              )}
-
-              {activeSection === "runtimes" && (
-                <section className="space-y-6">
-                  <div>
-                    <h3 className="text-lg font-semibold">{t("settings.agentRuntime")}</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {t("settings.runtimeDescription")}
-                    </p>
-                  </div>
-                  <Card>
-                    <CardPanel>
-                      <Field>
-                        <FieldLabel>{t("settings.runtime")}</FieldLabel>
-                        <SettingsSelect
-                          items={runtimeItems}
-                          value={defaultRuntime}
-                          onValueChange={(runtime) => {
-                            if (runtime === "pi") {
-                              const first = connections.find((connection) => connection.hasCredential);
-                              applyDefaultSelection(resolveAgentRuntimeSelection({
-                                runtime,
-                                connectionId: first?.id,
-                              }, connections, installedRuntimeIds));
-                            } else {
-                              applyDefaultSelection(resolveAgentRuntimeSelection(
-                                { runtime },
-                                connections,
-                                installedRuntimeIds,
-                              ));
-                            }
-                          }}
-                        />
-                        <FieldDescription>{t("settings.runtimeHint")}</FieldDescription>
-                      </Field>
-                    </CardPanel>
-                  </Card>
-                  <div className="space-y-3">
-                    <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      {t("settings.availableRuntimes")}
-                    </h4>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      {runtimes.map((runtime) => (
-                        <Card
-                          key={runtime.id}
-                          className={`${
-                            runtime.id === defaultRuntime ? "border-primary/36 bg-primary/4" : ""
-                          }`}
-                        >
-                          <CardPanel className="flex items-start justify-between gap-3 p-4">
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold">{runtime.name}</p>
-                              <p className="mt-1 truncate text-xs text-muted-foreground">
-                                {runtime.executable || t("settings.runtimeMissing")}
-                              </p>
-                            </div>
-                            <Badge variant={runtime.installed ? "success" : "error"}>
-                              {runtime.installed ? <Check /> : <AlertCircle />}
-                              {runtime.installed ? t("settings.runtimeInstalled") : t("settings.runtimeMissing")}
-                            </Badge>
-                          </CardPanel>
-                        </Card>
-                      ))}
-                    </div>
-                  </div>
                 </section>
               )}
 

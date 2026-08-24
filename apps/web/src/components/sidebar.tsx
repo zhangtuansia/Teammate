@@ -13,7 +13,7 @@ import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
-import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, CpuIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, CheckIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, HomeIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { withRequestDeadline } from "@/lib/request-deadline";
@@ -1805,7 +1805,6 @@ export function Sidebar({
                 { id: "workspace", label: t("settings.navWorkspace"), icon: UsersIcon },
                 { id: "general", label: t("settings.navGeneral"), icon: SettingsIcon },
                 { id: "models", label: t("settings.navModels"), icon: BotIcon },
-                { id: "runtimes", label: t("settings.navRuntimes"), icon: CpuIcon },
                 { id: "chat", label: t("settings.navChat"), icon: MessageSquareIcon },
                 { id: "advanced", label: t("settings.navAdvanced"), icon: WrenchIcon },
               ].map((section) => {
