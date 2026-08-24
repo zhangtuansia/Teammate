@@ -440,6 +440,7 @@ const ReactionBar = memo(function ReactionBar({
   // Reaching the picker means leaving the row, which would otherwise take the
   // hover state — and the button the picker is anchored to — with it.
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [hovered, setHovered] = useState(false);
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1">
       {reactions.map((reaction) => (
@@ -459,7 +460,11 @@ const ReactionBar = memo(function ReactionBar({
           <span>{reaction.count}</span>
         </button>
       ))}
-      <div className="group/add relative">
+      <div
+        className="group/add relative"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
         <button
           aria-label={addLabel}
           className={`flex h-6 items-center rounded-full border border-dashed border-border px-2 text-muted-foreground hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 ${
@@ -470,20 +475,18 @@ const ReactionBar = memo(function ReactionBar({
         >
           <SmilePlusIcon className="size-3.5" />
         </button>
-        <div
-          className={`absolute bottom-full left-0 z-20 mb-1 group-focus-within/add:block group-hover/add:block ${
-            pickerOpen ? 'block' : 'hidden'
-          }`}
-        >
-          <ReactionChoices
-            align="start"
-            moreLabel={addLabel}
-            onOpenChange={setPickerOpen}
-            onPick={onPick}
-            open={pickerOpen}
-            t={t}
-          />
-        </div>
+        {(hovered || pickerOpen) && (
+          <div className="absolute bottom-full left-0 z-20 mb-1 block">
+            <ReactionChoices
+              align="start"
+              moreLabel={addLabel}
+              onOpenChange={setPickerOpen}
+              onPick={onPick}
+              open={pickerOpen}
+              t={t}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -633,6 +636,12 @@ const MessageRow = memo(function MessageRow({
   const { t } = useAppSettings();
   // The toolbar lives on hover, and reaching the picker means leaving the row.
   const [rowPickerOpen, setRowPickerOpen] = useState(false);
+  // Every row used to carry its whole toolbar — six reaction buttons, a picker
+  // trigger, thread, edit, delete — mounted and hidden by CSS. Fifty messages
+  // came to four thousand elements, three hundred of them emoji nobody could
+  // see, and the scroll felt every one of them. It is built when reached for.
+  const [hovered, setHovered] = useState(false);
+  const showToolbar = hovered || rowPickerOpen;
   const runtimeErrorDetail = message.content.startsWith(RUNTIME_ERROR_MESSAGE_PREFIX)
     ? message.content.slice(RUNTIME_ERROR_MESSAGE_PREFIX.length).trim()
     : null;
@@ -644,7 +653,10 @@ const MessageRow = memo(function MessageRow({
       // paint containment, which would clip the hover toolbar straddling the
       // row's top edge.
       id={`message-${message.id}`}
-      className={`group relative flex gap-2 px-5 py-2 hover:bg-accent/40 ${
+      onFocus={() => setHovered(true)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className={`group relative flex gap-2 px-5 py-2 hover:bg-accent ${
         message.motion === 'send'
           ? 'animate-message-send'
           : message.motion === 'receive'
@@ -655,7 +667,7 @@ const MessageRow = memo(function MessageRow({
       <div className="w-9 shrink-0 pt-0.5">
         {sameSender ? (
           <time
-            className="block text-right text-[11px] leading-[22px] text-muted-foreground opacity-0 tabular-nums group-hover:opacity-100"
+            className="block text-right text-[12px] leading-[22px] text-muted-foreground opacity-0 tabular-nums group-hover:opacity-100"
             dateTime={message.created_at}
           >
             {formattedTime}
@@ -671,7 +683,7 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
 
-      {onOpenThread && (
+      {onOpenThread && showToolbar && (
         // Slack's hover affordance, and the only way to open a thread on a
         // message that has no replies yet. It straddles the row's top edge so
         // it never covers the first line of text.
