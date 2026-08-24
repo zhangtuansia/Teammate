@@ -920,6 +920,8 @@ function MessageAreaContent({
   // Reactions keyed by message. Like threads, they hang off the transcript
   // rather than living in it — a reaction never reorders or reflows the flow.
   const [reactions, setReactions] = useState<Map<string, ReactionRow[]>>(new Map());
+
+
   const openThreadIdRef = useRef<string | null>(null);
   const reactionsRef = useRef<Map<string, ReactionRow[]>>(new Map());
 
@@ -991,6 +993,12 @@ function MessageAreaContent({
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [agentMembersLoading, setAgentMembersLoading] = useState(true);
   const [channelAgents, setChannelAgents] = useState<Map<string, AgentInfo>>(new Map());
+  // Everyone who has ever been a teammate here, including those who have left.
+  // Channel membership goes when someone departs, so without this their past
+  // messages have no author to resolve to.
+  const [pastAgents, setPastAgents] = useState<Map<string, AgentInfo & { departed_at?: string | null }>>(
+    new Map(),
+  );
   const [currentProfile, setCurrentProfile] = useState<HumanProfile | null>(null);
   const [agentTyping, setAgentTyping] = useState(false);
   const [pendingAgentIds, setPendingAgentIds] = useState<string[]>([]);
@@ -1161,6 +1169,31 @@ function MessageAreaContent({
       controller.abort();
     };
   }, [channelId, oldestMessageId, supabase]);
+
+  // Loaded once per workspace: the directory keeps departed teammates, which
+  // channel membership does not.
+  useEffect(() => {
+    const serverId = channel?.server_id;
+    if (!serverId) return;
+    let active = true;
+    void (async () => {
+      const { data, error } = await supabase.rpc('list_workspace_agent_directory', {
+        server_uuid: serverId,
+      });
+      if (!active || error || !Array.isArray(data)) return;
+      setPastAgents(
+        new Map(
+          (data as Array<AgentInfo & { departed_at?: string | null }>).map((agent) => [
+            agent.id,
+            agent,
+          ]),
+        ),
+      );
+    })();
+    return () => {
+      active = false;
+    };
+  }, [channel?.server_id, supabase]);
 
   const toggleReaction = useCallback(
     (messageId: string, emoji: string) => {
@@ -2738,7 +2771,10 @@ function MessageAreaContent({
   function getSenderName(msg: Message) {
     if (msg.sender_type === 'system') return t('message.system');
     if (msg.sender_type === 'agent') {
-      const agent = channelAgents.get(msg.sender_id);
+      // A teammate who has left is no longer a channel member, so their name
+      // comes from the workspace directory instead — otherwise everything they
+      // ever said would be signed with the generic word for "agent".
+      const agent = channelAgents.get(msg.sender_id) ?? pastAgents.get(msg.sender_id);
       return agent?.display_name || agentInfo?.display_name || t('message.agent');
     }
     if (msg.profiles?.display_name) return msg.profiles.display_name;
@@ -2747,7 +2783,10 @@ function MessageAreaContent({
   }
 
   function threadAvatarFor(senderId: string) {
-    const agent = channelAgents.get(senderId) ?? (agentInfo?.id === senderId ? agentInfo : null);
+    const agent = channelAgents.get(senderId)
+      ?? (agentInfo?.id === senderId ? agentInfo : null)
+      ?? pastAgents.get(senderId)
+      ?? null;
     if (agent) {
       return { name: agent.display_name || t('message.agent'), url: agent.avatar_url ?? null };
     }
@@ -3006,7 +3045,13 @@ function MessageAreaContent({
           const thread = threads.get(msg.id);
           const row = (
             <MessageRow
-              agentBadgeLabel={t('message.agentBadge')}
+              agentBadgeLabel={
+                msg.sender_type === 'agent' &&
+                !channelAgents.has(msg.sender_id) &&
+                pastAgents.get(msg.sender_id)?.departed_at
+                  ? t('agent.departed')
+                  : t('message.agentBadge')
+              }
               avatarUrl={
                 msg.sender_type === 'agent'
                   ? channelAgents.get(msg.sender_id)?.avatar_url || agentInfo?.avatar_url

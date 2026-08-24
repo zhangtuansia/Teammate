@@ -130,6 +130,7 @@ const tableColumns = {
     "session_id",
     "runtime_session_id",
     "runtime_session_runtime",
+    "departed_at",
     "connection_id",
     "avatar_url",
     "created_at",
@@ -1467,6 +1468,10 @@ ensureColumn("agents", "runtime", "TEXT NOT NULL DEFAULT 'codex'");
 ensureColumn("agents", "thinking_level", "TEXT NOT NULL DEFAULT 'medium'");
 ensureColumn("agents", "runtime_session_id", "TEXT");
 ensureColumn("agents", "runtime_session_runtime", "TEXT");
+// When this teammate left. A departed agent keeps its row so everything it
+// said still has an author — deleting the row outright left its messages
+// attributed to whoever was reading them.
+ensureColumn("agents", "departed_at", "TEXT");
 ensureColumn("agents", "connection_id", "TEXT");
 ensureColumn("messages", "thread_broadcast", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("messages", "edited_at", "TEXT");
@@ -1869,7 +1874,7 @@ async function dispatchLocalRequest(
       emitDatabaseEvent("UPDATE", "machine_keys", key);
 
       const agents = db
-        .prepare("SELECT id, name, display_name, description, runtime, model, connection_id, status FROM agents WHERE owner_id = ? AND server_id = ? ORDER BY created_at")
+        .prepare("SELECT id, name, display_name, description, runtime, model, connection_id, status, departed_at FROM agents WHERE owner_id = ? AND server_id = ? ORDER BY created_at")
         .all(LOCAL_USER_ID, LOCAL_SERVER_ID);
       const agentTokens = Object.fromEntries(
         agents.map((agent) => {
@@ -3614,7 +3619,8 @@ function localListWorkspaceAgentDirectory(argsValue: unknown) {
        agent.display_name,
        agent.description,
        agent.avatar_url,
-       agent.status
+       agent.status,
+       agent.departed_at
      FROM agents agent
      JOIN server_members agent_membership
        ON agent_membership.server_id = agent.server_id
@@ -5691,15 +5697,45 @@ async function handleAgentRequest(
   }
 
   if (request.method === "DELETE") {
+    // A teammate leaving is not the same as never having been here. The row
+    // stays so their messages, documents and task history keep an author; what
+    // goes is everything that would let them act: memberships, capabilities,
+    // and any work still queued for them.
+    const purge = url.searchParams.get("purge") === "true";
     runAtomicMutationTransaction("agent", () => {
+      if (purge) {
+        executeQuery({
+          table: "agents",
+          action: "delete",
+          filters: [{ column: "id", operator: "eq", value: agentId }],
+        });
+        return;
+      }
       executeQuery({
         table: "agents",
-        action: "delete",
+        action: "update",
+        values: { departed_at: new Date().toISOString(), status: "offline" },
         filters: [{ column: "id", operator: "eq", value: agentId }],
       });
+      executeQuery({
+        table: "channel_members",
+        action: "delete",
+        filters: [
+          { column: "member_id", operator: "eq", value: agentId },
+          { column: "member_type", operator: "eq", value: "agent" },
+        ],
+      });
+      db.prepare(
+        `UPDATE message_deliveries
+            SET status = 'skipped', last_error = 'Teammate has left the workspace'
+          WHERE agent_id = ? AND status IN ('pending', 'processing')`,
+      ).run(toSqlValue(agentId));
+      db.prepare(
+        "UPDATE tasks SET assignee_id = NULL, assignee_type = NULL WHERE assignee_id = ?",
+      ).run(toSqlValue(agentId));
     });
     deleteAgentCapabilities(agentId);
-    await removeAgentAvatarFile(agent.avatar_url);
+    if (purge) await removeAgentAvatarFile(agent.avatar_url);
     return sendJson(response, 200, { success: true });
   }
 

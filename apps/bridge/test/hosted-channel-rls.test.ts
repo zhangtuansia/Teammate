@@ -364,7 +364,7 @@ test("workspace agent discovery uses a safe directory RPC instead of shared agen
   assert.match(localServer, /function localListWorkspaceAgentDirectory/);
   assert.match(
     localServer,
-    /SELECT\s+agent\.id,\s+agent\.name,\s+agent\.display_name,\s+agent\.description,\s+agent\.avatar_url,\s+agent\.status\s+FROM agents agent/i,
+    /SELECT\s+agent\.id,\s+agent\.name,\s+agent\.display_name,\s+agent\.description,\s+agent\.avatar_url,\s+agent\.status,\s+agent\.departed_at\s+FROM agents agent/i,
   );
 
   for (const dialog of [createDialog, editDialog]) {

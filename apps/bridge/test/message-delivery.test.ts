@@ -1624,15 +1624,24 @@ test("local agent API deletion atomically clears dependent memberships and assig
     for (const result of [agent, dm, serverMembership, channelMembership, task, document]) {
       assertQuery(result);
     }
-    assert.equal(agent.data, null);
-    assert.equal(dm.data, null);
-    assert.equal(serverMembership.data, null);
+    // Removing a teammate is a departure, not an erasure: the row, the DM and
+    // the workspace membership all stay, because everything they said needs an
+    // author and their conversation is still worth reading.
+    assert.ok(agent.data, "the teammate is still on the books");
+    assert.ok(dm.data, "their DM history survives");
+    assert.ok(serverMembership.data, "so their name still resolves");
+    // What goes is the ability to act: no channel, so nothing reaches them.
     assert.equal(channelMembership.data, null);
     assert.ok(task.data);
     assert.equal((task.data as { assignee_id: string | null }).assignee_id, null);
     assert.equal((task.data as { assignee_type: string | null }).assignee_type, null);
+    // Unfinished work goes back to the pool, but authorship does not: the
+    // document they wrote is still the document they wrote.
     assert.ok(document.data);
-    assert.equal((document.data as { generated_by_agent_id: string | null }).generated_by_agent_id, null);
+    assert.ok(
+      (document.data as { generated_by_agent_id: string | null }).generated_by_agent_id,
+      "a departed teammate keeps credit for what they produced",
+    );
   });
 });
 
@@ -2271,5 +2280,88 @@ test("a teammate named in a document hears about it once", async () => {
       .update({ content: `还是麻烦 @${handle} 看一下。` })
       .eq("id", documentId);
     assert.equal((await countMessages()).length, before + 2);
+  });
+});
+
+test("purging a teammate erases them, and is a separate ask", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Temp", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    const agentId = created.agent.id;
+
+    // Departure is what a plain removal does.
+    await localApi(baseUrl, `/api/agents/${agentId}`, "DELETE");
+    const departed = await client.from("agents").select("departed_at").eq("id", agentId).maybeSingle();
+    assertQuery(departed);
+    assert.ok((departed.data as { departed_at: string | null } | null)?.departed_at);
+
+    // Erasing them is a second, explicit request.
+    await localApi(baseUrl, `/api/agents/${agentId}?purge=true`, "DELETE");
+    const gone = await client.from("agents").select("id").eq("id", agentId).maybeSingle();
+    assertQuery(gone);
+    assert.equal(gone.data, null);
+    const membership = await client
+      .from("server_members")
+      .select("member_id")
+      .eq("member_id", agentId)
+      .maybeSingle();
+    assertQuery(membership);
+    assert.equal(membership.data, null, "and the cascade still runs");
+  });
+});
+
+test("a teammate who leaves keeps their name on what they wrote", async () => {
+  await withLocalHarness(async ({ client, baseUrl }) => {
+    const created = await localApi<{ agent: { id: string; name: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    const agentId = created.agent.id;
+    await setChannelAgents(client, [LOCAL_AGENT_ID, agentId]);
+    const said = await insertAgentMessage(client, LOCAL_CHANNEL_ID, agentId, "我看一下这个。");
+
+    await localApi(baseUrl, `/api/agents/${agentId}`, "DELETE");
+
+    // The row survives, which is what gives the message an author. Deleting it
+    // outright left the transcript attributing their words to whoever read it.
+    const after = await client
+      .from("agents")
+      .select("display_name, departed_at, status")
+      .eq("id", agentId)
+      .maybeSingle();
+    assertQuery(after);
+    const record = after.data as { display_name: string; departed_at: string | null } | null;
+    assert.ok(record, "a departed teammate is still a teammate");
+    assert.ok(record!.departed_at, "and is marked as having left");
+    assert.equal(record!.display_name, "Helper");
+
+    const message = await client.from("messages").select("id").eq("id", said.id).maybeSingle();
+    assertQuery(message);
+    assert.ok(message.data, "what they wrote stays");
+
+    // What goes is everything that would let them act.
+    const membership = await client
+      .from("channel_members")
+      .select("channel_id")
+      .eq("member_id", agentId)
+      .eq("member_type", "agent");
+    assertQuery(membership);
+    assert.equal((membership.data || []).length, 0, "they are in no channel, so nothing reaches them");
+
+    // A message to the room does not queue work for someone who has left.
+    const after2 = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "还有人在吗");
+    const queued = await client
+      .from("message_deliveries")
+      .select("agent_id")
+      .eq("message_id", after2.id)
+      .eq("agent_id", agentId);
+    assertQuery(queued);
+    assert.equal((queued.data || []).length, 0);
   });
 });
