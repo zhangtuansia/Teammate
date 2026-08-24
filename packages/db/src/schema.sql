@@ -932,6 +932,8 @@ create table public.documents (
   folder_path text default '' not null,
   -- When it was pinned, which is also the order pinned documents sit in.
   pinned_at timestamptz,
+  -- How the content is written: markdown, or html for a page saved elsewhere.
+  format text default 'markdown' not null check (format in ('markdown','html')),
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
 );
@@ -989,6 +991,7 @@ returns table (
   generated_by_agent_id uuid,
   folder_path text,
   pinned_at timestamptz,
+  format text,
   created_at timestamptz,
   updated_at timestamptz,
   excerpt text,
@@ -1015,6 +1018,7 @@ begin
     document.generated_by_agent_id,
     document.folder_path,
     document.pinned_at,
+    document.format,
     document.created_at,
     document.updated_at,
     -- When the body is what matched, show why rather than the opening line.

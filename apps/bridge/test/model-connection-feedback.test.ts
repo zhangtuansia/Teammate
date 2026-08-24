@@ -21,6 +21,7 @@ import {
   FOLDER_IMPORT_FILE_LIMIT,
   documentPlacement,
   filesFromDrop,
+  formatOf,
   planFolderImport,
 } from "../../web/src/lib/folder-import.ts";
 import { ancestorPaths, buildDocumentTree } from "../../web/src/lib/document-tree.ts";
@@ -414,8 +415,16 @@ test("adding a local folder takes the notes and leaves everything else", () => {
 
   // A nested note keeps the folder it came in, rather than having it pressed
   // flat into the title.
-  assert.deepEqual(documentPlacement("deep/api.markdown"), { folder: "deep", title: "api" });
-  assert.deepEqual(documentPlacement("readme.md"), { folder: "", title: "readme" });
+  assert.deepEqual(documentPlacement("deep/api.markdown"), {
+    folder: "deep",
+    format: "markdown",
+    title: "api",
+  });
+  assert.deepEqual(documentPlacement("readme.md"), {
+    folder: "",
+    format: "markdown",
+    title: "readme",
+  });
 
   // Pointing at a huge folder takes a capped number and says how many it left.
   const many = Array.from({ length: FOLDER_IMPORT_FILE_LIMIT + 5 }, (_, index) =>
@@ -536,7 +545,10 @@ test("dropping a folder reads what is inside it", async () => {
   assert.deepEqual(
     plan.candidates.map((candidate) => documentPlacement(candidate.path)),
     // Sorted by path, so the Latin name sorts ahead of the CJK folder.
-    [{ folder: "", title: "readme" }, { folder: "接口", title: "v2" }],
+    [
+      { folder: "", format: "markdown", title: "readme" },
+      { folder: "接口", format: "markdown", title: "v2" },
+    ],
   );
 
   // Plain files dropped on their own have no entries to walk.
@@ -576,4 +588,33 @@ test("a document reference is one format across chat, documents and the CLI", ()
   ]) {
     assert.equal(documentIdFromHref(href), null, `should not resolve: ${String(href)}`);
   }
+});
+
+test("a page saved elsewhere imports as html, notes stay markdown", () => {
+  assert.equal(formatOf("wireframe.html"), "html");
+  assert.equal(formatOf("legacy/index.htm"), "html");
+  assert.equal(formatOf("notes/plan.md"), "markdown");
+  assert.equal(formatOf("README"), "markdown");
+
+  // The extension comes off the title whichever it was, so a document is not
+  // called "wireframe.html" in a list that already knows its format.
+  assert.deepEqual(documentPlacement("design/wireframe.html"), {
+    folder: "design",
+    format: "html",
+    title: "wireframe",
+  });
+  assert.deepEqual(documentPlacement("notes/plan.md"), {
+    folder: "notes",
+    format: "markdown",
+    title: "plan",
+  });
+
+  // An .html file is now taken rather than skipped as "not text".
+  const file = (name: string) =>
+    Object.assign(new File(["<h1>hi</h1>"], name), { webkitRelativePath: `root/${name}` });
+  assert.deepEqual(
+    planFolderImport([file("page.html"), file("photo.png"), file("plan.md")])
+      .candidates.map((candidate) => candidate.path),
+    ["page.html", "plan.md"],
+  );
 });

@@ -57,6 +57,7 @@ export async function importFilesAsDocuments({
         content: await candidate.file.text(),
         created_by: owner,
         folder_path: folder,
+        format: placement.format,
         server_id: serverId,
         title: placement.title,
       };

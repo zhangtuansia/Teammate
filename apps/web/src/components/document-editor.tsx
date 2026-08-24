@@ -10,6 +10,7 @@ import { Markdown } from "@tiptap/markdown";
 import { Table, TableCell, TableHeader, TableRow } from "@tiptap/extension-table";
 import { DocumentImage } from "@/components/document-image";
 import { documentLinkHref } from "@/lib/teammate-link";
+import { uploadAttachment } from "@/lib/attachments";
 import {
   collapseBlankLines,
   tightenMarkdownLists,
@@ -18,7 +19,25 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Editor } from "@tiptap/core";
 
-function markdownOf(editor: Editor): string {
+export type DocumentFormat = "markdown" | "html";
+
+/** Images out of a paste or a drop; anything else is left to the browser. */
+function imagesFrom(list: FileList | null | undefined): File[] {
+  if (!list) return [];
+  return [...list].filter((file) => file.type.startsWith("image/"));
+}
+
+/**
+ * What the editor hands back, in the format the document is stored as.
+ *
+ * Markdown is normalised on the way out so a document saved unchanged comes
+ * back unchanged — these files are read and rewritten by teammates through the
+ * CLI, where a reflowed table is noise in the diff. HTML gets none of that: it
+ * arrived as somebody else's markup and the editor's own serialisation is
+ * already the only shape it will keep.
+ */
+function contentOf(editor: Editor, format: DocumentFormat): string {
+  if (format === "html") return editor.getHTML().trim();
   return unpadMarkdownTables(
     collapseBlankLines(tightenMarkdownLists(editor.getMarkdown())),
   ).trim();
@@ -74,11 +93,14 @@ const BLOCKS: BlockChoice[] = [
 export function DocumentEditor({
   content,
   documents = [],
+  format = "markdown",
   onChange,
   placeholder,
   teammates = [],
 }: {
   content: string;
+  /** How the content is written, which decides how it is parsed and saved. */
+  format?: DocumentFormat;
   /** Offered by "/" so a document can point at another one. */
   documents?: Array<{ id: string; title: string; folder_path: string }>;
   onChange: (markdown: string) => void;
@@ -93,6 +115,8 @@ export function DocumentEditor({
   >(null);
   const [slashIndex, setSlashIndex] = useState(0);
   const slashRef = useRef<{ from: number; query: string; trigger: "/" | "@" } | null>(null);
+  const [uploadError, setUploadError] = useState("");
+  const insertImagesRef = useRef<(files: File[]) => Promise<void>>(async () => {});
   const slashIndexRef = useRef(0);
   const matches = useMemo(() => {
     if (!slash) return [];
@@ -157,10 +181,27 @@ export function DocumentEditor({
 
   const editor = useEditor({
     content,
-    contentType: "markdown",
+    contentType: format,
     editorProps: {
       attributes: {
         class: "focus:outline-none min-h-[55vh]",
+      },
+      // A screenshot belongs in the document you are writing, not in a file
+      // you then have to describe. Pasting or dropping one uploads it and
+      // puts the picture where the cursor was.
+      handleDrop: (_view, event) => {
+        const files = imagesFrom((event as DragEvent).dataTransfer?.files);
+        if (files.length === 0) return false;
+        event.preventDefault();
+        void insertImagesRef.current(files);
+        return true;
+      },
+      handlePaste: (_view, event) => {
+        const files = imagesFrom((event as ClipboardEvent).clipboardData?.files);
+        if (files.length === 0) return false;
+        event.preventDefault();
+        void insertImagesRef.current(files);
+        return true;
       },
       handleKeyDown: (_view, event) => {
         const open = slashRef.current;
@@ -226,7 +267,7 @@ export function DocumentEditor({
       if (open && instance.state.selection.from < open.from) closeSlash();
     },
     onUpdate: ({ editor: instance }) => {
-      onChange(markdownOf(instance));
+      onChange(contentOf(instance, format));
       trackSlashRef.current(instance);
     },
   });
@@ -283,19 +324,41 @@ export function DocumentEditor({
   );
   const applyBlockRef = useRef(applyBlock);
 
+  const insertImages = useCallback(
+    async (files: File[]) => {
+      if (!editor) return;
+      setUploadError("");
+      for (const file of files) {
+        try {
+          const uploaded = await uploadAttachment(file);
+          editor
+            .chain()
+            .focus()
+            .setImage({ alt: uploaded.display_name, src: uploaded.url })
+            .run();
+        } catch (error) {
+          setUploadError(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
+    },
+    [editor],
+  );
+
   useEffect(() => {
     trackSlashRef.current = trackSlash;
     applyBlockRef.current = applyBlock;
-  }, [applyBlock, trackSlash]);
+    insertImagesRef.current = insertImages;
+  }, [applyBlock, insertImages, trackSlash]);
 
   // A document can change underneath the editor — a teammate writing to it, or
   // switching to another document entirely. Only replace the content when it
   // genuinely differs, or every keystroke would reset the cursor.
   useEffect(() => {
     if (!editor) return;
-    if (markdownOf(editor) === content) return;
-    editor.commands.setContent(content, { contentType: "markdown", emitUpdate: false });
-  }, [content, editor]);
+    if (contentOf(editor, format) === content) return;
+    editor.commands.setContent(content, { contentType: format, emitUpdate: false });
+  }, [content, editor, format]);
 
   return (
     <>
@@ -323,6 +386,11 @@ export function DocumentEditor({
             ))}
           </div>
         </BubbleMenu>
+      )}
+      {uploadError && (
+        <p className="mb-2 text-xs text-destructive" role="alert">
+          {uploadError}
+        </p>
       )}
       <div className="relative">
         <EditorContent

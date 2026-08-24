@@ -1292,6 +1292,7 @@ export function Sidebar({
           title: t("documents.untitled"),
           content: "",
           folder_path: folder,
+          format: "markdown",
           created_by: userId,
         })
         .select("id, title, folder_path, pinned_at, updated_at")

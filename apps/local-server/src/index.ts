@@ -197,6 +197,7 @@ const tableColumns = {
     "generated_by_agent_id",
     "folder_path",
     "pinned_at",
+    "format",
     "created_at",
     "updated_at",
   ],
@@ -1350,6 +1351,7 @@ db.exec(`
     generated_by_agent_id TEXT,
     folder_path TEXT NOT NULL DEFAULT '',
     pinned_at TEXT,
+    format TEXT NOT NULL DEFAULT 'markdown',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -1479,6 +1481,10 @@ ensureColumn("documents", "generated_by_agent_id", "TEXT");
 ensureColumn("documents", "folder_path", "TEXT NOT NULL DEFAULT ''");
 // When it was pinned, which is also the order pinned documents sit in.
 ensureColumn("documents", "pinned_at", "TEXT");
+// How the content is written. Markdown is the default and the one agents work
+// in; HTML exists so a page saved from somewhere else is still a document here
+// rather than a file nobody can open.
+ensureColumn("documents", "format", "TEXT NOT NULL DEFAULT 'markdown'");
 const llmConnectionColumns = db.prepare("PRAGMA table_info(llm_connections)").all() as Array<{
   name: string;
 }>;
@@ -5099,6 +5105,7 @@ function localListWorkspaceDocuments(argsValue: unknown) {
            document.generated_by_agent_id,
            document.folder_path,
            document.pinned_at,
+           document.format,
            document.created_at,
            document.updated_at,
            CASE
@@ -5131,6 +5138,7 @@ function localListWorkspaceDocuments(argsValue: unknown) {
          document.generated_by_agent_id,
          document.folder_path,
          document.pinned_at,
+         document.format,
          document.created_at,
          document.updated_at,
          substr(document.content, 1, 240) AS excerpt,
@@ -6692,6 +6700,14 @@ function validateLocalMutation(table: TableName, row: DbRow, previous?: DbRow) {
         "Invalid document pin",
       );
     }
+    // Two formats and no others. Agents write documents too, and an unknown
+    // value here would reach an editor that has no mode for it.
+    if (row.format !== undefined && row.format !== null) {
+      requireLocalInvariant(
+        row.format === "markdown" || row.format === "html",
+        "Invalid document format",
+      );
+    }
     return;
   }
 
@@ -7785,7 +7801,14 @@ function setCors(request: IncomingMessage, response: ServerResponse) {
     response.setHeader("Access-Control-Allow-Origin", origin);
     response.setHeader("Vary", "Origin");
   }
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // X-Teammate-Filename carries the original name of an upload, and a request
+  // sending it is blocked by the browser unless it is named here. Leaving it
+  // out meant no attachment could ever be uploaded from a page — the preflight
+  // failed before the request was made, so the server never saw an attempt.
+  response.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Teammate-Filename",
+  );
   response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
 }
 

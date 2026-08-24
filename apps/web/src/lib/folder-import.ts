@@ -8,8 +8,16 @@
  * accident should get a refusal, not a workspace they have to clean out.
  */
 
-/** Extensions worth reading. Markdown is the storage format; the rest are text. */
-const TEXT_EXTENSIONS = new Set(['md', 'markdown', 'mdx', 'txt', 'text']);
+/** What each readable extension becomes once it is a document. */
+const READABLE: Record<string, 'markdown' | 'html'> = {
+  htm: 'html',
+  html: 'html',
+  markdown: 'markdown',
+  md: 'markdown',
+  mdx: 'markdown',
+  text: 'markdown',
+  txt: 'markdown',
+};
 
 /** Folders that belong to tools, not to the person who keeps notes in them. */
 const SKIPPED_DIRECTORIES = new Set([
@@ -104,7 +112,7 @@ export function planFolderImport(files: readonly File[]): FolderImportPlan {
   const readable: FolderImportCandidate[] = [];
   for (const file of files) {
     if (file.size === 0 || file.size > FILE_SIZE_LIMIT) continue;
-    if (!TEXT_EXTENSIONS.has(extensionOf(file.name))) continue;
+    if (!(extensionOf(file.name) in READABLE)) continue;
     const path = relativePath(file);
     if (path.split('/').some((segment) => SKIPPED_DIRECTORIES.has(segment))) continue;
     readable.push({ file, path });
@@ -129,8 +137,14 @@ export function documentPlacement(path: string) {
   const name = segments.pop() ?? path;
   return {
     folder: segments.join('/'),
-    title: name.replace(/\.(md|markdown|mdx|txt|text)$/i, '') || name,
+    format: formatOf(path),
+    title: name.replace(/\.(md|markdown|mdx|txt|text|html?)$/i, '') || name,
   };
+}
+
+/** A page saved from elsewhere stays HTML; everything else is Markdown. */
+export function formatOf(path: string): 'markdown' | 'html' {
+  return READABLE[extensionOf(path)] ?? 'markdown';
 }
 
 /** The folders a set of documents implies, including the ones only on the way. */

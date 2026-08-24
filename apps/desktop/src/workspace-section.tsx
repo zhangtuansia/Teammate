@@ -126,13 +126,14 @@ interface WorkspaceDocumentRecord {
   generated_by_agent_id: string | null;
   folder_path: string;
   pinned_at: string | null;
+  format: "markdown" | "html";
   created_at: string;
   updated_at: string;
 }
 
 type WorkspaceDocumentSummaryRecord = Pick<
   WorkspaceDocumentRecord,
-  "id" | "server_id" | "title" | "generated_by_agent_id" | "folder_path" | "pinned_at" | "created_at" | "updated_at"
+  "id" | "server_id" | "title" | "generated_by_agent_id" | "folder_path" | "pinned_at" | "format" | "created_at" | "updated_at"
 >;
 
 /**
@@ -339,6 +340,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         excerpt: document.excerpt || "",
         generated_by_agent_id: document.generated_by_agent_id,
         folder_path: document.folder_path || "",
+        format: (document.format === "html" ? "html" : "markdown") as "markdown" | "html",
         pinned_at: document.pinned_at || null,
         generatorAvatarUrl: document.generator_avatar_url || null,
         generatorName: document.generator_name || null,
@@ -393,7 +395,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     const client = createClient();
     try {
       const columns =
-        "id, server_id, title, content, created_by, generated_by_agent_id, folder_path, pinned_at, created_at, updated_at";
+        "id, server_id, title, content, created_by, generated_by_agent_id, folder_path, pinned_at, format, created_at, updated_at";
       // Short ids are the currency here: the CLI prints them, agents write
       // them into links, and message headers carry them. A reference is
       // therefore as likely to name the first eight characters as the whole
@@ -716,6 +718,10 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const detailLoading = Boolean(documentId) && !currentDetailSnapshot &&
     (currentDetailLoadState?.loading ?? true);
 
+  // How this document is written, which decides both how the editor parses it
+  // and what "source" mode shows you.
+  const documentFormat: "markdown" | "html" =
+    selectedDocument?.format === "html" ? "html" : "markdown";
   const useRichText = richTextEditable && settings.documentEditor !== "source";
 
   // The context's updater only moves local state; the settings page persists
@@ -750,7 +756,12 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       setDraftUpdatedAt(selectedDocument.updated_at);
       setTitle(selectedDocument.title);
       setContent(selectedDocument.content);
-      setRichTextEditable(canEditAsRichText(selectedDocument.content));
+      // The Markdown guard asks whether a rich editor can hand the text back
+      // unchanged. HTML has its own answer: the editor's schema is the shape it
+      // keeps, so the check does not apply and the editor is always offered.
+      setRichTextEditable(
+        selectedDocument.format === "html" || canEditAsRichText(selectedDocument.content),
+      );
       setDirty(false);
       if (selectedDocument.id !== draftId) {
         setError("");
@@ -1065,6 +1076,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
             {useRichText ? (
               <DocumentEditor
                 content={content}
+                format={documentFormat}
                 // "/" offers the other documents here; the one being edited is
                 // left out, since a document pointing at itself is a loop.
                 documents={documents
