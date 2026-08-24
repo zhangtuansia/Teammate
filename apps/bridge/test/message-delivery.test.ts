@@ -596,8 +596,9 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     assert.equal((await loadDelivery(client, redirected.id))?.status, "skipped");
 
     // When another agent spoke more recently they own the exchange, so this
-    // one waits behind them rather than being cut out of it — and the answer
-    // is what stands it down.
+    // one waits behind them — the wave is the whole of the deference. It is
+    // not cut out: once its turn comes the message arrives, answered or not,
+    // and whether there is anything left to add is its own call.
     await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "Sure, taking it.");
     const towardHelper = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "thanks, how long will it take?");
     await drain(bridge);
@@ -605,7 +606,7 @@ test("channel policy: sole agent and mentions deliver, cold multi-agent rows ski
     await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "About a day.");
     dueNow(databasePath, towardHelper.id);
     await drain(bridge);
-    assert.equal((await loadDelivery(client, towardHelper.id))?.status, "skipped");
+    assert.equal((await loadDelivery(client, towardHelper.id))?.status, "completed");
 
     // Agents can @mention each other: the mentioned agent gets the delivery,
     // and the sender never receives its own message.
@@ -742,9 +743,9 @@ test("an unclaimed thread reaches the room; a teammate's thread stays theirs", a
     );
     dueNow(databasePath, followUp.id);
     await drain(bridge);
-    const stoodDown = await loadDelivery(client, followUp.id);
-    assert.equal(stoodDown?.status, "skipped");
-    assert.match(stoodDown?.last_error || "", /already answered/);
+    // The answer that exists no longer bars the delivery: whether it leaves
+    // anything to add is the teammate's call, not a rule's.
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "completed");
 
     // And when nobody answers, the room gets its turn instead of the message
     // going unanswered by everyone — the case the old hard skip could not
@@ -976,10 +977,7 @@ test("a person talking to a quiet room reaches every teammate in it", async () =
     await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "查到了，稍等。");
     dueNow(databasePath, followUp.id);
     await drain(bridge);
-    assert.match(
-      (await loadDelivery(client, followUp.id))?.last_error || "",
-      /already answered/,
-    );
+    assert.equal((await loadDelivery(client, followUp.id))?.status, "completed");
 
     // Conversations go cold. Once the exchange is old, a new message belongs
     // to the room again instead of staying reserved for whoever spoke last.
@@ -1071,15 +1069,16 @@ test("a crowded room answers in waves instead of waking everyone at once", async
     await drain(bridge);
     assert.equal((await loadDelivery(client, greeting.id))?.status, "completed");
 
-    // With an answer already in the channel, a due wave stands down.
+    // An answer already in the channel no longer drops the later wave — it
+    // arrives, and the teammate decides whether it has anything left for them.
+    // "What do you two think" wants two answers, and no rule can tell that
+    // message from one where a single reply finishes the job.
     const second = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "再问一句");
     await drain(bridge);
     await insertAgentMessage(client, LOCAL_CHANNEL_ID, helpers[0], "我来回答。");
     ageMessage(second.id);
     await drain(bridge);
-    const stoodDown = await loadDelivery(client, second.id);
-    assert.equal(stoodDown?.status, "skipped");
-    assert.match(stoodDown?.last_error || "", /already answered/);
+    assert.equal((await loadDelivery(client, second.id))?.status, "completed");
   });
 });
 
@@ -2363,5 +2362,31 @@ test("a teammate who leaves keeps their name on what they wrote", async () => {
       .eq("agent_id", agentId);
     assertQuery(queued);
     assert.equal((queued.data || []).length, 0);
+  });
+});
+
+test("a question to two teammates reaches both, even after one answers", async () => {
+  await withLocalHarness(async ({ client, baseUrl, databasePath }) => {
+    const created = await localApi<{ agent: { id: string } }>(
+      baseUrl,
+      "/api/agents",
+      "POST",
+      { display_name: "Helper", server_id: LOCAL_SERVER_ID, runtime: "codex", model: "default" },
+    );
+    await setChannelAgents(client, [LOCAL_AGENT_ID, created.agent.id]);
+    const bridge = deliveryBridge(client, async () => undefined);
+
+    // "你俩想啥时候下班啊" is addressed to both. One reply does not finish it,
+    // and no rule can tell it apart from "有人在吗", where one reply does — so
+    // the message reaches both and each decides what it has left to add.
+    const asked = await insertHumanMessage(client, LOCAL_CHANNEL_ID, "你俩想啥时候下班啊");
+    await drain(bridge);
+    await insertAgentMessage(client, LOCAL_CHANNEL_ID, created.agent.id, "我随时都行。");
+    dueNow(databasePath, asked.id);
+    await drain(bridge);
+
+    const mine = await loadDelivery(client, asked.id);
+    assert.equal(mine?.status, "completed", "an existing answer no longer bars the second");
+    assert.doesNotMatch(mine?.last_error || "", /already answered/);
   });
 });

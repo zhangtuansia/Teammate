@@ -1212,6 +1212,8 @@ export class Bridge {
       | Map<string, Pick<DbAgent, "id" | "name" | "display_name">>
       | undefined;
     let ambientReason: string | null = null;
+    // Whether a teammate had already replied by the time this delivery came up.
+    let answeredAlready = false;
     if (isAgentAssignment || !isDm) {
       channelAgents = await this.loadCurrentChannelMentionAgents(delivery.channel_id);
       const mentioned = this.parseMentionedAgents(msg.content, channelAgents);
@@ -1279,10 +1281,14 @@ export class Bridge {
                 await this.deferDelivery(delivery, readyAt);
                 return;
               }
-              if (await this.someoneAnswered(msg)) {
-                await this.finishDelivery(delivery, "skipped", "A teammate already answered");
-                return;
-              }
+              // Someone answering used to end it here. But "你俩想啥时候下班"
+              // is addressed to two people, and one reply does not cover it —
+              // and no rule can tell that message from "有人在吗", where one
+              // reply does. So this stops deciding: the message goes through
+              // with the fact attached, and the teammate weighs whether it has
+              // anything left for them. Answering second is a cost of one turn;
+              // a question to two people getting one answer is a worse room.
+              answeredAlready = await this.someoneAnswered(msg);
               // Nobody has answered yet, but someone may still be writing one.
               // Waiting another interval costs nothing; two teammates
               // answering the same question costs the reader.
@@ -1294,7 +1300,11 @@ export class Bridge {
             // The reason is the teammate's cue: "in the room" is a message
             // addressed to everyone, where "unanswered" means it was somebody
             // else's and they have not taken it.
-            ambientReason = outsideConversation ? "unanswered" : "in the room";
+            ambientReason = answeredAlready
+              ? "already answered"
+              : outsideConversation
+                ? "unanswered"
+                : "in the room";
           }
         }
       }
