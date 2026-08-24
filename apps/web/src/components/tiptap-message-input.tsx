@@ -3,6 +3,7 @@
 import { useEditor, EditorContent, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import { MentionNode } from "./mention-node";
 import Link from "@tiptap/extension-link";
 import { Extension } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -28,6 +29,8 @@ export interface TiptapMessageInputHandle {
   insertText: (text: string) => void;
   /** Replace a `<trigger><query>` run near the cursor with the replacement. */
   replaceMention: (query: string, replacement: string, trigger?: string) => void;
+  /** Replace the typed `@query` with a mention that reads as a name. */
+  insertMention: (query: string, handle: string, label: string) => void;
 }
 
 interface TiptapMessageInputProps {
@@ -77,6 +80,12 @@ function serializeInline(node: ProseMirrorNode): string {
   node.forEach((child) => {
     if (child.type.name === "hardBreak") {
       out += "\n";
+      return;
+    }
+    if (child.type.name === "mention") {
+      // The handle is what the message carries; the label was only ever for
+      // the person typing.
+      out += `@${String(child.attrs.handle || "")} `;
       return;
     }
     if (!child.isText) {
@@ -376,6 +385,7 @@ const TiptapMessageInput = forwardRef<
       Placeholder.configure({
         placeholder: ({ editor: ed }) => sendStorage(ed).placeholder,
       }),
+      MentionNode,
       SendMessageExtension,
     ],
     editorProps: {
@@ -486,6 +496,21 @@ const TiptapMessageInput = forwardRef<
         .chain()
         .deleteRange({ from: start, to: end })
         .insertContent(replacement)
+        .run();
+    },
+    insertMention: (query: string, handle: string, label: string) => {
+      if (!editor) return;
+      const { from } = editor.state.selection;
+      const $from = editor.state.doc.resolve(from);
+      const textBefore = $from.parent.textBetween(0, $from.parentOffset);
+      const typed = `@${query}`;
+      const idx = textBefore.lastIndexOf(typed);
+      if (idx === -1) return;
+      const start = $from.start() + idx;
+      editor
+        .chain()
+        .deleteRange({ from: start, to: start + typed.length })
+        .insertMention({ handle, label })
         .run();
     },
   }));

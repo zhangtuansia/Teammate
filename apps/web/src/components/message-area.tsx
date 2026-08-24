@@ -2731,9 +2731,11 @@ function MessageAreaContent({
     inputRef.current?.focus();
   }, [docQuery]);
 
-  const commitMention = useCallback((handle: string) => {
+  const commitMention = useCallback((handle: string, label?: string) => {
     if (mentionQuery === null) return;
-    inputRef.current?.replaceMention(mentionQuery, `@${handle} `);
+    // A mention goes in as a node: it shows the name and serialises to the
+    // handle, so the message body is unchanged by any of this.
+    inputRef.current?.insertMention(mentionQuery, handle, label || handle);
     setMentionQuery(null);
     setMentionIndex(0);
     inputRef.current?.focus();
@@ -2742,7 +2744,8 @@ function MessageAreaContent({
   const handleMentionMouseDown = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     const handle = event.currentTarget.dataset.agentHandle;
-    if (handle) commitMention(handle);
+    const label = event.currentTarget.dataset.agentLabel;
+    if (handle) commitMention(handle, label);
   }, [commitMention]);
 
   const retryTimedOutResponses = useCallback(() => {
@@ -3418,6 +3421,7 @@ function MessageAreaContent({
                     role="option"
                     type="button"
                     data-agent-handle={agent.name}
+                    data-agent-label={agent.display_name}
                     onMouseDown={handleMentionMouseDown}
                     className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-colors ${
                       i === mentionIndex
@@ -3503,7 +3507,7 @@ function MessageAreaContent({
                   if (mentionAgents.length > 0) {
                     if (event.key === 'Enter' && !event.shiftKey) {
                       const agent = mentionAgents[mentionIndex];
-                      commitMention(agent.name);
+                      commitMention(agent.name, agent.display_name);
                       return true;
                     }
                     if (event.key === 'ArrowDown') {
@@ -3516,7 +3520,7 @@ function MessageAreaContent({
                     }
                     if (event.key === 'Tab') {
                       const agent = mentionAgents[mentionIndex];
-                      commitMention(agent.name);
+                      commitMention(agent.name, agent.display_name);
                       return true;
                     }
                     if (event.key === 'Escape') {
