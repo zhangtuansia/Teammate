@@ -1029,6 +1029,10 @@ function MessageAreaContent({
   const [failedAgentIds, setFailedAgentIds] = useState<string[]>([]);
   const [timedOutAgentIds, setTimedOutAgentIds] = useState<string[]>([]);
   const [newMessageCount, setNewMessageCount] = useState(0);
+  // Scrolled far enough up that getting back means dragging. The ref alone
+  // could not drive this: reading history with nothing new left no way down
+  // except scrolling all the way.
+  const [scrolledUp, setScrolledUp] = useState(false);
   const [liveAnnouncement, setLiveAnnouncement] = useState<{ id: string; text: string } | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -2464,8 +2468,11 @@ function MessageAreaContent({
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    isNearBottomRef.current = fromBottom < 100;
     if (isNearBottomRef.current) setNewMessageCount(0);
+    // A screenful, so the button does not flicker in on a small nudge.
+    setScrolledUp(fromBottom > el.clientHeight * 0.5);
     if (el.scrollTop < 100 && hasMore && !loadingMore && !olderMessagesError) {
       loadOlderMessages();
     }
@@ -3275,17 +3282,17 @@ function MessageAreaContent({
           </button>
         </div>
       )}
-      {newMessageCount > 0 && (
+      {(newMessageCount > 0 || scrolledUp) && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-4">
           <Button
-            aria-label={newMessageLabel}
+            aria-label={newMessageCount > 0 ? newMessageLabel : t('message.jumpToLatest')}
             className="pointer-events-auto animate-message-receive shadow-lg"
             onClick={scrollToLatestMessage}
-            size="sm"
+            size={newMessageCount > 0 ? 'sm' : 'icon-sm'}
             variant="secondary"
           >
             <ArrowDownIcon />
-            {newMessageLabel}
+            {newMessageCount > 0 && newMessageLabel}
           </Button>
         </div>
       )}
