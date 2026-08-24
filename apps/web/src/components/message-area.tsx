@@ -68,6 +68,16 @@ import { formatMessageClock, parseMessageTime } from '@/lib/message-time';
 const RUNTIME_ERROR_MESSAGE_PREFIX = '<!-- teammate:runtime-error -->';
 const DRAFT_STORAGE_PREFIX = 'teammate:message-draft:';
 const AGENT_RESPONSE_TIMEOUT_MS = 130_000;
+/**
+ * How long a teammate has to be working before it is worth saying so.
+ *
+ * Most of the room now hears every unaddressed message, and most of them will
+ * read it and decide it needs nothing — a turn that is over in a second or
+ * two. Drawing a bubble for that puts one on screen and takes it away with
+ * nothing in it, which looks like a failure rather than a decision. Past this
+ * threshold the teammate is genuinely working and worth showing.
+ */
+const THINKING_VISIBLE_AFTER_MS = 2_500;
 const MESSAGE_REQUEST_TIMEOUT_MS = 18_000;
 
 function persistDraft(key: string | null, content: string) {
@@ -1289,6 +1299,27 @@ function MessageAreaContent({
   );
 
   const agentActivities = useAgentActivity();
+  // Re-render once a pending turn crosses the visibility threshold. Without
+  // this, a teammate that stays busy would never draw its bubble: nothing else
+  // changes between the turn starting and it being worth showing.
+  const [thinkingNow, setThinkingNow] = useState(() => Date.now());
+  const soonestPending = useMemo(() => {
+    let soonest = 0;
+    for (const state of agentActivities.values()) {
+      if (state.activity !== 'thinking' && state.activity !== 'working') continue;
+      if (!state.busySince) continue;
+      if (!soonest || state.busySince < soonest) soonest = state.busySince;
+    }
+    return soonest;
+  }, [agentActivities]);
+  useEffect(() => {
+    if (!soonestPending) return;
+    // Always through a timer, even when the threshold has already passed: a
+    // setState in the effect body would cascade a second render.
+    const due = Math.max(0, soonestPending + THINKING_VISIBLE_AFTER_MS - Date.now());
+    const timer = window.setTimeout(() => setThinkingNow(Date.now()), due);
+    return () => window.clearTimeout(timer);
+  }, [soonestPending]);
   const { settings, t } = useAppSettings();
 
   const readStateChannelId = channel?.id;
@@ -3174,6 +3205,10 @@ function MessageAreaContent({
           const indicators = candidates.flatMap((agent) => {
             const activity = getChannelActivity(agent.id);
             if (activity?.activity !== 'thinking' && activity?.activity !== 'working') return [];
+            // A turn that ends before this never draws anything.
+            if (activity.busySince && thinkingNow - activity.busySince < THINKING_VISIBLE_AFTER_MS) {
+              return [];
+            }
             return [{
               agent,
               // Labels stay coarse observable states ("Searching web"); detail

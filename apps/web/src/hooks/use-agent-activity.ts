@@ -18,6 +18,15 @@ export interface ActivityState {
   terminal: "success" | "failure" | "timeout" | null;
   /** Local receipt time used to ignore terminal events from an earlier turn. */
   receivedAt: number;
+  /**
+   * When this turn started, carried across label changes within it.
+   *
+   * A teammate woken by a message it decides not to answer is busy for a
+   * moment and then idle again. Showing that as a bubble means one appears and
+   * vanishes with nothing in it, which reads as something having gone wrong.
+   * Consumers wait this out before drawing anything.
+   */
+  busySince: number;
 }
 
 type ActivitiesMap = Map<string, ActivityState>;
@@ -85,8 +94,16 @@ export function AgentActivityProvider({
                 ? "failure"
                 : null,
             receivedAt: Date.now(),
+            busySince: 0,
           };
           const currentState = currentActivities.get(agentId);
+          const busy = activity === "thinking" || activity === "working";
+          const wasBusy = currentState?.activity === "thinking" ||
+            currentState?.activity === "working";
+          // Only a fresh turn resets the clock; a new label inside one does not.
+          nextState.busySince = busy
+            ? (wasBusy && currentState ? currentState.busySince : Date.now())
+            : 0;
           if (
             currentSnapshot.serverId === serverId &&
             currentState?.activity === nextState.activity &&
@@ -122,6 +139,7 @@ export function AgentActivityProvider({
                   activity: "error",
                   label: "Response timed out",
                   detail: "",
+                  busySince: 0,
                   channelId: currentState.channelId,
                   terminal: "timeout",
                   receivedAt: Date.now(),

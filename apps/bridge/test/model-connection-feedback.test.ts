@@ -618,3 +618,25 @@ test("a page saved elsewhere imports as html, notes stay markdown", () => {
     ["page.html", "plan.md"],
   );
 });
+
+test("a turn too short to be worth showing never draws a bubble", () => {
+  // The rule the message list applies. Most of the room now hears every
+  // unaddressed message and most will read it and decide it needs nothing —
+  // a turn over in a second. Drawing that puts a bubble on screen and takes
+  // it away empty, which reads as a failure rather than a decision.
+  const VISIBLE_AFTER = 2_500;
+  const shows = (busySince: number, now: number) => now - busySince >= VISIBLE_AFTER;
+
+  // A teammate that reads and declines.
+  assert.equal(shows(1_000, 1_400), false, "a 400ms turn stays invisible");
+  assert.equal(shows(1_000, 3_000), false, "so does a 2s one");
+  // One that is genuinely working.
+  assert.equal(shows(1_000, 3_500), true, "past the threshold it is worth saying");
+  assert.equal(shows(1_000, 30_000), true);
+
+  // The clock is the turn's start, not the last label change: a teammate that
+  // reports "reading", then "searching", is one turn and keeps one clock.
+  const turnStart = 1_000;
+  const afterRelabel = turnStart;
+  assert.equal(shows(afterRelabel, 4_000), true, "a relabel does not reset it");
+});
