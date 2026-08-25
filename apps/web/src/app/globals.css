@@ -10,6 +10,33 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Bundled Chinese faces, both SIL OFL 1.1, with their licences kept beside the
+   files in src/fonts. Neither ships with macOS — that is the reason they are
+   bundled rather than merely listed among the system choices.
+
+   Declared here rather than in the desktop stylesheet so the web and Tauri
+   builds resolve them from one place.
+
+   font-display: swap matters more than for a Latin face: these are megabytes,
+   not the 70KB of SN Pro, and without it the first paint of a transcript would
+   block on the whole file. */
+@font-face {
+  font-family: 'LXGW WenKai';
+  src: url('../fonts/LXGWWenKaiLite-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 得意黑 ships oblique only — the slant is the typeface, not a variant of it. */
+@font-face {
+  font-family: 'Smiley Sans';
+  src: url('../fonts/SmileySans-Oblique.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --sidebar-width: 256px;
 

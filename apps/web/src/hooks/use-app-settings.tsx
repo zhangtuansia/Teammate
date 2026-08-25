@@ -43,10 +43,15 @@ export const INTERFACE_FONTS: FontChoice[] = [
   { id: "hiragino", label: "冬青黑体", stack: `'Hiragino Sans GB', ${CJK_TAIL}` },
   { id: "heiti", label: "黑体", stack: `'Heiti SC', ${CJK_TAIL}` },
   { id: "yuanti", label: "圆体", stack: `'Yuanti SC', ${CJK_TAIL}` },
+  { id: "wenkai", label: "霞鹜文楷（内置）", stack: `'LXGW WenKai', ${CJK_TAIL}` },
+  // Labelled as oblique because it is: choosing it slants the whole interface,
+  // which is a stylistic decision rather than a surprise to discover later.
+  { id: "smiley", label: "得意黑 · 斜体（内置）", stack: `'Smiley Sans', ${CJK_TAIL}` },
 ];
 
 export const READING_FONTS: FontChoice[] = [
   { id: "system", label: "系统默认", stack: null },
+  { id: "wenkai", label: "霞鹜文楷（内置）", stack: `'LXGW WenKai', ${CJK_TAIL}` },
   { id: "pingfang", label: "苹方", stack: `'PingFang SC', ${CJK_TAIL}` },
   { id: "songti", label: "宋体", stack: `'Songti SC', 'STSong', serif` },
   { id: "kaiti", label: "楷体", stack: `'Kaiti SC', 'STKaiti', serif` },
