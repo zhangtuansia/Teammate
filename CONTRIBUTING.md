@@ -14,7 +14,7 @@ pnpm install
 pnpm dev:local
 ```
 
-Requirements: Node >= 22.5 and pnpm 10. Codex is the default local agent runtime. Supabase is optional.
+Requirements: Node >= 22.20 and pnpm 10. Codex is the default local agent runtime. Supabase is optional.
 
 ## Project layout
 

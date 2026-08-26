@@ -20,7 +20,7 @@ packages/shared/ Types shared between web/runtime/cli
 supabase/        Supabase project config (config.toml only — no migrations)
 ```
 
-Tooling: pnpm 10 workspaces + Turborepo. Node >= 22.5 for local SQLite mode.
+Tooling: pnpm 10 workspaces + Turborepo. Node >= 22.20 for local SQLite mode.
 
 ## Where things live
 

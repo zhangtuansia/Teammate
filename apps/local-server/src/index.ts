@@ -8,7 +8,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
-import { existsSync, renameSync } from "node:fs";
+import { existsSync, lstatSync, renameSync } from "node:fs";
 import { lstat, readdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -87,9 +87,36 @@ const port = Number(process.env.TEAMMATE_LOCAL_PORT || 8787);
 const configuredDbPath = process.env.TEAMMATE_LOCAL_DB;
 const teammateDataDir = resolve(".teammate");
 // Keep the former data directory readable so existing installations migrate in place.
+// A second sidecar can still be running with its SQLite WAL inside the legacy
+// directory; renaming under it would split writes across two paths. A -wal
+// touched in the last minute means someone is live in there — leave the
+// migration for a quieter start rather than race it.
 const legacyDataDir = resolve(".zano");
+function legacyDirLooksBusy(dir: string) {
+  const wal = join(dir, "local.db-wal");
+  try {
+    return Date.now() - lstatSync(wal).mtimeMs < 60_000;
+  } catch {
+    return false;
+  }
+}
 if (!configuredDbPath && !existsSync(teammateDataDir) && existsSync(legacyDataDir)) {
-  renameSync(legacyDataDir, teammateDataDir);
+  if (legacyDirLooksBusy(legacyDataDir)) {
+    console.warn(
+      `Teammate legacy data at ${legacyDataDir} looks like it is still in use; ` +
+        "skipping the one-time move to .teammate. Restart once the old instance is gone.",
+    );
+  } else {
+    try {
+      renameSync(legacyDataDir, teammateDataDir);
+    } catch (error) {
+      console.warn(
+        `Teammate could not migrate ${legacyDataDir} to ${teammateDataDir}:`,
+        error instanceof Error ? error.message : error,
+        "\nStarting with a fresh data directory; the legacy directory is left untouched.",
+      );
+    }
+  }
 }
 const dbPath = resolve(configuredDbPath || ".teammate/local.db");
 ensurePrivateDirectory(dirname(dbPath));
@@ -199,6 +226,49 @@ const tableColumns = {
     "folder_path",
     "pinned_at",
     "format",
+    "created_at",
+    "updated_at",
+  ],
+  app_skills: [
+    "id",
+    "server_id",
+    "slug",
+    "source",
+    "display_name",
+    "description",
+    "version",
+    "path",
+    "enabled",
+    "created_at",
+    "updated_at",
+  ],
+  app_connectors: [
+    "id",
+    "server_id",
+    "name",
+    "transport",
+    "url",
+    "headers",
+    "command",
+    "args",
+    "env",
+    "description",
+    "enabled",
+    "created_at",
+    "updated_at",
+  ],
+  agent_automations: [
+    "id",
+    "server_id",
+    "agent_id",
+    "channel_id",
+    "name",
+    "schedule",
+    "prompt",
+    "enabled",
+    "last_run_at",
+    "next_run_at",
+    "created_by",
     "created_at",
     "updated_at",
   ],
@@ -1064,7 +1134,7 @@ function normalizeModel(runtime: AgentRuntime, value: unknown) {
 }
 
 function ensureColumn(
-  table: "agents" | "messages" | "tasks" | "documents",
+  table: "agents" | "messages" | "tasks" | "documents" | "app_connectors",
   column: string,
   definition: string,
 ) {
@@ -1397,6 +1467,56 @@ db.exec(`
     previous_expires_at INTEGER
   );
 
+  CREATE TABLE IF NOT EXISTS app_skills (
+    id TEXT PRIMARY KEY,
+    server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    slug TEXT NOT NULL,
+    source TEXT NOT NULL,
+    display_name TEXT,
+    description TEXT,
+    version TEXT,
+    path TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (server_id, source, slug)
+  );
+
+  CREATE TABLE IF NOT EXISTS app_connectors (
+    id TEXT PRIMARY KEY,
+    server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    command TEXT NOT NULL DEFAULT '',
+    args TEXT NOT NULL DEFAULT '[]',
+    env TEXT NOT NULL DEFAULT '{}',
+    transport TEXT NOT NULL DEFAULT 'stdio',
+    url TEXT,
+    headers TEXT NOT NULL DEFAULT '{}',
+    description TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (server_id, name)
+  );
+
+  CREATE TABLE IF NOT EXISTS agent_automations (
+    id TEXT PRIMARY KEY,
+    server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
+    name TEXT NOT NULL,
+    schedule TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_local_automations_due
+    ON agent_automations(server_id, next_run_at);
+
   CREATE TABLE IF NOT EXISTS llm_connections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -1464,6 +1584,11 @@ db.prepare(
   "DELETE FROM local_agent_capabilities WHERE current_expires_at <= ?",
 ).run(Date.now());
 
+// A connector reached over HTTP has a URL and headers where a local one has a
+// command; the column stays because existing rows are all stdio and say so.
+ensureColumn("app_connectors", "transport", "TEXT NOT NULL DEFAULT 'stdio'");
+ensureColumn("app_connectors", "url", "TEXT");
+ensureColumn("app_connectors", "headers", "TEXT NOT NULL DEFAULT '{}'");
 ensureColumn("agents", "runtime", "TEXT NOT NULL DEFAULT 'codex'");
 ensureColumn("agents", "thinking_level", "TEXT NOT NULL DEFAULT 'medium'");
 ensureColumn("agents", "runtime_session_id", "TEXT");

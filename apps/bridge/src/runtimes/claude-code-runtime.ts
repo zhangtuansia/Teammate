@@ -1,11 +1,47 @@
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import { join } from "node:path";
+import { writeFileSync } from "node:fs";
 import type {
   AgentRuntime,
   AgentRuntimeHandle,
   RuntimeEvent,
   RuntimeLaunchConfig,
+  RuntimeMcpServer,
 } from "./types.js";
 import { resolveRuntimeCommand } from "./command.js";
+
+/**
+ * Claude Code accepts extra MCP servers through a --mcp-config JSON file; the
+ * file lives in the agent workspace so it is cleaned up with everything else
+ * and never collides between agents.
+ */
+function writeMcpConfigFile(
+  workDir: string,
+  servers?: RuntimeMcpServer[],
+): string | null {
+  if (!servers || servers.length === 0) return null;
+  const filePath = join(workDir, `.teammate-mcp-${randomUUID().slice(0, 8)}.json`);
+  writeFileSync(
+    filePath,
+    // Claude Code's own config takes either shape; "type" is what tells them
+    // apart, and a stdio entry omits it for the same reason it always has.
+    JSON.stringify({ mcpServers: Object.fromEntries(servers.map((server) => [
+      server.name,
+      server.transport === "stdio"
+        ? { command: server.command, args: server.args, ...(server.env ? { env: server.env } : {}) }
+        : {
+            type: server.transport,
+            url: server.url,
+            ...(server.headers && Object.keys(server.headers).length
+              ? { headers: server.headers }
+              : {}),
+          },
+    ])) }),
+    { mode: 0o600 },
+  );
+  return filePath;
+}
 
 interface ClaudeStreamEvent {
   type?: string;
@@ -240,6 +276,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       config.model || "sonnet",
     ];
     if (config.sessionId) args.push("--resume", config.sessionId);
+    const mcpConfigFile = writeMcpConfigFile(config.workDir, config.mcpServers);
+    if (mcpConfigFile) args.push("--mcp-config", mcpConfigFile);
 
     const command = resolveRuntimeCommand("claude");
     console.log(

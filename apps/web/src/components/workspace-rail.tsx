@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
-import { CheckIcon, FileTextIcon, HomeIcon, ListChecksIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { BlocksIcon, CheckIcon, FileTextIcon, HomeIcon, ListChecksIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
@@ -54,6 +54,7 @@ const AREAS: Area[] = [
   { icon: HomeIcon, id: "home", label: "nav.home", path: "" },
   { icon: FileTextIcon, id: "documents", label: "nav.documents", path: "/documents" },
   { icon: ListChecksIcon, id: "tasks", label: "nav.tasks", path: "/tasks" },
+  { icon: BlocksIcon, id: "apps", label: "nav.apps", path: "/apps" },
 ];
 
 // Settings is not a place you work, so it sits apart from the three that are —
@@ -154,9 +155,11 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
     ? "documents"
     : pathname.endsWith("/tasks")
       ? "tasks"
-      : pathname.endsWith("/settings")
-        ? "settings"
-        : "home";
+      : pathname.endsWith("/apps")
+        ? "apps"
+        : pathname.endsWith("/settings")
+          ? "settings"
+          : "home";
 
   const activeWorkspace = workspaces.find((workspace) => workspace.slug === serverSlug);
 

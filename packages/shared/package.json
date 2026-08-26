@@ -13,6 +13,8 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./system-prompt": "./src/system-prompt.ts"
+    "./system-prompt": "./src/system-prompt.ts",
+    "./cron": "./src/cron.ts",
+    "./untrusted-content": "./src/untrusted-content.ts"
   }
 }

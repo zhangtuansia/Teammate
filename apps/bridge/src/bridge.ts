@@ -3,8 +3,14 @@ import { createLocalClient } from "@teammate/local-client";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, realpath, lstat } from "fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "path";
-import { homedir } from "os";
 import { AgentManager } from "./agent-manager.js";
+import {
+  describeSchedule,
+  nextRunAfter,
+  validateSchedule,
+} from "@teammate/shared/cron";
+import { sanitizeUntrustedContent } from "@teammate/shared/untrusted-content";
+import { discoverSkillsForRuntimePublic as discoverSkillsForRuntime, discoverAllSkills } from "./skill-discovery.js";
 
 const MAX_WORKSPACE_FILE_BYTES = 1024 * 1024;
 const BINARY_SAMPLE_BYTES = 8192;
@@ -12,7 +18,10 @@ const DELIVERY_BATCH_SIZE = 50;
 const DELIVERY_MAX_ATTEMPTS = 3;
 const DELIVERY_LEASE_MS = 5 * 60_000;
 const DELIVERY_LEASE_RENEW_MS = 30_000;
-const DELIVERY_POLL_MS = 2_000;
+// Realtime postgres_changes wakes the pump the moment a delivery appears
+// (see subscribeToAgentChanges); this interval only catches missed events,
+// so it can stay slow enough not to matter for an idle machine.
+const DELIVERY_POLL_MS = 10_000;
 const MAX_LOCAL_DELIVERY_GUARDS = 10_000;
 // Loop floors for agent-to-agent mention chains (see agentLoopGuardReason).
 // These have to stay mechanical: prompt etiquette alone cannot bound a loop.
@@ -54,6 +63,11 @@ const OWED_TASK_STALL_MS = 5 * 60_000;
 const OWED_TASK_NUDGE_COOLDOWN_MS = 30 * 60_000;
 const OWED_TASK_NUDGE_CAP = 3;
 const OWED_TASK_NUDGE_BATCH = 3;
+// Scheduled automations wake agents without a message. The tick is only a
+// low-latency poll; correctness comes from compare-and-swap on next_run_at,
+// so two bridges or a restart cannot double-fire one schedule.
+const AUTOMATION_TICK_MS = 30_000;
+const AUTOMATION_BATCH = 5;
 
 function hasHiddenPathSegment(filePath: string) {
   return filePath
@@ -183,6 +197,8 @@ export class Bridge {
   private lastHeartbeatErrorLogAt = 0;
   private deliveryPollInterval: ReturnType<typeof setInterval> | null = null;
   private owedWorkInterval: ReturnType<typeof setInterval> | null = null;
+  private automationTimer: ReturnType<typeof setInterval> | null = null;
+  private automationScanning = false;
   private owedWorkScanning = false;
   private deliveryPumpPromise: Promise<void> | null = null;
   private deliveryPumpRequested = false;
@@ -287,6 +303,19 @@ export class Bridge {
 
     // 7. Start heartbeat (updates machine_keys.last_used_at every 30s for polling-based status)
     this.startHeartbeat();
+
+    // 8. Sync machine-installed skills into the workspace so the apps surface
+    // and agent prompts see them. Best-effort: a failure here must not block
+    // the bridge from serving messages.
+    void this.syncDiscoveredSkills().catch((error: unknown) => {
+      console.error(
+        "  Could not sync workspace skills:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+
+    // 9. Wake agents whose schedules have come due.
+    this.startAutomationTimer();
 
     console.log(
       `  Agent runtime ready. Listening for messages across ${this.channelAgents.size} channel(s).`
@@ -804,7 +833,7 @@ export class Bridge {
         const agent = channelAgents?.get(m.sender_id) || this.agentRecords.get(m.sender_id);
         senderName = agent?.display_name || "Agent";
       }
-      return `[${senderName}]: ${m.content.substring(0, 300)}`;
+      return `[${senderName}]: ${sanitizeUntrustedContent(m.content.substring(0, 300))}`;
     });
 
     return `\n--- Recent channel messages ---\n${lines.join("\n")}\n---`;
@@ -1344,8 +1373,11 @@ export class Bridge {
     const threadTarget = msg.thread_parent_id
       ? `${channelTarget}:${msg.thread_parent_id.substring(0, 8)}`
       : channelTarget;
+    // Message bodies are untrusted input: a channel can carry text crafted to
+    // read as runtime structure (fake headers, wake notices, end-of-turn
+    // markers). Defang those before they reach the prompt.
     const msgHeader = `[target=${threadTarget} msg=${msg.id.substring(0, 8)} time=${msg.created_at} sender=@${senderName} type=${msg.sender_type}${ambientReason ? " delivery=unmentioned" : ""}]`;
-    const body = `${msgHeader} ${msg.content}`;
+    const body = `${msgHeader} ${sanitizeUntrustedContent(msg.content)}`;
     const prompt = contextPrefix ? `${contextPrefix}\n\n${body}` : body;
 
     if (this.config.localMode) {
@@ -1899,57 +1931,195 @@ export class Bridge {
   }
 
   private async listSkills(runtime: "claude-code" | "codex" | "pi") {
-    const runtimeDirectory = runtime === "codex"
-      ? [".codex", "skills"]
-      : runtime === "pi"
-        ? [".pi", "agent", "skills"]
-        : [".claude", "skills"];
-    const skillsDir = join(
-      homedir(),
-      ...runtimeDirectory,
+    const discovered = await discoverSkillsForRuntime(runtime);
+    return {
+      skills: discovered.map((skill) => ({
+        name: skill.slug,
+        description: skill.description || skill.slug,
+      })),
+    };
+  }
+
+  /**
+   * Push machine-discovered skills into app_skills so the workspace can see,
+   * toggle, and offer them to agents. Existing rows keep their enabled flag;
+   * rows whose directory has vanished are deleted.
+   */
+  private async syncDiscoveredSkills() {
+    const discovered = await discoverAllSkills();
+    const { data: existing, error } = await this.supabase
+      .from("app_skills")
+      .select("id, slug, source, display_name, description, version, path, enabled")
+      .eq("server_id", this.config.serverId);
+    if (error) throw new Error(error.message);
+    const existingRows = (existing ?? []) as Array<{
+      id: string;
+      slug: string;
+      source: string;
+    }>;
+    const existingKeys = new Map(
+      existingRows.map((row) => [`${row.source}::${row.slug}`, row]),
     );
-    const skills: Array<{ name: string; description: string }> = [];
-
-    try {
-      const entries = await readdir(skillsDir);
-      for (const entry of entries) {
-        if (entry.startsWith(".")) continue;
-        const entryPath = join(skillsDir, entry);
-        const entryStat = await lstat(entryPath);
-        const resolvedPath = entryStat.isSymbolicLink()
-          ? resolve(skillsDir, entry)
-          : entryPath;
-
-        for (const filename of ["SKILL.md", "skill.md"]) {
-          try {
-            const content = await readFile(
-              join(resolvedPath, filename),
-              "utf-8"
-            );
-            const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
-            let description = "";
-            if (fmMatch) {
-              const descMatch = fmMatch[1].match(
-                /^description:\s*(.+)$/m
-              );
-              if (descMatch) {
-                description = descMatch[1]
-                  .trim()
-                  .replace(/^['"]|['"]$/g, "");
-              }
-            }
-            skills.push({ name: entry, description: description || entry });
-            break;
-          } catch {
-            // File doesn't exist, try next
-          }
-        }
+    const now = new Date().toISOString();
+    for (const skill of discovered) {
+      const key = `${skill.source}::${skill.slug}`;
+      const match = existingKeys.get(key);
+      if (match) {
+        existingKeys.delete(key);
+        await this.supabase
+          .from("app_skills")
+          .update({
+            display_name: skill.displayName,
+            description: skill.description,
+            version: skill.version,
+            path: skill.path,
+            updated_at: now,
+          })
+          .eq("id", match.id);
+        continue;
       }
-    } catch {
-      // Skills directory doesn't exist
+      await this.supabase.from("app_skills").insert({
+        server_id: this.config.serverId,
+        slug: skill.slug,
+        source: skill.source,
+        display_name: skill.displayName,
+        description: skill.description,
+        version: skill.version,
+        path: skill.path,
+        enabled: true,
+      });
+    }
+    for (const [, stale] of existingKeys) {
+      await this.supabase.from("app_skills").delete().eq("id", stale.id);
+    }
+    if (discovered.length > 0) {
+      console.log(`  Synced ${discovered.length} workspace skill(s) from this machine`);
+    }
+  }
+
+  private startAutomationTimer() {
+    if (this.automationTimer) return;
+    this.automationTimer = setInterval(() => {
+      void this.scanAutomations().catch((error: unknown) => {
+        console.error(
+          "  Could not scan automations:",
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }, AUTOMATION_TICK_MS);
+    this.automationTimer.unref?.();
+  }
+
+  /**
+   * Fire every enabled automation whose next_run_at has passed. The write that
+   * claims a run is a compare-and-swap on next_run_at itself, so a second
+   * bridge (or this one racing its own restart) observes "already taken" and
+   * moves on instead of waking the agent twice.
+   */
+  private async scanAutomations() {
+    if (this.stopping || this.automationScanning) return;
+    const agentIds = [...this.agentRecords.keys()];
+    if (agentIds.length === 0) return;
+    this.automationScanning = true;
+    try {
+      const now = new Date();
+      const { data, error } = await this.supabase
+        .from("agent_automations")
+        .select("id, agent_id, channel_id, name, schedule, prompt, next_run_at")
+        .eq("server_id", this.config.serverId)
+        .eq("enabled", true)
+        .in("agent_id", agentIds)
+        .lt("next_run_at", now.toISOString())
+        .order("next_run_at")
+        .limit(AUTOMATION_BATCH);
+      if (error) throw new Error(error.message);
+      const due = (data ?? []) as Array<{
+        id: string;
+        agent_id: string;
+        channel_id: string | null;
+        name: string;
+        schedule: string;
+        prompt: string;
+        next_run_at: string | null;
+      }>;
+      for (const automation of due) {
+        if (this.stopping) break;
+        await this.fireAutomation(automation, now);
+      }
+    } finally {
+      this.automationScanning = false;
+    }
+  }
+
+  private async fireAutomation(
+    automation: {
+      id: string;
+      agent_id: string;
+      channel_id: string | null;
+      name: string;
+      schedule: string;
+      prompt: string;
+      next_run_at: string | null;
+    },
+    now: Date,
+  ) {
+    if (!validateSchedule(automation.schedule)) {
+      console.error(`  Automation "${automation.name}" has an unparsable schedule; disabling it.`);
+      await this.supabase
+        .from("agent_automations")
+        .update({ enabled: false })
+        .eq("id", automation.id);
+      return;
+    }
+    if (!automation.next_run_at) return;
+    const claimed = await this.supabase
+      .from("agent_automations")
+      .update({
+        last_run_at: now.toISOString(),
+        next_run_at: new Date(nextRunAfter(automation.schedule, now.getTime()) ?? now.getTime() + 86_400_000).toISOString(),
+      })
+      .eq("id", automation.id)
+      .eq("next_run_at", automation.next_run_at)
+      .select("id")
+      .maybeSingle();
+    if (claimed.error) throw new Error(claimed.error.message);
+    if (!claimed.data) return;
+
+    const agent = this.agentRecords.get(automation.agent_id);
+    if (!agent) return;
+    const channelId = automation.channel_id ?? (await this.firstAgentChannel(automation.agent_id));
+    if (!channelId) {
+      console.error(`  Automation "${automation.name}" has no channel to fire into.`);
+      return;
     }
 
-    return { skills };
+    const target = this.buildChannelTarget(channelId);
+    const header = `[target=${target} time=${now.toISOString()} sender=@teammate type=system delivery=automation]`;
+    const prompt =
+      `${header}\n` +
+      `Scheduled task "${automation.name}" is due now (schedule: ${describeSchedule(automation.schedule)}).\n\n` +
+      `${sanitizeUntrustedContent(automation.prompt)}\n\n` +
+      `Do the requested work in ${target}, then report back there as usual.`;
+    console.log(`  [${agent.display_name}] Automation fired: ${automation.name}.`);
+    await this.agentManager.sendToAgent(automation.agent_id, prompt, channelId, {
+      ambient: true,
+    });
+  }
+
+  private async firstAgentChannel(agentId: string): Promise<string | null> {
+    const { data, error } = await this.supabase
+      .from("channel_members")
+      .select("channel_id")
+      .eq("member_id", agentId)
+      .eq("member_type", "agent")
+      .order("joined_at")
+      .limit(1);
+    if (error) {
+      console.error(`  Could not resolve an automation channel: ${error.message}`);
+      return null;
+    }
+    const rows = (data ?? []) as Array<{ channel_id: string }>;
+    return rows[0]?.channel_id ?? null;
   }
 
   stop() {
@@ -1964,6 +2134,10 @@ export class Bridge {
     if (this.owedWorkInterval) {
       clearInterval(this.owedWorkInterval);
       this.owedWorkInterval = null;
+    }
+    if (this.automationTimer) {
+      clearInterval(this.automationTimer);
+      this.automationTimer = null;
     }
     if (this.deliveryPollInterval) {
       clearInterval(this.deliveryPollInterval);

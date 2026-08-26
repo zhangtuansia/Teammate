@@ -84,6 +84,25 @@ class CodexHandle implements AgentRuntimeHandle {
       "shell_environment_policy.inherit=all",
     ];
     args.push("-c", `model_reasoning_effort=\"${this.config.thinkingLevel}\"`);
+    // Workspace-configured connectors arrive as TOML overrides; with
+    // --ignore-user-config these are the only MCP servers Codex sees.
+    for (const server of this.config.mcpServers ?? []) {
+      const safeName = server.name.replace(/[^A-Za-z0-9_-]/g, "-");
+      if (server.transport === "stdio") {
+        args.push("-c", `mcp_servers.${safeName}.command=${JSON.stringify(server.command)}`);
+        if (server.args.length > 0) {
+          args.push("-c", `mcp_servers.${safeName}.args=[${server.args.map((arg) => JSON.stringify(arg)).join(",")}]`);
+        }
+        continue;
+      }
+      // Codex reaches a remote server by URL instead of spawning anything.
+      args.push("-c", `mcp_servers.${safeName}.url=${JSON.stringify(server.url)}`);
+      for (const [header, value] of Object.entries(server.headers ?? {})) {
+        if (!value) continue;
+        const safeHeader = header.replace(/[^A-Za-z0-9_-]/g, "-");
+        args.push("-c", `mcp_servers.${safeName}.http_headers.${safeHeader}=${JSON.stringify(value)}`);
+      }
+    }
     if (this.config.model && this.config.model !== "default") {
       args.push("--model", this.config.model);
     }

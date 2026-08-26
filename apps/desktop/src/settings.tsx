@@ -192,6 +192,16 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [settingsReloadToken, setSettingsReloadToken] = useState(0);
+  // First launch with nothing cached used to hold the whole workspace behind
+  // the loading screen until the packaged runtime answered — up to twelve
+  // seconds of nothing. A short grace period still hides the wrong-theme
+  // flash while the fetch usually lands, and past it the workspace renders
+  // with defaults and hot-swaps when real settings arrive.
+  const [graceElapsed, setGraceElapsed] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setGraceElapsed(true), 800);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const reloadSettings = useCallback(() => {
     setSettingsLoaded(false);
@@ -259,7 +269,7 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
   }, [settingsReloadToken, updateSettings]);
 
   useLayoutEffect(() => {
-    if (!settingsLoaded && !hasLastGoodSettings) return;
+    if (!settingsLoaded && !hasLastGoodSettings && !graceElapsed) return;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const applyTheme = () => {
       const dark = settings.theme === "dark" || (settings.theme === "system" && media.matches);
@@ -289,6 +299,7 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
     media.addEventListener("change", applyTheme);
     return () => media.removeEventListener("change", applyTheme);
   }, [
+    graceElapsed,
     hasLastGoodSettings,
     settings.language,
     settings.codeFont,
@@ -313,24 +324,10 @@ export function DesktopSettingsProvider({ children }: { children: ReactNode }) {
   );
 
   const loadingLabel = translate(settings.language, "settings.loading");
-  const loadFailedLabel = translate(settings.language, "settings.loadFailed");
 
   let content = children;
-  if (!hasLastGoodSettings && !settingsLoaded) {
-    content = settingsLoadError ? (
-      <div className="flex min-h-screen items-center justify-center bg-background p-6">
-        <Alert className="max-w-md" variant="error">
-          <AlertCircle />
-          <AlertTitle>{loadFailedLabel}</AlertTitle>
-          <AlertDescription>
-            <span>{settingsLoadError}</span>
-            <Button className="w-fit" onClick={reloadSettings} size="sm" variant="outline">
-              {translate(settings.language, "runtime.retry")}
-            </Button>
-          </AlertDescription>
-        </Alert>
-      </div>
-    ) : (
+  if (!hasLastGoodSettings && !settingsLoaded && !graceElapsed) {
+    content = (
       <div
         aria-live="polite"
         className="flex min-h-screen items-center justify-center bg-background text-sm text-muted-foreground"

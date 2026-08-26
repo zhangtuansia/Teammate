@@ -217,3 +217,12 @@ export function documentLinkMarkdown(id: string, title: string) {
   const safeTitle = title.replace(/[[\]]/g, "").trim() || "Untitled";
   return `[${safeTitle}](${documentLinkHref(id)})`;
 }
+
+export {
+  describeSchedule,
+  nextRunAfter,
+  parseCronExpression,
+  validateSchedule,
+  type CronFields,
+} from "./cron";
+export { sanitizeUntrustedContent } from "./untrusted-content";

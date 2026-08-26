@@ -233,7 +233,11 @@ function createBashTool(workDir: string): AgentTool<typeof BashParameters, { exi
     parameters: BashParameters,
     async execute(_toolCallId, parameters, signal) {
       return new Promise((resolve, reject) => {
-        const child = spawn("/bin/zsh", ["-lc", parameters.command], {
+        const shell =
+          [process.env.SHELL, "/bin/bash", "/bin/zsh"].find(
+            (candidate) => candidate && existsSync(candidate),
+          ) ?? "/bin/sh";
+        const child = spawn(shell, ["-lc", parameters.command], {
           cwd: workDir,
           env: process.env,
           stdio: ["ignore", "pipe", "pipe"],

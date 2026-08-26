@@ -17,6 +17,30 @@ export type RuntimeEvent =
   | { type: "turn-complete"; sessionId?: string }
   | { type: "turn-failed"; message: string };
 
+/**
+ * A connector as a runtime needs to see it.
+ *
+ * Two shapes rather than one with optional fields: a local server is a command
+ * to spawn, a remote one is a URL to call, and nothing sensible has both. Making
+ * that a union means a connector missing its URL cannot be constructed at all,
+ * instead of reaching a runtime that then writes a config it cannot use.
+ */
+export type RuntimeMcpServer =
+  | {
+      transport: "stdio";
+      name: string;
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+    }
+  | {
+      /** Streamable HTTP, and the SSE transport that predates it. */
+      transport: "http" | "sse";
+      name: string;
+      url: string;
+      headers?: Record<string, string>;
+    };
+
 export interface RuntimeLaunchConfig {
   agentId: string;
   displayName: string;
@@ -27,6 +51,7 @@ export interface RuntimeLaunchConfig {
   sessionId: string | null;
   env: NodeJS.ProcessEnv;
   connection?: RuntimeConnectionConfig;
+  mcpServers?: RuntimeMcpServer[];
 }
 
 export interface RuntimeConnectionConfig {

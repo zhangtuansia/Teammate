@@ -11,6 +11,7 @@ import { useAgentActivity } from "@/hooks/use-agent-activity";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { BrainIcon, CodeIcon, GlobeIcon, SparklesIcon, TrendingUpIcon } from "lucide-react";
 import { ChevronDownIcon, ChevronRightIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
@@ -22,6 +23,7 @@ import { InlineRename } from "./inline-rename";
 import { filesFromDrop } from "@/lib/folder-import";
 import { importFilesAsDocuments } from "@/lib/import-documents";
 import { ancestorPaths, buildDocumentTree, folderLabel, type DocumentFolder } from "@/lib/document-tree";
+import { CONNECTOR_CATEGORIES } from "@/lib/connector-catalog";
 
 interface Channel {
   id: string;
@@ -378,6 +380,21 @@ const AGENT_PANEL_WIDTH = 360;
 const MIN_CHAT_WIDTH = 320;
 const WORKSPACE_HORIZONTAL_INSET = 16;
 const SIDEBAR_WIDTH_STORAGE_KEY = "teammate:sidebar-width";
+/**
+ * One glyph per category. The list carried the same connector icon on every
+ * row before, which is the sort of decoration that costs a column of space and
+ * tells you nothing — six identical marks read as noise, not as a set. The task
+ * filters below already work this way.
+ */
+const APP_CATEGORY_ICONS: Record<string, typeof SparklesIcon> = {
+  dev: CodeIcon,
+  featured: SparklesIcon,
+  finance: TrendingUpIcon,
+  team: UsersIcon,
+  thinking: BrainIcon,
+  web: GlobeIcon,
+};
+
 const SIDEBAR_WIDTH_CSS_PROPERTY = "--teammate-sidebar-width";
 const SIDEBAR_REQUEST_TIMEOUT_MS = 18_000;
 
@@ -449,7 +466,7 @@ export function Sidebar({
   const currentDocumentIdsRef = useRef<Set<string>>(new Set());
   const currentUserIdRef = useRef("");
   const [unread, setUnread] = useState<Map<string, { mentions: number; unread: number }>>(new Map());
-  const workspaceViewRef = useRef<"home" | "documents" | "tasks" | "settings">("home");
+  const workspaceViewRef = useRef<"home" | "documents" | "tasks" | "apps" | "settings">("home");
   const sidebarRefreshRef = useRef<ReturnType<typeof createTrailingRefreshScheduler> | null>(null);
   const loadRetryAttemptRef = useRef(0);
   const loadRetryTimerRef = useRef<number | null>(null);
@@ -472,10 +489,13 @@ export function Sidebar({
     ? "documents"
     : pathname.endsWith("/tasks")
       ? "tasks"
-      : pathname.endsWith("/settings")
-        ? "settings"
-        : "home";
+      : pathname.endsWith("/apps")
+        ? "apps"
+        : pathname.endsWith("/settings")
+          ? "settings"
+          : "home";
   const activeTaskFilter = searchParams.get("status") || "all";
+  const activeAppCategory = searchParams.get("category") || "featured";
   const activeDocumentId = searchParams.get("document");
   const documentSearch = searchParams.get("q") || "";
   // The box holds what you typed; the address holds what has been searched for.
@@ -1669,10 +1689,47 @@ export function Sidebar({
           </div>
         )}
 
+        {workspaceView === "apps" && (
+          <div className="space-y-3">
+            <div className="flex h-[26px] items-center px-2">
+              <span className="text-[15px] font-bold text-foreground">
+                {t("apps.title")}
+              </span>
+            </div>
+            <div className="flex flex-col gap-1">
+              {CONNECTOR_CATEGORIES.map((category) => {
+                const active = activeAppCategory === category.id;
+                const Icon = APP_CATEGORY_ICONS[category.id];
+                return (
+                  <Button
+                    key={category.id}
+                    variant="ghost"
+                    size="sm"
+                    className={`w-full justify-start ${
+                      active
+                        ? "bg-primary text-primary-foreground"
+                        : "text-foreground/80"
+                    }`}
+                    onClick={() => navigate(
+                      category.id === "featured"
+                        ? `/s/${serverSlug}/apps`
+                        : `/s/${serverSlug}/apps?category=${category.id}`,
+                    )}
+                    aria-current={active ? "page" : undefined}
+                  >
+                    <Icon />
+                    {category.label}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {workspaceView === "tasks" && (
           <div className="space-y-3">
-            <div className="flex h-[22px] items-center px-2">
-              <span className="text-[12px] font-medium text-muted-foreground">
+            <div className="flex h-[26px] items-center px-2">
+              <span className="text-[15px] font-bold text-foreground">
                 {t("tasks.title")}
               </span>
             </div>
@@ -1691,7 +1748,11 @@ export function Sidebar({
                     key={filter.id}
                     variant="ghost"
                     size="sm"
-                    className={`w-full justify-start ${active ? "bg-accent text-foreground" : "text-muted-foreground"}`}
+                    className={`w-full justify-start ${
+                      active
+                        ? "bg-primary text-primary-foreground"
+                        : "text-foreground/80"
+                    }`}
                     onClick={() => navigate(
                       filter.id === "all"
                         ? `/s/${serverSlug}/tasks`
@@ -1710,8 +1771,8 @@ export function Sidebar({
 
         {workspaceView === "settings" && (
           <div className="space-y-3">
-            <div className="flex h-[22px] items-center px-2">
-              <span className="text-[12px] font-medium text-muted-foreground">
+            <div className="flex h-[26px] items-center px-2">
+              <span className="text-[15px] font-bold text-foreground">
                 {t("settings.title")}
               </span>
             </div>
@@ -1731,7 +1792,11 @@ export function Sidebar({
                     key={section.id}
                     variant="ghost"
                     size="sm"
-                    className={`w-full justify-start ${active ? "bg-accent text-foreground" : "text-muted-foreground"}`}
+                    className={`w-full justify-start ${
+                      active
+                        ? "bg-primary text-primary-foreground"
+                        : "text-foreground/80"
+                    }`}
                     onClick={() => navigate(`/s/${serverSlug}/settings?section=${section.id}`)}
                     aria-current={active ? "page" : undefined}
                   >

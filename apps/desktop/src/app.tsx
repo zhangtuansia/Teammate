@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { WorkspaceSection } from "./workspace-section";
 import { DesktopSettingsPage } from "./settings";
+import { AppsSection } from "@/components/apps-section";
 
 interface ServerInfo {
   id: string;
@@ -570,9 +571,11 @@ export function App() {
     ? "documents"
     : pathname.endsWith("/tasks")
       ? "tasks"
-      : pathname.endsWith("/settings")
-        ? "settings"
-        : "home";
+      : pathname.endsWith("/apps")
+        ? "apps"
+        : pathname.endsWith("/settings")
+          ? "settings"
+          : "home";
 
   return (
     <WorkspaceServerProvider server={server}>
@@ -594,6 +597,8 @@ export function App() {
                   <Conversation server={server} />
                 ) : workspaceSection === "settings" ? (
                   <DesktopSettingsPage />
+                ) : workspaceSection === "apps" ? (
+                  <AppsSection serverId={server.id} />
                 ) : (
                   <WorkspaceSection
                     section={workspaceSection}

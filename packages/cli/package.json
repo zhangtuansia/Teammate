@@ -33,7 +33,7 @@
     "typescript": "^5.8.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.20"
   },
   "dependencies": {
     "@teammate/shared": "workspace:*"

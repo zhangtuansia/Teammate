@@ -4,7 +4,7 @@ The Tauri desktop app and `pnpm dev:local` do not require self-hosting. Use this
 
 ## Prerequisites
 
-- Node >= 22.5 and pnpm 10+
+- Node >= 22.20 and pnpm 10+
 - a Supabase project
 - a Next.js host such as Vercel
 - this repository cloned locally

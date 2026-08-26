@@ -17,6 +17,7 @@ import {
 } from "./private-filesystem.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { runtimeProcessEnvironment } from "./runtime-env.js";
+import { curateMemoryFile } from "./memory-curator.js";
 import {
   createAgentRuntime,
   normalizeRuntimeId,
@@ -24,6 +25,7 @@ import {
   type AgentRuntimeId,
   type RuntimeActivity,
   type RuntimeConnectionConfig,
+  type RuntimeMcpServer,
   type RuntimeThinkingLevel,
 } from "./runtimes/index.js";
 
@@ -534,6 +536,102 @@ ${agent.description || agent.display_name}
     return buildSystemPrompt(agent, memoryContext);
   }
 
+  /**
+   * Enabled workspace skills are offered in the prompt, not force-fed: the
+   * agent reads the SKILL.md at the given path only when the current turn
+   * matches its description.
+   */
+  private workspaceSkillsSection(
+    rows: Array<{
+      slug: string;
+      source: string;
+      display_name: string | null;
+      description: string | null;
+      path: string | null;
+    }>,
+  ): string {
+    if (rows.length === 0) return "";
+    const lines = rows.map((row) =>
+      `- **${row.display_name || row.slug}** (${row.source})${row.description ? `: ${row.description}` : ""}${row.path ? ` — SKILL.md at \`${row.path}\`` : ""}`,
+    );
+    return `
+
+## Workspace skills
+
+These skills were installed by the workspace. When a turn matches one, read its SKILL.md first and follow it.
+
+${lines.join("\n")}`;
+  }
+
+  private async fetchWorkspaceRows(
+    table: string,
+    columns: string,
+    filters: Record<string, unknown>,
+  ): Promise<Array<Record<string, unknown>>> {
+    let query = this.supabase.from(table).select(columns);
+    for (const [column, value] of Object.entries(filters)) {
+      query = query.eq(column, value);
+    }
+    const { data, error } = await query;
+    if (error) {
+      console.error(`  Could not read ${table}:`, error.message);
+      return [];
+    }
+    return (data ?? []) as unknown as Array<Record<string, unknown>>;
+  }
+
+  private async fetchEnabledSkills() {
+    const rows = await this.fetchWorkspaceRows(
+      "app_skills",
+      "slug, source, display_name, description, path",
+      { server_id: this.serverId, enabled: true },
+    );
+    return rows as Array<{
+      slug: string;
+      source: string;
+      display_name: string | null;
+      description: string | null;
+      path: string | null;
+    }>;
+  }
+
+  private async fetchEnabledConnectors(): Promise<RuntimeMcpServer[]> {
+    const rows = await this.fetchWorkspaceRows(
+      "app_connectors",
+      "name, transport, url, headers, command, args, env",
+      { server_id: this.serverId, enabled: true },
+    );
+    const servers: RuntimeMcpServer[] = [];
+    for (const row of rows) {
+      const name = String(row.name);
+      const transport = String(row.transport || "stdio");
+      if (transport === "http" || transport === "sse") {
+        const url = String(row.url || "");
+        // A remote connector with no URL is a half-finished form, not a server.
+        // Dropping it here keeps a runtime from starting with a config it would
+        // only fail on later, with nothing pointing back to this row.
+        if (!url) continue;
+        servers.push({
+          headers: safeParseJsonObject(row.headers),
+          name,
+          transport,
+          url,
+        });
+        continue;
+      }
+      const command = String(row.command || "");
+      if (!command) continue;
+      servers.push({
+        args: safeParseJsonArray(row.args),
+        command,
+        env: safeParseJsonObject(row.env),
+        name,
+        transport: "stdio",
+      });
+    }
+    return servers;
+  }
+
   private async startManagedRuntime(
     agentId: string,
     session: AgentSession,
@@ -556,6 +654,25 @@ ${agent.description || agent.display_name}
       }
     }
     const agentAuthToken = await this.resolveAgentAuthToken(agentId);
+    const [enabledSkills, enabledConnectors] = await Promise.all([
+      this.fetchEnabledSkills().catch(() => []),
+      this.fetchEnabledConnectors().catch(() => []),
+    ]);
+    // A wake-up is the natural boundary for memory housekeeping: the previous
+    // turn is settled, and the next prompt reads MEMORY.md in a moment.
+    const curation = curateMemoryFile(session.workDir);
+    if (curation.changed) {
+      console.log(
+        `  [${session.displayName}] Memory curated: ${curation.keptCount} facts` +
+          `${curation.duplicateCount > 0 ? `, ${curation.duplicateCount} duplicates removed` : ""}` +
+          `${curation.archivedCount > 0 ? `, ${curation.archivedCount} archived` : ""}.`,
+      );
+    }
+    if (enabledConnectors.length > 0) {
+      console.log(
+        `  [${session.displayName}] Attaching ${enabledConnectors.length} workspace connector(s): ${enabledConnectors.map((c) => c.name).join(", ")}`,
+      );
+    }
     const execution = existingExecution ?? new ExecutionSession<
       QueuedMessage,
       RuntimeThinkingLevel
@@ -571,11 +688,14 @@ ${agent.description || agent.display_name}
         agentId,
         displayName: session.displayName,
         workDir: session.workDir,
-        systemPrompt: this.readSystemPrompt(session, agent),
+        systemPrompt:
+          this.readSystemPrompt(session, agent) +
+          this.workspaceSkillsSection(enabledSkills),
         model,
         thinkingLevel,
         sessionId,
         connection,
+        mcpServers: enabledConnectors,
         env: {
           ...runtimeProcessEnvironment(),
           FORCE_COLOR: "0",
@@ -1271,4 +1391,38 @@ ${agent.description || agent.display_name}
     }
     return teammateDir;
   }
+}
+
+function safeParseJsonArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function safeParseJsonObject(value: unknown): Record<string, string> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, String(entry)]),
+    );
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return Object.fromEntries(
+          Object.entries(parsed).map(([key, entry]) => [key, String(entry)]),
+        );
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }

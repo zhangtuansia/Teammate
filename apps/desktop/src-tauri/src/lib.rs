@@ -12,7 +12,10 @@ use tauri_plugin_shell::{process::CommandChild, process::CommandEvent, ShellExt}
 
 const SIDECAR_SHUTDOWN_COMMAND: &[u8] = b"teammate:shutdown\n";
 const SIDECAR_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const SIDECAR_SHUTDOWN_POLL_ATTEMPTS: usize = 120;
+// The graceful handshake normally lands within one poll. The bound only
+// matters when the sidecar is wedged, and a wedged quit should not hold the
+// window hostage — kill after a few seconds rather than twelve.
+const SIDECAR_SHUTDOWN_POLL_ATTEMPTS: usize = 50;
 #[cfg(debug_assertions)]
 const LOCAL_SERVER_PORT: &str = "8788";
 #[cfg(not(debug_assertions))]

@@ -11,6 +11,7 @@ export type {
   RuntimeEvent,
   RuntimeLaunchConfig,
   RuntimeConnectionConfig,
+  RuntimeMcpServer,
   RuntimeThinkingLevel,
   RuntimeModelDefinition,
 } from "./types.js";

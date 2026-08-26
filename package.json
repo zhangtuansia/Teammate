@@ -22,8 +22,5 @@
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=22.20"
-  },
-  "dependencies": {
-    "@slock-ai/daemon": "^0.40.2"
   }
 }

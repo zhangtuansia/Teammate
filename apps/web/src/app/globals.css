@@ -5,37 +5,24 @@
 @import 'tailwindcss-radix-colors/dist/sand.css';
 @import 'tailwindcss-radix-colors/dist/sanda.css';
 
-/* Workspace views are shared with the Tauri app and live outside apps/web. */
-@source '../../../desktop/src';
-
-@custom-variant dark (&:is(.dark *));
-
 /* Bundled Chinese faces, both SIL OFL 1.1, with their licences kept beside the
    files in src/fonts. Neither ships with macOS — that is the reason they are
    bundled rather than merely listed among the system choices.
 
+   Both are split into unicode-range slices (cn-font-split), so the browser
+   downloads only the handful of chunks a transcript actually uses instead of
+   the whole multi-megabyte face. The slice tables live next to the fonts:
+   src/fonts/wenkai/lxgw-wenkai.css and src/fonts/smiley/smiley-sans.css.
+
    Declared here rather than in the desktop stylesheet so the web and Tauri
-   builds resolve them from one place.
+   builds resolve them from one place. */
+@import '../fonts/wenkai/lxgw-wenkai.css';
+@import '../fonts/smiley/smiley-sans.css';
 
-   font-display: swap matters more than for a Latin face: these are megabytes,
-   not the 70KB of SN Pro, and without it the first paint of a transcript would
-   block on the whole file. */
-@font-face {
-  font-family: 'LXGW WenKai';
-  src: url('../fonts/LXGWWenKaiLite-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
+/* Workspace views are shared with the Tauri app and live outside apps/web. */
+@source '../../../desktop/src';
 
-/* 得意黑 ships oblique only — the slant is the typeface, not a variant of it. */
-@font-face {
-  font-family: 'Smiley Sans';
-  src: url('../fonts/SmileySans-Oblique.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
+@custom-variant dark (&:is(.dark *));
 
 :root {
   --sidebar-width: 256px;

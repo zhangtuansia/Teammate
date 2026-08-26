@@ -4361,3 +4361,115 @@ GRANT EXECUTE ON FUNCTION public.claim_message_as_task(uuid, uuid, timestamptz) 
 GRANT EXECUTE ON FUNCTION public.update_task_details(uuid, text, text, uuid, uuid, timestamptz) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.set_task_archived(uuid, boolean, uuid, timestamptz) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.delete_archived_task(uuid, timestamptz) TO authenticated;
+
+-- ── Apps: skills and connectors ─────────────────────────────────────────────
+-- Skills are discovered on the machine where agents run; the bridge syncs what
+-- it finds into app_skills and the workspace decides which are offered to
+-- agents. Connectors are MCP servers the workspace configures; the bridge
+-- hands enabled ones to agent runtimes at spawn time. args/env travel as JSON
+-- TEXT in both modes so local SQLite and Postgres read identically.
+
+create table public.app_skills (
+  id uuid primary key default gen_random_uuid(),
+  server_id uuid not null references public.servers(id) on delete cascade,
+  slug text not null,
+  source text not null,
+  display_name text,
+  description text,
+  version text,
+  path text,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (server_id, source, slug)
+);
+
+create table public.app_connectors (
+  id uuid primary key default gen_random_uuid(),
+  server_id uuid not null references public.servers(id) on delete cascade,
+  name text not null,
+  transport text not null default 'stdio' check (transport in ('stdio', 'http', 'sse')),
+  url text,
+  headers text not null default '{}',
+  command text not null default '',
+  args text not null default '[]',
+  env text not null default '{}',
+  description text,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (server_id, name)
+);
+
+create policy "Workspace members can view apps" on public.app_skills for select using (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+create policy "Workspace members can manage discovered skills" on public.app_skills for insert with check (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+create policy "Workspace members can update discovered skills" on public.app_skills for update using (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+create policy "Workspace members can remove discovered skills" on public.app_skills for delete using (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+
+create policy "Workspace members can view connectors" on public.app_connectors for select using (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+create policy "Workspace members can add connectors" on public.app_connectors for insert with check (
+  public.user_is_server_member(server_id)
+);
+create policy "Workspace members can edit connectors" on public.app_connectors for update using (
+  public.user_is_server_member(server_id)
+);
+create policy "Workspace members can remove connectors" on public.app_connectors for delete using (
+  public.user_is_server_member(server_id)
+);
+
+-- ── Agent automations ───────────────────────────────────────────────────────
+-- Schedules on which the bridge wakes an agent and hands it a prompt. The
+-- bridge owns next_run_at bookkeeping; humans own intent (name, schedule,
+-- prompt, enabled).
+
+create table public.agent_automations (
+  id uuid primary key default gen_random_uuid(),
+  server_id uuid not null references public.servers(id) on delete cascade,
+  agent_id uuid not null references public.agents(id) on delete cascade,
+  channel_id uuid references public.channels(id) on delete set null,
+  name text not null,
+  schedule text not null,
+  prompt text not null,
+  enabled boolean not null default true,
+  last_run_at timestamptz,
+  next_run_at timestamptz,
+  created_by uuid references public.profiles(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index idx_agent_automations_due on public.agent_automations(server_id, next_run_at);
+
+alter table public.app_skills enable row level security;
+alter table public.app_connectors enable row level security;
+alter table public.agent_automations enable row level security;
+
+create policy "Workspace members can view automations" on public.agent_automations for select using (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+create policy "Workspace members can add automations" on public.agent_automations for insert with check (
+  public.user_is_server_member(server_id)
+);
+create policy "Workspace members can edit automations" on public.agent_automations for update using (
+  public.user_is_server_member(server_id)
+  or public.teammate_bridge_session_matches_server(server_id)
+);
+create policy "Workspace members can remove automations" on public.agent_automations for delete using (
+  public.user_is_server_member(server_id)
+);
