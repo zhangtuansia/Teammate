@@ -21,6 +21,58 @@ const LOCAL_SERVER_PORT: &str = "8788";
 #[cfg(not(debug_assertions))]
 const LOCAL_SERVER_PORT: &str = "8787";
 
+#[cfg(target_os = "macos")]
+const SIDECAR_NAMES: [&str; 3] = ["teammate-runtime", "teammate-cli", "teammate-pi"];
+
+/// Executables inside an app's `Contents/MacOS` directory inherit that app's
+/// foreground LaunchServices identity on newer macOS versions. Stage the
+/// headless sidecars in the app cache so they remain ordinary background
+/// processes instead of appearing as a second generic `exec` Dock icon.
+#[cfg(target_os = "macos")]
+fn stage_macos_sidecars(
+    source_dir: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let stage_dir = cache_dir.join("sidecars");
+    std::fs::create_dir_all(&stage_dir)?;
+
+    let mut stamp = String::new();
+    for name in SIDECAR_NAMES {
+        let metadata = std::fs::metadata(source_dir.join(name))?;
+        let modified = metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        writeln!(&mut stamp, "{name}:{}:{modified}", metadata.len())
+            .expect("writing a sidecar stamp to a string cannot fail");
+    }
+
+    let stamp_path = stage_dir.join("build.stamp");
+    let staged_files_exist = SIDECAR_NAMES
+        .iter()
+        .all(|name| stage_dir.join(name).is_file());
+    let stamp_matches =
+        std::fs::read_to_string(&stamp_path).ok().as_deref() == Some(stamp.as_str());
+
+    if !staged_files_exist || !stamp_matches {
+        for name in SIDECAR_NAMES {
+            let source = source_dir.join(name);
+            let destination = stage_dir.join(name);
+            let temporary = stage_dir.join(format!(".{name}.tmp"));
+            let _ = std::fs::remove_file(&temporary);
+            std::fs::copy(&source, &temporary)?;
+            std::fs::set_permissions(&temporary, std::fs::metadata(&source)?.permissions())?;
+            std::fs::rename(&temporary, destination)?;
+        }
+        let temporary_stamp = stage_dir.join(".build.stamp.tmp");
+        std::fs::write(&temporary_stamp, &stamp)?;
+        std::fs::rename(temporary_stamp, stamp_path)?;
+    }
+
+    Ok(stage_dir.join("teammate-runtime"))
+}
+
 struct RuntimeProcess {
     child: Mutex<Option<CommandChild>>,
     terminated: Arc<AtomicBool>,
@@ -170,9 +222,22 @@ pub fn run() {
             let controller_credential = app.state::<LocalControllerCredential>().0.clone();
 
             let data_dir_arg = data_dir.to_string_lossy().into_owned();
-            let command = app
-                .shell()
-                .sidecar("teammate-runtime")?
+            #[cfg(target_os = "macos")]
+            let command = {
+                let executable = std::env::current_exe()?;
+                let executable_dir = executable.parent().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "Teammate executable directory is unavailable",
+                    )
+                })?;
+                let runtime =
+                    stage_macos_sidecars(executable_dir, &app.path().app_cache_dir()?)?;
+                app.shell().command(runtime)
+            };
+            #[cfg(not(target_os = "macos"))]
+            let command = app.shell().sidecar("teammate-runtime")?;
+            let command = command
                 .args([
                     "--data-dir".to_string(),
                     data_dir_arg,
