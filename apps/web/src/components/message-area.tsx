@@ -322,9 +322,10 @@ const UnreadDivider = memo(function UnreadDivider({ label }: { label: string }) 
 });
 
 /**
- * The day marker follows Slack's horizontal rule and centered date pill. The
- * whole row pins while that day is on screen, keeping the picker within reach
- * without spending a second toolbar button on the same action.
+ * Each marker is sticky inside its own day section, so the next day pushes the
+ * previous marker away. The opaque band keeps messages and hover controls from
+ * showing through while the marker is pinned; its negative top offset cancels
+ * the transcript's scroll padding so no text can peek through above it.
  */
 const DayDivider = memo(function DayDivider({
   date,
@@ -338,16 +339,11 @@ const DayDivider = memo(function DayDivider({
   onOpenPicker: (anchor: HTMLButtonElement) => void;
 }) {
   return (
-    // The row is deliberately shorter than the pill it holds, so the marker
-    // costs almost no vertical space and the transcript keeps its rhythm. The
-    // margins below reserve just enough room for the overflow in the unpinned
-    // position; once pinned, text passes behind the pill, which is opaque.
-    <div className="sticky top-0 z-20 mt-4 mb-6 flex h-[9px] items-center first:mt-1">
-      <span aria-hidden="true" className="h-px flex-1 bg-border" />
+    <div className="sticky -top-4 z-20 mb-4 flex h-9 items-center justify-center bg-card">
       <button
         aria-label={`${jumpLabel}: ${label}`}
         aria-haspopup="dialog"
-        className="mx-2 flex h-7 items-center gap-1 rounded-full bg-card px-3.5 text-[13px] font-bold text-foreground outline-none shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex h-7 items-center gap-1 rounded-full bg-card px-3.5 text-[13px] font-bold text-foreground outline-none shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
         onClick={(event) => onOpenPicker(event.currentTarget)}
         title={jumpLabel}
         type="button"
@@ -355,7 +351,6 @@ const DayDivider = memo(function DayDivider({
         <time dateTime={date}>{label}</time>
         <ChevronDownIcon aria-hidden="true" className="size-3.5 text-muted-foreground" />
       </button>
-      <span aria-hidden="true" className="h-px flex-1 bg-border" />
     </div>
   );
 });
@@ -1452,20 +1447,43 @@ function MessageAreaContent({
     return { count, id: firstUnread.id };
   }, [channelId, orderedMessages, readStateReadyFor, unreadBoundarySeq, userId]);
 
-  // Which rows open a new day. Walking the list once and carrying the last day
-  // we could actually read means a row with an unusable timestamp is skipped
-  // rather than splitting the day on both sides of itself — that is what turned
-  // two bad rows into three "today" dividers.
-  const dayDividers = useMemo(() => {
-    const starts = new Map<string, string>();
+  // Sticky positioning is bounded by the nearest block container. Grouping the
+  // transcript into real day sections lets the next marker push the previous
+  // one away instead of stacking every historical marker at the same top edge.
+  // Unusable timestamps stay in the current section rather than splitting it.
+  const daySections = useMemo(() => {
+    const sections: Array<{
+      date: string | null;
+      key: string;
+      messages: Array<{
+        index: number;
+        message: (typeof orderedMessages)[number];
+      }>;
+    }> = [];
+    const occurrences = new Map<string, number>();
+    let current: (typeof sections)[number] | null = null;
     let lastDay: string | null = null;
-    for (const message of orderedMessages) {
+
+    orderedMessages.forEach((message, index) => {
       const day = dayKey(message.created_at);
-      if (day === null) continue;
-      if (day !== lastDay) starts.set(message.id, message.created_at);
-      lastDay = day;
-    }
-    return starts;
+      const startsNewDay = day !== null && day !== lastDay;
+
+      if (!current || startsNewDay) {
+        const occurrence = day === null ? 0 : (occurrences.get(day) ?? 0);
+        if (day !== null) occurrences.set(day, occurrence + 1);
+        current = {
+          date: startsNewDay ? message.created_at : null,
+          key: day === null ? `undated-${message.id}` : `day-${day}-${occurrence}`,
+          messages: [],
+        };
+        sections.push(current);
+      }
+
+      current.messages.push({ index, message });
+      if (day !== null) lastDay = day;
+    });
+
+    return sections;
   }, [orderedMessages]);
 
   // Threads and reactions hang off the transcript rather than living in it, so
@@ -4266,123 +4284,127 @@ function MessageAreaContent({
             {conversationStart}
           </div>
         )}
-        {orderedMessages.map((msg, i) => {
-          const prevMsg = orderedMessages[i - 1];
-          const startsNewDay = dayDividers.has(msg.id);
-          const elapsed =
-            (parseMessageTime(msg.created_at)?.getTime() ?? NaN) -
-            (parseMessageTime(prevMsg?.created_at)?.getTime() ?? NaN);
-          const sameSender =
-            prevMsg &&
-            !startsNewDay &&
-            prevMsg.sender_id === msg.sender_id &&
-            // An unusable timestamp gives NaN, which fails this test and simply
-            // leaves the row un-grouped rather than grouping it arbitrarily.
-            elapsed < 5 * 60 * 1000;
-          const thread = threads.get(msg.id);
-          const row = (
-            <MessageRow
-              mentionNames={mentionNames}
-              agentBadgeLabel={
-                msg.sender_type === 'agent' &&
-                !channelAgents.has(msg.sender_id) &&
-                pastAgents.get(msg.sender_id)?.departed_at
-                  ? t('agent.departed')
-                  : t('message.agentBadge')
-              }
-              avatarUrl={
-                msg.sender_type === 'agent'
-                  ? channelAgents.get(msg.sender_id)?.avatar_url || agentInfo?.avatar_url
-                  : msg.sender_id === currentProfile?.id
-                    ? currentProfile.avatar_url
-                    : null
-              }
-              key={msg.id}
-              message={msg}
-              highlighted={highlightedMessageId === msg.id}
-              cancelDeliveryLabel={t('message.editCancel')}
-              deliveryFailedLabel={t('message.deliveryFailed')}
-              deliveryPendingLabel={t('message.deliveryPending')}
-              deliverySentLabel={t('message.deliverySent')}
-              onKeyboardMove={moveMessageFocus}
-              onCancelDelivery={cancelMessageDelivery}
-              onRetryDelivery={retryMessageDelivery}
-              retryDeliveryLabel={t('message.retryDelivery')}
-              runtimeErrorLabel={t('message.runtimeError')}
-              runtimeErrorDescription={describeRuntimeError}
-              sameSender={Boolean(sameSender)}
-              senderName={getSenderName(msg)}
-              thread={thread}
-              threadAvatarFor={threadAvatarFor}
-              threadLabel={
-                thread
-                  ? thread.replyCount === 1
-                    ? t('message.thread.oneReply')
-                    : t('message.thread.replyCount', { count: String(thread.replyCount) })
-                  : undefined
-              }
-              threadLastReplyLabel={
-                thread
-                  ? t('message.thread.lastReply', {
-                      time: formatRelativeTime(thread.lastReplyAt, settings.language),
-                    })
-                  : undefined
-              }
-              threadViewLabel={t('message.thread.view')}
-              replyInThreadLabel={t('message.thread.replyInThread')}
-              addReactionLabel={t('message.reaction.add')}
-              canModify={msg.sender_type === 'human' && msg.sender_id === userId && !msg.delivery}
-              editing={editingMessageId === msg.id}
-              editLabel={t('message.edit')}
-              deleteLabel={t('message.delete')}
-              editedLabel={t('message.edited')}
-              saveLabel={t('message.editSave')}
-              cancelLabel={t('message.editCancel')}
-              onStartEdit={() => setEditingMessageId(msg.id)}
-              onCancelEdit={() => setEditingMessageId(null)}
-              onSubmitEdit={(content) => submitMessageEdit(msg.id, content)}
-              onDelete={() => deleteMessage(msg.id)}
-              broadcastPreamble={
-                isBroadcast(msg) && msg.thread_parent_id
-                  ? t('message.thread.broadcastFrom', {
-                      excerpt: threadRootExcerpt(messages, msg.thread_parent_id),
-                    })
-                  : undefined
-              }
-              reactions={summarizeReactions(reactions.get(msg.id), userId, threadAvatarFor)}
-              onToggleReaction={
-                msg.sender_type === 'system'
-                  ? undefined
-                  : (emoji: string) => toggleReaction(msg.id, emoji)
-              }
-              onOpenThread={
-                msg.sender_type === 'system' ? undefined : () => openThread(msg.id)
-              }
-            />
-          );
-          const marker = unread?.id === msg.id
-            ? <UnreadDivider key={`unread-${msg.id}`} label={t('message.newMessagesLine')} />
-            : null;
-          if (!startsNewDay && !marker) return row;
-          return (
-            <div className="contents" key={`day-${msg.id}`}>
-              {startsNewDay && (
-                <DayDivider
-                  date={msg.created_at}
-                  jumpLabel={t('message.jumpToDate')}
-                  label={formatDayLabel(msg.created_at, t)}
-                  onOpenPicker={(anchor) => {
-                    setJumpDateAnchor(anchor);
-                    setJumpDateError('');
-                    setJumpDateOpen(true);
-                  }}
+        {daySections.map((section) => (
+          <section key={section.key}>
+            {section.date && (
+              <DayDivider
+                date={section.date}
+                jumpLabel={t('message.jumpToDate')}
+                label={formatDayLabel(section.date, t)}
+                onOpenPicker={(anchor) => {
+                  setJumpDateAnchor(anchor);
+                  setJumpDateError('');
+                  setJumpDateOpen(true);
+                }}
+              />
+            )}
+            {section.messages.map(({ index: i, message: msg }, sectionIndex) => {
+              const prevMsg = orderedMessages[i - 1];
+              const startsNewDay = section.date !== null && sectionIndex === 0;
+              const elapsed =
+                (parseMessageTime(msg.created_at)?.getTime() ?? NaN) -
+                (parseMessageTime(prevMsg?.created_at)?.getTime() ?? NaN);
+              const sameSender =
+                prevMsg &&
+                !startsNewDay &&
+                prevMsg.sender_id === msg.sender_id &&
+                // An unusable timestamp gives NaN, which fails this test and simply
+                // leaves the row un-grouped rather than grouping it arbitrarily.
+                elapsed < 5 * 60 * 1000;
+              const thread = threads.get(msg.id);
+              const row = (
+                <MessageRow
+                  mentionNames={mentionNames}
+                  agentBadgeLabel={
+                    msg.sender_type === 'agent' &&
+                    !channelAgents.has(msg.sender_id) &&
+                    pastAgents.get(msg.sender_id)?.departed_at
+                      ? t('agent.departed')
+                      : t('message.agentBadge')
+                  }
+                  avatarUrl={
+                    msg.sender_type === 'agent'
+                      ? channelAgents.get(msg.sender_id)?.avatar_url || agentInfo?.avatar_url
+                      : msg.sender_id === currentProfile?.id
+                        ? currentProfile.avatar_url
+                        : null
+                  }
+                  key={msg.id}
+                  message={msg}
+                  highlighted={highlightedMessageId === msg.id}
+                  cancelDeliveryLabel={t('message.editCancel')}
+                  deliveryFailedLabel={t('message.deliveryFailed')}
+                  deliveryPendingLabel={t('message.deliveryPending')}
+                  deliverySentLabel={t('message.deliverySent')}
+                  onKeyboardMove={moveMessageFocus}
+                  onCancelDelivery={cancelMessageDelivery}
+                  onRetryDelivery={retryMessageDelivery}
+                  retryDeliveryLabel={t('message.retryDelivery')}
+                  runtimeErrorLabel={t('message.runtimeError')}
+                  runtimeErrorDescription={describeRuntimeError}
+                  sameSender={Boolean(sameSender)}
+                  senderName={getSenderName(msg)}
+                  thread={thread}
+                  threadAvatarFor={threadAvatarFor}
+                  threadLabel={
+                    thread
+                      ? thread.replyCount === 1
+                        ? t('message.thread.oneReply')
+                        : t('message.thread.replyCount', { count: String(thread.replyCount) })
+                      : undefined
+                  }
+                  threadLastReplyLabel={
+                    thread
+                      ? t('message.thread.lastReply', {
+                          time: formatRelativeTime(thread.lastReplyAt, settings.language),
+                        })
+                      : undefined
+                  }
+                  threadViewLabel={t('message.thread.view')}
+                  replyInThreadLabel={t('message.thread.replyInThread')}
+                  addReactionLabel={t('message.reaction.add')}
+                  canModify={msg.sender_type === 'human' && msg.sender_id === userId && !msg.delivery}
+                  editing={editingMessageId === msg.id}
+                  editLabel={t('message.edit')}
+                  deleteLabel={t('message.delete')}
+                  editedLabel={t('message.edited')}
+                  saveLabel={t('message.editSave')}
+                  cancelLabel={t('message.editCancel')}
+                  onStartEdit={() => setEditingMessageId(msg.id)}
+                  onCancelEdit={() => setEditingMessageId(null)}
+                  onSubmitEdit={(content) => submitMessageEdit(msg.id, content)}
+                  onDelete={() => deleteMessage(msg.id)}
+                  broadcastPreamble={
+                    isBroadcast(msg) && msg.thread_parent_id
+                      ? t('message.thread.broadcastFrom', {
+                          excerpt: threadRootExcerpt(messages, msg.thread_parent_id),
+                        })
+                      : undefined
+                  }
+                  reactions={summarizeReactions(reactions.get(msg.id), userId, threadAvatarFor)}
+                  onToggleReaction={
+                    msg.sender_type === 'system'
+                      ? undefined
+                      : (emoji: string) => toggleReaction(msg.id, emoji)
+                  }
+                  onOpenThread={
+                    msg.sender_type === 'system' ? undefined : () => openThread(msg.id)
+                  }
                 />
-              )}
-              {marker}
-              {row}
-            </div>
-          );
-        })}
+              );
+              const marker = unread?.id === msg.id
+                ? <UnreadDivider key={`unread-${msg.id}`} label={t('message.newMessagesLine')} />
+                : null;
+              if (!marker) return row;
+              return (
+                <div className="contents" key={`message-marker-${msg.id}`}>
+                  {marker}
+                  {row}
+                </div>
+              );
+            })}
+          </section>
+        ))}
 
         {/* Agent response indicators. A channel may have several agents working in parallel. */}
         {(() => {
