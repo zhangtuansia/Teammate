@@ -1150,8 +1150,8 @@ function SettingsTab({
     }
   }
 
-  async function handleReset() {
-    if (dangerActionRef.current || savingRef.current) return;
+  async function handleReset(): Promise<boolean> {
+    if (dangerActionRef.current || savingRef.current) return false;
     const generation = ++dangerRequestGenerationRef.current;
     const controller = new AbortController();
     dangerRequestControllerRef.current = controller;
@@ -1176,19 +1176,21 @@ function SettingsTab({
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
 
-      if (generation !== dangerRequestGenerationRef.current) return;
+      if (generation !== dangerRequestGenerationRef.current) return false;
       window.location.reload();
+      return true;
     } catch (err) {
       if (
         generation !== dangerRequestGenerationRef.current ||
         (controller.signal.aborted && !timedOut)
-      ) return;
+      ) return false;
       const message = timedOut
         ? t('settings.requestTimedOut')
         : err instanceof Error
           ? err.message
           : t('agentSettings.error.unknown');
       setError(t('agentSettings.error.reset', { message }));
+      return false;
     } finally {
       clearTimeout(timeout);
       if (generation === dangerRequestGenerationRef.current) {
@@ -1201,8 +1203,8 @@ function SettingsTab({
     }
   }
 
-  async function handleDelete() {
-    if (dangerActionRef.current || savingRef.current) return;
+  async function handleDelete(): Promise<boolean> {
+    if (dangerActionRef.current || savingRef.current) return false;
     const generation = ++dangerRequestGenerationRef.current;
     const controller = new AbortController();
     dangerRequestControllerRef.current = controller;
@@ -1227,19 +1229,21 @@ function SettingsTab({
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
 
-      if (generation !== dangerRequestGenerationRef.current) return;
+      if (generation !== dangerRequestGenerationRef.current) return false;
       onDeleted();
+      return true;
     } catch (err) {
       if (
         generation !== dangerRequestGenerationRef.current ||
         (controller.signal.aborted && !timedOut)
-      ) return;
+      ) return false;
       const message = timedOut
         ? t('settings.requestTimedOut')
         : err instanceof Error
           ? err.message
           : t('agentSettings.error.unknown');
       setError(t('agentSettings.error.delete', { message }));
+      return false;
     } finally {
       clearTimeout(timeout);
       if (generation === dangerRequestGenerationRef.current) {
@@ -1876,7 +1880,10 @@ function SettingsTab({
         </h3>
         <div className="space-y-2 rounded-lg border border-destructive/20 p-3">
           <Button
-            onClick={() => setPendingDangerAction('reset')}
+            onClick={() => {
+              setError('');
+              setPendingDangerAction('reset');
+            }}
             loading={resetting}
             disabled={saving || deleting}
             variant="ghost"
@@ -1886,7 +1893,10 @@ function SettingsTab({
           </Button>
           <Separator />
           <Button
-            onClick={() => setPendingDangerAction('delete')}
+            onClick={() => {
+              setError('');
+              setPendingDangerAction('delete');
+            }}
             loading={deleting}
             disabled={saving || resetting}
             variant="ghost"
@@ -1921,6 +1931,11 @@ function SettingsTab({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
+            {error && (
+              <p className="mr-auto self-center text-sm text-destructive" role="alert">
+                {error}
+              </p>
+            )}
             <Button
               disabled={resetting || deleting}
               onClick={() => setPendingDangerAction(null)}
@@ -1930,9 +1945,12 @@ function SettingsTab({
             <Button
               loading={resetting || deleting}
               onClick={async () => {
-                if (pendingDangerAction === 'reset') await handleReset();
-                else if (pendingDangerAction === 'delete') await handleDelete();
-                setPendingDangerAction(null);
+                const succeeded = pendingDangerAction === 'reset'
+                  ? await handleReset()
+                  : pendingDangerAction === 'delete'
+                    ? await handleDelete()
+                    : false;
+                if (succeeded) setPendingDangerAction(null);
               }}
               variant="destructive">
               {pendingDangerAction === 'reset'

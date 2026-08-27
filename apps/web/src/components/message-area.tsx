@@ -89,12 +89,19 @@ const AGENT_RESPONSE_TIMEOUT_MS = 130_000;
  */
 const THINKING_VISIBLE_AFTER_MS = 2_500;
 const MESSAGE_REQUEST_TIMEOUT_MS = 18_000;
+const READ_DWELL_MS = 600;
+const READ_WRITE_RETRY_LIMIT = 5;
 
 function persistDraft(key: string | null, content: string) {
   if (!key || typeof window === 'undefined') return;
   try {
-    if (content.trim()) window.sessionStorage.setItem(key, content);
-    else window.sessionStorage.removeItem(key);
+    if (content.trim()) {
+      window.localStorage.setItem(key, content);
+      window.sessionStorage.removeItem(key);
+    } else {
+      window.localStorage.removeItem(key);
+      window.sessionStorage.removeItem(key);
+    }
   } catch {
     // Draft persistence is a convenience; storage restrictions must never block chat.
   }
@@ -115,6 +122,80 @@ interface Message {
   motion?: 'send' | 'receive';
   delivery?: 'pending' | 'sent' | 'failed';
   deliveryError?: string;
+}
+
+interface ChannelVisitSnapshot {
+  atBottom: boolean;
+  hasMore: boolean;
+  messages: Message[];
+  savedAt: number;
+  scrolledUp: boolean;
+  scrollAnchorId: string | null;
+  scrollAnchorOffset: number;
+  scrollTop: number;
+}
+
+const CHANNEL_VISIT_CACHE_LIMIT = 12;
+const CHANNEL_VISIT_CACHE_MAX_AGE_MS = 30 * 60 * 1_000;
+const channelVisitCache = new Map<string, ChannelVisitSnapshot>();
+
+function readChannelVisitSnapshot(key: string) {
+  const snapshot = channelVisitCache.get(key);
+  if (!snapshot) return null;
+  if (Date.now() - snapshot.savedAt > CHANNEL_VISIT_CACHE_MAX_AGE_MS) {
+    channelVisitCache.delete(key);
+    return null;
+  }
+  // Map insertion order doubles as a tiny LRU. A warm channel stays warm when
+  // someone moves between the same few conversations all day.
+  channelVisitCache.delete(key);
+  channelVisitCache.set(key, snapshot);
+  return snapshot;
+}
+
+function writeChannelVisitSnapshot(key: string, snapshot: ChannelVisitSnapshot) {
+  channelVisitCache.delete(key);
+  channelVisitCache.set(key, snapshot);
+  while (channelVisitCache.size > CHANNEL_VISIT_CACHE_LIMIT) {
+    const oldestKey = channelVisitCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    channelVisitCache.delete(oldestKey);
+  }
+}
+
+function captureChannelScrollAnchor(container: HTMLDivElement | null) {
+  if (!container) return { id: null as string | null, offset: 0 };
+  const containerTop = container.getBoundingClientRect().top;
+  const row = Array.from(
+    container.querySelectorAll<HTMLElement>('[id^="message-"]'),
+  ).find((candidate) => candidate.getBoundingClientRect().bottom > containerTop + 1);
+  if (!row) return { id: null as string | null, offset: 0 };
+  return {
+    id: row.id.slice('message-'.length),
+    offset: row.getBoundingClientRect().top - containerTop,
+  };
+}
+
+function restoreChannelVisitScroll(
+  container: HTMLDivElement,
+  snapshot: ChannelVisitSnapshot,
+) {
+  if (snapshot.atBottom) {
+    container.scrollTop = container.scrollHeight;
+    return;
+  }
+  if (snapshot.scrollAnchorId) {
+    const anchor = document.getElementById(`message-${snapshot.scrollAnchorId}`);
+    if (anchor) {
+      const offset = anchor.getBoundingClientRect().top - container.getBoundingClientRect().top;
+      container.scrollTop += offset - snapshot.scrollAnchorOffset;
+      return;
+    }
+  }
+  container.scrollTop = Math.min(
+    snapshot.scrollTop,
+    Math.max(0, container.scrollHeight - container.clientHeight),
+  );
 }
 
 /** The first line of the thread root, for the "also sent to channel" line. */
@@ -645,7 +726,9 @@ interface MessageRowProps {
   deliverySentLabel: string;
   deliveryFailedLabel: string;
   retryDeliveryLabel: string;
+  cancelDeliveryLabel: string;
   onRetryDelivery: (messageId: string) => void;
+  onCancelDelivery: (messageId: string) => void;
   onKeyboardMove?: (
     messageId: string,
     direction: 'previous' | 'next' | 'first' | 'last',
@@ -666,7 +749,9 @@ const MessageRow = memo(function MessageRow({
   deliverySentLabel,
   deliveryFailedLabel,
   retryDeliveryLabel,
+  cancelDeliveryLabel,
   onRetryDelivery,
+  onCancelDelivery,
   onKeyboardMove,
   highlighted,
   thread,
@@ -963,15 +1048,26 @@ const MessageRow = memo(function MessageRow({
                   : deliveryFailedLabel}
             </span>
             {message.delivery === 'failed' && (
-              <Button
-                className="h-5 gap-1 px-1.5 text-[11px]"
-                onClick={() => onRetryDelivery(message.id)}
-                size="xs"
-                variant="ghost"
-              >
-                <RotateCcwIcon aria-hidden="true" className="size-3" />
-                {retryDeliveryLabel}
-              </Button>
+              <>
+                <Button
+                  className="h-5 gap-1 px-1.5 text-[11px]"
+                  onClick={() => onRetryDelivery(message.id)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <RotateCcwIcon aria-hidden="true" className="size-3" />
+                  {retryDeliveryLabel}
+                </Button>
+                <Button
+                  className="h-5 gap-1 px-1.5 text-[11px]"
+                  onClick={() => onCancelDelivery(message.id)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <XIcon aria-hidden="true" className="size-3" />
+                  {cancelDeliveryLabel}
+                </Button>
+              </>
             )}
           </div>
         )}
@@ -1015,7 +1111,7 @@ export function MessageArea(props: MessageAreaProps) {
     );
   }
 
-  const scopeKey = `${server.id}:${props.channel?.id || 'empty'}`;
+  const scopeKey = `${server.viewerId}:${server.id}:${props.channel?.id || 'empty'}`;
   return <MessageAreaContent key={scopeKey} {...props} />;
 }
 
@@ -1031,8 +1127,20 @@ function MessageAreaContent({
   const targetThreadId = searchParams.get('thread');
   const targetReplyId = searchParams.get('reply');
   const requestedMainMessageId = targetThreadId || targetMessageId;
+  const channelId = channel?.id;
+  const channelVisitCacheKey = channelId
+    ? `${server.viewerId}:${server.id}:${channelId}`
+    : null;
+  const [initialChannelVisit] = useState<ChannelVisitSnapshot | null>(
+    () => channelVisitCacheKey && !requestedMainMessageId
+      ? readChannelVisitSnapshot(channelVisitCacheKey)
+      : null,
+  );
+  // MessageAreaContent is keyed by channel, so this is deliberately the
+  // snapshot from the instant the visit began, not a moving cache lookup.
+  const initialChannelVisitRef = useRef(initialChannelVisit);
   const [conversationView, setConversationView] = useState<'messages' | 'about'>('messages');
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(() => initialChannelVisit?.messages ?? []);
   // Replies keyed by the message they hang off. Kept beside the transcript
   // rather than inside it: they are not part of the main flow, and the parent
   // only needs a count and who took part.
@@ -1042,6 +1150,9 @@ function MessageAreaContent({
   // Captured once per channel visit. The marker is drawn from this, so it holds
   // still while you read instead of chasing the newest message.
   const [unreadBoundarySeq, setUnreadBoundarySeq] = useState<number | null>(null);
+  const [readStateReadyFor, setReadStateReadyFor] = useState<string | null>(null);
+  const [readStateReloadToken, setReadStateReloadToken] = useState(0);
+  const [readStateWriteRetryToken, setReadStateWriteRetryToken] = useState(0);
   // Reactions keyed by message. Like threads, they hang off the transcript
   // rather than living in it — a reaction never reorders or reflows the flow.
   const [reactions, setReactions] = useState<Map<string, ReactionRow[]>>(new Map());
@@ -1158,13 +1269,15 @@ function MessageAreaContent({
   }, []);
   const [sendError, setSendError] = useState("");
   const [sendWarning, setSendWarning] = useState("");
-  const [snapshotChannelId, setSnapshotChannelId] = useState<string | null>(null);
+  const [snapshotChannelId, setSnapshotChannelId] = useState<string | null>(
+    initialChannelVisit && channelId ? channelId : null,
+  );
   const [channelLoadError, setChannelLoadError] = useState("");
   const [channelLoadTimedOut, setChannelLoadTimedOut] = useState(false);
   const [realtimeWarning, setRealtimeWarning] = useState("");
   const [agentDirectoryError, setAgentDirectoryError] = useState("");
   const [channelReloadToken, setChannelReloadToken] = useState(0);
-  const [userId, setUserId] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(server.viewerId);
   const [identityLoading, setIdentityLoading] = useState(true);
   const [identityError, setIdentityError] = useState("");
   const [identityReloadToken, setIdentityReloadToken] = useState(0);
@@ -1183,12 +1296,17 @@ function MessageAreaContent({
   const [failedAgentIds, setFailedAgentIds] = useState<string[]>([]);
   const [timedOutAgentIds, setTimedOutAgentIds] = useState<string[]>([]);
   const [newMessageCount, setNewMessageCount] = useState(0);
+  const [transcriptNearBottom, setTranscriptNearBottom] = useState(
+    initialChannelVisit?.atBottom ?? true,
+  );
+  const [visibleLatestMessageId, setVisibleLatestMessageId] = useState<string | null>(null);
+  const [pageAttentive, setPageAttentive] = useState(false);
   // Scrolled far enough up that getting back means dragging. The ref alone
   // could not drive this: reading history with nothing new left no way down
   // except scrolling all the way.
-  const [scrolledUp, setScrolledUp] = useState(false);
+  const [scrolledUp, setScrolledUp] = useState(initialChannelVisit?.scrolledUp ?? false);
   const [liveAnnouncement, setLiveAnnouncement] = useState<{ id: string; text: string } | null>(null);
-  const [hasMore, setHasMore] = useState(true);
+  const [hasMore, setHasMore] = useState(initialChannelVisit?.hasMore ?? true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [olderMessagesError, setOlderMessagesError] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -1219,7 +1337,21 @@ function MessageAreaContent({
   const typingStartedAtRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const isNearBottomRef = useRef(true);
+  const isNearBottomRef = useRef(initialChannelVisit?.atBottom ?? true);
+  const transcriptScrollStateRef = useRef({
+    atBottom: initialChannelVisit?.atBottom ?? true,
+    scrolledUp: initialChannelVisit?.scrolledUp ?? false,
+    scrollTop: initialChannelVisit?.scrollTop ?? 0,
+  });
+  const messagesRef = useRef(messages);
+  const hasMoreRef = useRef(hasMore);
+  const latestMessageVisibilityRef = useRef<{ id: string | null; visible: boolean }>({
+    id: null,
+    visible: false,
+  });
+  const persistedReadStateRef = useRef<{ key: string; seq: number } | null>(null);
+  const readStateRetryCountRef = useRef(0);
+  const readStateWriteRetryRef = useRef({ attempts: 0, target: '' });
   const inputRef = useRef<TiptapMessageInputHandle>(null);
   const userIdRef = useRef<string | null>(null);
   const channelAgentsRef = useRef<Map<string, AgentInfo>>(new Map());
@@ -1230,6 +1362,17 @@ function MessageAreaContent({
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const messageRealtimeRef = useRef({ generation: 0, ready: false });
   const supabase = createClient();
+
+  useLayoutEffect(() => {
+    messagesRef.current = messages;
+    hasMoreRef.current = hasMore;
+  }, [hasMore, messages]);
+
+  const updateTranscriptNearBottom = useCallback((nearBottom: boolean) => {
+    isNearBottomRef.current = nearBottom;
+    transcriptScrollStateRef.current.atBottom = nearBottom;
+    setTranscriptNearBottom(nearBottom);
+  }, []);
 
   // Several paths merge into this list — the initial load, the catch-up poll,
   // realtime, and "load older". Sorting once here means none of them can leave
@@ -1269,10 +1412,31 @@ function MessageAreaContent({
     focusMessageAtIndex(Math.max(0, Math.min(orderedMessages.length - 1, currentIndex + offset)));
   }, [focusMessageAtIndex, orderedMessages]);
 
+  const editLastOwnMessage = useCallback(() => {
+    if (!userId) return false;
+    for (let index = orderedMessages.length - 1; index >= 0; index -= 1) {
+      const message = orderedMessages[index];
+      if (
+        message.sender_type !== 'human' ||
+        message.sender_id !== userId ||
+        message.delivery
+      ) continue;
+      setEditingMessageId(message.id);
+      window.requestAnimationFrame(() => {
+        document.getElementById(`message-${message.id}`)?.scrollIntoView({ block: 'nearest' });
+      });
+      return true;
+    }
+    return false;
+  }, [orderedMessages, userId]);
+
   const unread = useMemo(() => {
+    const readStateKey = channelId && userId ? `${channelId}:${userId}` : null;
+    if (!readStateKey || readStateReadyFor !== readStateKey) return null;
     if (unreadBoundarySeq === null || unreadBoundarySeq === 0) return null;
     const firstUnread = orderedMessages.find(
       (message) =>
+        message.channel_id === channelId &&
         typeof message.seq === 'number' &&
         message.seq > unreadBoundarySeq &&
         message.sender_id !== userId,
@@ -1280,12 +1444,13 @@ function MessageAreaContent({
     if (!firstUnread) return null;
     const count = orderedMessages.filter(
       (message) =>
+        message.channel_id === channelId &&
         typeof message.seq === 'number' &&
         message.seq > unreadBoundarySeq &&
         message.sender_id !== userId,
     ).length;
     return { count, id: firstUnread.id };
-  }, [orderedMessages, unreadBoundarySeq, userId]);
+  }, [channelId, orderedMessages, readStateReadyFor, unreadBoundarySeq, userId]);
 
   // Which rows open a new day. Walking the list once and carrying the last day
   // we could actually read means a row with an unusable timestamp is skipped
@@ -1310,7 +1475,6 @@ function MessageAreaContent({
   // oldest loaded message re-runs this for the initial load and for "load
   // older"; anything arriving at the tail comes in over realtime.
   const oldestMessageId = messages[0]?.id;
-  const channelId = channel?.id;
   useEffect(() => {
     if (!channelId || !oldestMessageId) return;
     const controller = new AbortController();
@@ -1506,7 +1670,7 @@ function MessageAreaContent({
   }, [soonestPending]);
   const { settings, t } = useAppSettings();
 
-  const readStateChannelId = channel?.id;
+  const readStateChannelId = channelId;
 
   /**
    * Whether the backlog banner has done its job in this channel.
@@ -1525,8 +1689,46 @@ function MessageAreaContent({
   const [backlogSeenIn, setBacklogSeenIn] = useState<string | null>(null);
   const backlogSeen = backlogSeenIn === readStateChannelId;
 
+  const latestReadTarget = useMemo(() => {
+    let latest: { id: string; seq: number } | null = null;
+    for (const message of messages) {
+      if (message.channel_id !== readStateChannelId) continue;
+      if (typeof message.seq !== 'number') continue;
+      if (!latest || message.seq > latest.seq) latest = { id: message.id, seq: message.seq };
+    }
+    return latest;
+  }, [messages, readStateChannelId]);
+  const latestSeq = latestReadTarget?.seq ?? 0;
+  const latestMessageVisible = visibleLatestMessageId === latestReadTarget?.id;
+  const readStateKey = readStateChannelId && userId
+    ? `${readStateChannelId}:${userId}`
+    : null;
+
   useEffect(() => {
-    if (!unread || backlogSeen || !readStateChannelId) return;
+    const updateAttention = () => {
+      setPageAttentive(document.visibilityState === 'visible' && document.hasFocus());
+    };
+    const loseAttention = () => setPageAttentive(false);
+    updateAttention();
+    window.addEventListener('focus', updateAttention);
+    window.addEventListener('blur', loseAttention);
+    document.addEventListener('visibilitychange', updateAttention);
+    return () => {
+      window.removeEventListener('focus', updateAttention);
+      window.removeEventListener('blur', loseAttention);
+      document.removeEventListener('visibilitychange', updateAttention);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      conversationView !== 'messages' ||
+      snapshotChannelId !== readStateChannelId ||
+      !unread ||
+      backlogSeen ||
+      !readStateChannelId ||
+      !pageAttentive
+    ) return;
     const target = document.getElementById(`message-${unread.id}`);
     if (!target) return;
     const observer = new IntersectionObserver(
@@ -1539,21 +1741,45 @@ function MessageAreaContent({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [backlogSeen, readStateChannelId, unread]);
-  const latestSeq = useMemo(() => {
-    let highest = 0;
-    for (const message of messages) {
-      if (typeof message.seq === 'number' && message.seq > highest) highest = message.seq;
-    }
-    return highest;
-  }, [messages]);
+  }, [
+    backlogSeen,
+    conversationView,
+    pageAttentive,
+    readStateChannelId,
+    snapshotChannelId,
+    unread,
+  ]);
+
+  useEffect(() => {
+    const targetId = latestReadTarget?.id ?? null;
+    latestMessageVisibilityRef.current = { id: targetId, visible: false };
+    if (
+      conversationView !== 'messages' ||
+      snapshotChannelId !== readStateChannelId ||
+      !targetId
+    ) return;
+    const target = document.getElementById(`message-${targetId}`);
+    const root = scrollContainerRef.current;
+    if (!target || !root) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const visible = entry.isIntersecting && entry.intersectionRatio > 0;
+        latestMessageVisibilityRef.current = { id: targetId, visible };
+        setVisibleLatestMessageId(visible ? targetId : null);
+      },
+      { root, threshold: [0, 0.01] },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [conversationView, latestReadTarget?.id, readStateChannelId, snapshotChannelId]);
 
   // Read where the person had got to before showing them anything, so the
   // marker reflects the visit they are starting rather than the one they just
   // finished.
   useEffect(() => {
-    if (!readStateChannelId || !userId) return;
+    if (!readStateChannelId || !userId || !readStateKey) return;
     let active = true;
+    let retryTimer: number | null = null;
     void (async () => {
       const { data, error } = await supabase
         .from('channel_read_state')
@@ -1562,19 +1788,91 @@ function MessageAreaContent({
         .eq('user_id', userId)
         .maybeSingle();
       if (!active) return;
-      setUnreadBoundarySeq(error ? 0 : Number((data as { last_read_seq?: number } | null)?.last_read_seq ?? 0));
+      if (error) {
+        persistedReadStateRef.current = null;
+        setReadStateReadyFor(null);
+        const retryDelay = Math.min(5_000, 500 * 2 ** readStateRetryCountRef.current);
+        readStateRetryCountRef.current += 1;
+        retryTimer = window.setTimeout(
+          () => setReadStateReloadToken((token) => token + 1),
+          retryDelay,
+        );
+        return;
+      }
+      readStateRetryCountRef.current = 0;
+      const lastReadSeq = Number(
+        (data as { last_read_seq?: number } | null)?.last_read_seq ?? 0,
+      );
+      persistedReadStateRef.current = { key: readStateKey, seq: lastReadSeq };
+      setUnreadBoundarySeq(lastReadSeq);
+      setReadStateReadyFor(readStateKey);
     })();
     return () => {
       active = false;
+      if (retryTimer) window.clearTimeout(retryTimer);
     };
-  }, [readStateChannelId, supabase, userId]);
+  }, [readStateChannelId, readStateKey, readStateReloadToken, supabase, userId]);
 
-  // Catching up is what marks a channel read: the newest message is only read
-  // once it has actually been on screen.
+  // A channel advances only while the person can actually be attending to it:
+  // the app is foregrounded and focused, the transcript is caught up, and the
+  // newest row has remained on screen for a short dwell.
   useEffect(() => {
-    if (!readStateChannelId || !userId || latestSeq === 0) return;
-    if (!isNearBottomRef.current) return;
+    if (!readStateChannelId || !userId || !readStateKey || latestSeq === 0) return;
+    const writeTarget = `${readStateKey}:${latestSeq}`;
+    if (readStateWriteRetryRef.current.target !== writeTarget) {
+      readStateWriteRetryRef.current = { attempts: 0, target: writeTarget };
+    }
+    if (conversationView !== 'messages' || snapshotChannelId !== readStateChannelId) return;
+    if (readStateReadyFor !== readStateKey) return;
+    if (!pageAttentive || !transcriptNearBottom || !latestMessageVisible) return;
+    if (
+      persistedReadStateRef.current?.key === readStateKey &&
+      (persistedReadStateRef.current?.seq ?? 0) >= latestSeq
+    ) {
+      return;
+    }
+    let active = true;
+    let retryTimer: number | null = null;
+    const markPersisted = (seq: number) => {
+      if (!active) return;
+      persistedReadStateRef.current = { key: readStateKey, seq };
+      readStateWriteRetryRef.current = { attempts: 0, target: writeTarget };
+    };
+    const scheduleWriteRetry = () => {
+      if (!active || readStateWriteRetryRef.current.target !== writeTarget) return;
+      const attempts = readStateWriteRetryRef.current.attempts;
+      const retryAttempts = Math.max(0, attempts - 1);
+      if (retryAttempts >= READ_WRITE_RETRY_LIMIT) return;
+      const delay = Math.min(5_000, 500 * 2 ** retryAttempts);
+      retryTimer = window.setTimeout(() => {
+        if (active) setReadStateWriteRetryToken((token) => token + 1);
+      }, delay);
+    };
     const timer = setTimeout(() => {
+      const visibility = latestMessageVisibilityRef.current;
+      if (
+        document.visibilityState !== 'visible' ||
+        !document.hasFocus() ||
+        !isNearBottomRef.current ||
+        visibility.id !== latestReadTarget?.id ||
+        !visibility.visible
+      ) {
+        return;
+      }
+      const writeState = readStateWriteRetryRef.current;
+      if (
+        writeState.target !== writeTarget ||
+        writeState.attempts > READ_WRITE_RETRY_LIMIT
+      ) {
+        return;
+      }
+      // Count requests when they actually start. This keeps the initial write
+      // plus five retries as a hard ceiling even if focus or visibility changes
+      // while a backoff timer is pending.
+      readStateWriteRetryRef.current = {
+        attempts: writeState.attempts + 1,
+        target: writeTarget,
+      };
       void (async () => {
         // The local adapter has no upsert, and one row per person per channel
         // is cheap enough that update-then-insert beats widening the protocol.
@@ -1583,17 +1881,72 @@ function MessageAreaContent({
           .update({ last_read_seq: latestSeq })
           .eq('channel_id', readStateChannelId)
           .eq('user_id', userId)
+          .lt('last_read_seq', latestSeq)
           .select('channel_id');
-        if (!updated.error && (updated.data as unknown[] | null)?.length) return;
-        await supabase.from('channel_read_state').insert({
+        if (!active) return;
+        if (!updated.error && (updated.data as unknown[] | null)?.length) {
+          markPersisted(latestSeq);
+          return;
+        }
+        if (updated.error) {
+          scheduleWriteRetry();
+          return;
+        }
+        const current = await supabase
+          .from('channel_read_state')
+          .select('last_read_seq')
+          .eq('channel_id', readStateChannelId)
+          .eq('user_id', userId)
+          .maybeSingle();
+        if (!active) return;
+        if (current.error) {
+          scheduleWriteRetry();
+          return;
+        }
+        const currentSeq = Number(
+          (current.data as { last_read_seq?: number } | null)?.last_read_seq ?? 0,
+        );
+        if (current.data && currentSeq >= latestSeq) {
+          markPersisted(currentSeq);
+          return;
+        }
+        if (current.data) {
+          scheduleWriteRetry();
+          return;
+        }
+        const inserted = await supabase.from('channel_read_state').insert({
           channel_id: readStateChannelId,
           last_read_seq: latestSeq,
           user_id: userId,
         });
+        if (!active) return;
+        if (!inserted.error) {
+          markPersisted(latestSeq);
+        } else {
+          scheduleWriteRetry();
+        }
       })();
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [latestSeq, readStateChannelId, supabase, userId]);
+    }, READ_DWELL_MS);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [
+    conversationView,
+    latestMessageVisible,
+    latestReadTarget?.id,
+    latestSeq,
+    pageAttentive,
+    readStateChannelId,
+    readStateKey,
+    readStateReadyFor,
+    readStateWriteRetryToken,
+    snapshotChannelId,
+    supabase,
+    transcriptNearBottom,
+    userId,
+  ]);
 
   const submitMessageEdit = useCallback(
     (messageId: string, content: string) => {
@@ -1700,18 +2053,40 @@ function MessageAreaContent({
     return parsed.detail || t('message.runtimeErrorUnknown');
   }, [t]);
   const draftChannelId = channel?.id || null;
-  const draftStorageKey = useMemo(
+  const legacyDraftStorageKey = useMemo(
     () => draftChannelId ? `${DRAFT_STORAGE_PREFIX}${draftChannelId}` : null,
     [draftChannelId],
+  );
+  const draftStorageKey = useMemo(
+    () => draftChannelId && userId
+      ? `${DRAFT_STORAGE_PREFIX}${userId}:${server.id}:${draftChannelId}`
+      : null,
+    [draftChannelId, server.id, userId],
   );
   const initialDraft = useMemo(() => {
     if (!draftStorageKey || typeof window === 'undefined') return '';
     try {
-      return window.sessionStorage.getItem(draftStorageKey) || '';
+      const persisted = window.localStorage.getItem(draftStorageKey);
+      const legacyDraft = legacyDraftStorageKey &&
+        process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === 'true'
+        ? window.localStorage.getItem(legacyDraftStorageKey) ||
+          window.sessionStorage.getItem(legacyDraftStorageKey) ||
+          ''
+        : '';
+      // Legacy keys had no account boundary. Only the single-user local mode
+      // can safely claim one; hosted mode discards them rather than exposing a
+      // previous account's private draft.
+      if (legacyDraftStorageKey) {
+        window.localStorage.removeItem(legacyDraftStorageKey);
+        window.sessionStorage.removeItem(legacyDraftStorageKey);
+      }
+      if (persisted !== null) return persisted;
+      if (legacyDraft) window.localStorage.setItem(draftStorageKey, legacyDraft);
+      return legacyDraft;
     } catch {
       return '';
     }
-  }, [draftStorageKey]);
+  }, [draftStorageKey, legacyDraftStorageKey]);
   const latestDraftRef = useRef(initialDraft);
   const mentionAgents = useMemo(() => {
     if (mentionQuery === null || channel?.type === 'dm') return [];
@@ -1776,6 +2151,57 @@ function MessageAreaContent({
     sentReceiptTimersRef.current.clear();
     abortMessageRequests();
   }, [abortMessageRequests]);
+
+  useLayoutEffect(() => {
+    const visit = initialChannelVisitRef.current;
+    if (!visit || !channelId) return;
+    const restore = () => {
+      const element = scrollContainerRef.current;
+      if (!element) return;
+      restoreChannelVisitScroll(element, visit);
+      transcriptScrollStateRef.current.scrollTop = element.scrollTop;
+    };
+    restore();
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      restore();
+      secondFrame = window.requestAnimationFrame(restore);
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [channelId]);
+
+  useLayoutEffect(() => () => {
+    if (!channelVisitCacheKey || !channelId) return;
+    const cachedMessages = messagesRef.current
+      .filter((message) => message.channel_id === channelId)
+      .map((message) => {
+        const stable = message.motion ? { ...message, motion: undefined } : message;
+        // Switching channels aborts the visit-scoped request. Keep the text,
+        // but make the interrupted row actionable when the person returns.
+        return stable.delivery === 'pending'
+          ? { ...stable, delivery: 'failed' as const, deliveryError: undefined }
+          : stable;
+    });
+    if (cachedMessages.length === 0) {
+      channelVisitCache.delete(channelVisitCacheKey);
+      return;
+    }
+    const element = scrollContainerRef.current;
+    const scrollAnchor = captureChannelScrollAnchor(element);
+    writeChannelVisitSnapshot(channelVisitCacheKey, {
+      atBottom: isNearBottomRef.current,
+      hasMore: hasMoreRef.current,
+      messages: cachedMessages,
+      savedAt: Date.now(),
+      scrolledUp: transcriptScrollStateRef.current.scrolledUp,
+      scrollAnchorId: scrollAnchor.id,
+      scrollAnchorOffset: scrollAnchor.offset,
+      scrollTop: element?.scrollTop ?? transcriptScrollStateRef.current.scrollTop,
+    });
+  }, [channelId, channelVisitCacheKey]);
 
   useEffect(() => {
     const sentMessageIds = new Set(
@@ -1853,6 +2279,13 @@ function MessageAreaContent({
   }, [messages]);
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setHasContent(initialDraft.trim().length > 0);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [draftStorageKey, initialDraft]);
+
+  useEffect(() => {
     latestDraftRef.current = initialDraft;
     const draftValueRef = latestDraftRef;
     return () => {
@@ -1865,8 +2298,8 @@ function MessageAreaContent({
   }, [draftStorageKey, initialDraft]);
 
   const scheduleDraftSave = useCallback((content: string) => {
-    if (!draftStorageKey) return;
     latestDraftRef.current = content;
+    if (!draftStorageKey) return;
     if (draftSaveTimeoutRef.current) clearTimeout(draftSaveTimeoutRef.current);
     const key = draftStorageKey;
     draftSaveTimeoutRef.current = setTimeout(() => {
@@ -2092,24 +2525,52 @@ function MessageAreaContent({
     if (!channel) return;
     const channelId = channel.id;
     const channelType = channel.type;
+    const isInitialChannelGeneration = channelGenerationRef.current === 0;
+    const visitSnapshot = isInitialChannelGeneration && !requestedMainMessageId
+      ? initialChannelVisitRef.current
+      : null;
+    initialChannelVisitRef.current = null;
     currentChannelIdRef.current = channelId;
     const generation = channelGenerationRef.current + 1;
     channelGenerationRef.current = generation;
     messageRealtimeRef.current = { generation, ready: false };
     soundReadyGenerationRef.current = 0;
-    seenMessageIdsRef.current = new Set();
+    seenMessageIdsRef.current = new Set(
+      (isInitialChannelGeneration ? visitSnapshot?.messages ?? [] : messagesRef.current)
+        .map((message) => message.id),
+    );
     let cancelled = false;
+    let canonicalMessageLoadApplied = false;
+    const bufferedMessageEvents: Array<
+      | { kind: 'insert' | 'update'; message: Message }
+      | { kind: 'delete'; messageId: string }
+    > = [];
+    let messageSubscriptionReady = false;
+    let canonicalLoadStarted = false;
+    let canonicalLoadInFlight = false;
+    let postSubscribeCatchUpNeeded = false;
     const isCurrent = () => !cancelled && channelGenerationRef.current === generation;
     const agentDirectoryRefresh = createTrailingRefreshScheduler(loadAgentMembers, 120);
 
     const resetFrame = window.requestAnimationFrame(() => {
       if (!isCurrent()) return;
-      setSnapshotChannelId(null);
+      if (isInitialChannelGeneration) {
+        const atBottom = visitSnapshot?.atBottom ?? !requestedMainMessageId;
+        updateTranscriptNearBottom(atBottom);
+        transcriptScrollStateRef.current = {
+          atBottom,
+          scrolledUp: visitSnapshot?.scrolledUp ?? false,
+          scrollTop: visitSnapshot?.scrollTop ?? 0,
+        };
+        setScrolledUp(visitSnapshot?.scrolledUp ?? false);
+        setSnapshotChannelId(visitSnapshot ? channelId : null);
+        setMessages(visitSnapshot?.messages ?? []);
+        setHasMore(visitSnapshot?.hasMore ?? true);
+      }
       setChannelLoadError("");
       setChannelLoadTimedOut(false);
       setRealtimeWarning("");
       setAgentDirectoryError("");
-      setMessages([]);
       setHasContent(initialDraft.trim().length > 0);
       setAgentInfo(null);
       channelAgentsRef.current = new Map();
@@ -2131,14 +2592,15 @@ function MessageAreaContent({
       handledSearchTargetRef.current = '';
       setConversationView('messages');
       setOpenThreadId(null);
-      setHasMore(true);
       setLoadingMore(false);
       loadingMoreRef.current = false;
       setOlderMessagesError("");
       void loadMessages();
       void agentDirectoryRefresh.runNow();
     });
-    isNearBottomRef.current = !requestedMainMessageId;
+    if (isInitialChannelGeneration) {
+      isNearBottomRef.current = visitSnapshot?.atBottom ?? !requestedMainMessageId;
+    }
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = null;
@@ -2215,7 +2677,34 @@ function MessageAreaContent({
       void agentDirectoryRefresh.runNow();
     };
 
-    async function loadMessages() {
+    function captureCatchUpVisitSnapshot(): ChannelVisitSnapshot | null {
+      const currentMessages = messagesRef.current.filter(
+        (message) => message.channel_id === channelId,
+      );
+      if (currentMessages.length === 0) return null;
+      const element = scrollContainerRef.current;
+      const scrollAnchor = captureChannelScrollAnchor(element);
+      return {
+        atBottom: isNearBottomRef.current,
+        hasMore: hasMoreRef.current,
+        messages: currentMessages,
+        savedAt: Date.now(),
+        scrolledUp: transcriptScrollStateRef.current.scrolledUp,
+        scrollAnchorId: scrollAnchor.id,
+        scrollAnchorOffset: scrollAnchor.offset,
+        scrollTop: element?.scrollTop ?? transcriptScrollStateRef.current.scrollTop,
+      };
+    }
+
+    async function loadMessages(catchUpVisitSnapshot?: ChannelVisitSnapshot | null) {
+      if (!isCurrent() || canonicalLoadInFlight) return;
+      const loadVisitSnapshot = canonicalLoadStarted
+        ? catchUpVisitSnapshot ?? null
+        : visitSnapshot;
+      canonicalLoadStarted = true;
+      canonicalLoadInFlight = true;
+      canonicalMessageLoadApplied = false;
+      if (!messageSubscriptionReady) postSubscribeCatchUpNeeded = true;
       const controller = beginMessageRequest();
       try {
         const { data, error } = await supabase
@@ -2245,6 +2734,74 @@ function MessageAreaContent({
         }
         if (isCurrent()) {
           const reversed = (data as Message[]).reverse();
+          const didRevalidateVisitHistory = Boolean(
+            loadVisitSnapshot && !loadVisitSnapshot.atBottom,
+          );
+          const revalidatedVisitMessages: Message[] = [];
+          const bridgedVisitMessages: Message[] = [];
+          if (didRevalidateVisitHistory && loadVisitSnapshot) {
+            const cachedNumericSeqs = loadVisitSnapshot.messages.flatMap((message) =>
+              typeof message.seq === 'number' ? [message.seq] : []);
+            const latestNumericSeqs = reversed.flatMap((message) =>
+              typeof message.seq === 'number' ? [message.seq] : []);
+            const latestIds = new Set(reversed.map((message) => message.id));
+            const cachedIds = Array.from(new Set(
+              loadVisitSnapshot.messages
+                .filter((message) =>
+                  typeof message.seq === 'number' && !latestIds.has(message.id))
+                .map((message) => message.id),
+            ));
+            // A warm transcript can contain more than the newest page. Validate
+            // those exact rows in bounded batches so edits, deletes, and changed
+            // thread-broadcast state are reconciled without collapsing the
+            // reader's history position.
+            for (let offset = 0; offset < cachedIds.length; offset += 75) {
+              const ids = cachedIds.slice(offset, offset + 75);
+              const cachedResult = await supabase
+                .from('messages')
+                .select('*')
+                .eq('channel_id', channelId)
+                .in('id', ids)
+                .abortSignal(controller.signal);
+              if (!isCurrent()) return;
+              if (cachedResult.error || !cachedResult.data) {
+                throw new Error(cachedResult.error?.message || t('conversation.loadFailed'));
+              }
+              for (const message of cachedResult.data as Message[]) {
+                if (!message.thread_parent_id || isBroadcast(message)) {
+                  revalidatedVisitMessages.push(message);
+                }
+              }
+            }
+            if (cachedNumericSeqs.length > 0 && latestNumericSeqs.length > 0) {
+              let bridgeCursor = Math.max(...cachedNumericSeqs);
+              const latestPageStart = Math.min(...latestNumericSeqs);
+              while (bridgeCursor < latestPageStart) {
+                const bridgeResult = await supabase
+                  .from('messages')
+                  .select('*')
+                  .eq('channel_id', channelId)
+                  .or('thread_parent_id.is.null,thread_broadcast.eq.1')
+                  .gt('seq', bridgeCursor)
+                  .lt('seq', latestPageStart)
+                  .order('seq', { ascending: true })
+                  .limit(100)
+                  .abortSignal(controller.signal);
+                if (!isCurrent()) return;
+                if (bridgeResult.error || !bridgeResult.data) {
+                  throw new Error(bridgeResult.error?.message || t('conversation.loadFailed'));
+                }
+                const bridgePage = bridgeResult.data as Message[];
+                bridgedVisitMessages.push(...bridgePage);
+                const pageSeqs = bridgePage.flatMap((message) =>
+                  typeof message.seq === 'number' ? [message.seq] : []);
+                if (bridgePage.length < 100 || pageSeqs.length === 0) break;
+                const nextCursor = Math.max(...pageSeqs);
+                if (nextCursor <= bridgeCursor) break;
+                bridgeCursor = nextCursor;
+              }
+            }
+          }
           let contextMessages: Message[] = [];
           let contextMayHaveOlder = false;
 
@@ -2300,8 +2857,35 @@ function MessageAreaContent({
           }
 
           const merged = new Map<string, Message>();
-          for (const message of [...contextMessages, ...reversed]) {
+          for (const message of [
+            ...revalidatedVisitMessages,
+            ...bridgedVisitMessages,
+            ...contextMessages,
+            ...reversed,
+          ]) {
             merged.set(message.id, message);
+          }
+          const pendingRealtimeEvents = bufferedMessageEvents.splice(0);
+          for (const event of pendingRealtimeEvents) {
+            if (event.kind === 'delete') {
+              merged.delete(event.messageId);
+              seenMessageIdsRef.current.delete(event.messageId);
+              continue;
+            }
+            const message = event.message;
+            if (event.kind === 'insert') {
+              if (!message.thread_parent_id || isBroadcast(message)) {
+                merged.set(message.id, message);
+                seenMessageIdsRef.current.add(message.id);
+              }
+              continue;
+            }
+            if (!message.thread_parent_id || isBroadcast(message)) {
+              if (merged.has(message.id)) merged.set(message.id, message);
+            } else {
+              merged.delete(message.id);
+              seenMessageIdsRef.current.delete(message.id);
+            }
           }
           const loadedMessages = Array.from(merged.values()).sort((left, right) => {
             if (left.seq !== null && right.seq !== null) return left.seq - right.seq;
@@ -2310,24 +2894,40 @@ function MessageAreaContent({
           for (const message of loadedMessages) {
             seenMessageIdsRef.current.add(message.id);
           }
+          canonicalMessageLoadApplied = true;
           setMessages((current) => {
             const next = new Map(loadedMessages.map((message) => [message.id, message]));
             for (const message of current) {
-              if (message.channel_id === channelId && !next.has(message.id)) {
-                next.set(message.id, message);
-              }
+              if (message.channel_id !== channelId || next.has(message.id)) continue;
+              const isLocalRecovery =
+                message.delivery === 'pending' ||
+                message.delivery === 'failed' ||
+                message.seq === null;
+              if (isLocalRecovery) next.set(message.id, message);
             }
             return Array.from(next.values()).sort((left, right) => {
               if (left.seq !== null && right.seq !== null) return left.seq - right.seq;
               return new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
             });
           });
-          setHasMore(data.length === 50 || contextMayHaveOlder);
+          setHasMore(
+            didRevalidateVisitHistory && loadVisitSnapshot
+              ? loadVisitSnapshot.hasMore
+              : data.length === 50 || contextMayHaveOlder,
+          );
           if (!requestedMainMessageId) {
             requestAnimationFrame(() => {
               if (!isCurrent()) return;
               const scrollElement = scrollContainerRef.current;
-              if (scrollElement) scrollElement.scrollTop = scrollElement.scrollHeight;
+              if (!scrollElement) return;
+              const shouldFollowLatest = loadVisitSnapshot?.atBottom ?? isNearBottomRef.current;
+              if (!loadVisitSnapshot && !shouldFollowLatest) return;
+              if (loadVisitSnapshot) {
+                restoreChannelVisitScroll(scrollElement, loadVisitSnapshot);
+              } else {
+                scrollElement.scrollTop = scrollElement.scrollHeight;
+              }
+              transcriptScrollStateRef.current.scrollTop = scrollElement.scrollTop;
             });
           }
           soundReadyGenerationRef.current = generation;
@@ -2362,19 +2962,45 @@ function MessageAreaContent({
         }
       } finally {
         finishMessageRequest(controller);
+        if (isCurrent() && !canonicalMessageLoadApplied) {
+          // Realtime callbacks already apply events to the visible transcript.
+          // The buffer is only needed to reconcile a canonical replacement; if
+          // that load failed, keeping it would grow memory without adding safety.
+          canonicalMessageLoadApplied = true;
+          bufferedMessageEvents.length = 0;
+        }
+        canonicalLoadInFlight = false;
+        maybeStartPostSubscribeCatchUp();
       }
+    }
+
+    function maybeStartPostSubscribeCatchUp() {
+      if (
+        !isCurrent() ||
+        !messageSubscriptionReady ||
+        !canonicalLoadStarted ||
+        canonicalLoadInFlight ||
+        !postSubscribeCatchUpNeeded
+      ) return;
+      postSubscribeCatchUpNeeded = false;
+      void loadMessages(captureCatchUpVisitSnapshot());
     }
 
     const failedRealtimeSubscriptions = new Set<string>();
     const handleRealtimeStatus = (name: string, status: string) => {
       if (!isCurrent()) return;
+      const degraded =
+        status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED';
       if (name === 'messages') {
+        messageSubscriptionReady = status === 'SUBSCRIBED';
+        if (degraded) postSubscribeCatchUpNeeded = true;
         messageRealtimeRef.current = {
           generation,
-          ready: status === 'SUBSCRIBED',
+          ready: messageSubscriptionReady,
         };
+        if (messageSubscriptionReady) maybeStartPostSubscribeCatchUp();
       }
-      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      if (degraded) {
         failedRealtimeSubscriptions.add(name);
       } else if (status === 'SUBSCRIBED') {
         failedRealtimeSubscriptions.delete(name);
@@ -2398,6 +3024,9 @@ function MessageAreaContent({
           if (!isCurrent()) return;
           const newMsg = payload.new;
           if (newMsg.channel_id !== channelId) return;
+          if (!canonicalMessageLoadApplied) {
+            bufferedMessageEvents.push({ kind: 'insert', message: newMsg });
+          }
           // A threaded reply bumps the indicator on its parent whether or not
           // its author also sent it to the channel. An open panel reports the
           // authoritative count for its own thread, so leave that one alone.
@@ -2480,6 +3109,9 @@ function MessageAreaContent({
         },
         (payload: { new: Message }) => {
           if (!isCurrent() || payload.new.channel_id !== channelId) return;
+          if (!canonicalMessageLoadApplied) {
+            bufferedMessageEvents.push({ kind: 'update', message: payload.new });
+          }
           setMessages((prev) =>
             prev.map((message) =>
               message.id === payload.new.id
@@ -2501,6 +3133,9 @@ function MessageAreaContent({
           if (!isCurrent()) return;
           const goneId = payload.old?.id;
           if (!goneId) return;
+          if (!canonicalMessageLoadApplied) {
+            bufferedMessageEvents.push({ kind: 'delete', messageId: goneId });
+          }
           seenMessageIdsRef.current.delete(goneId);
           setMessages((prev) => prev.filter((message) => message.id !== goneId));
         },
@@ -2589,6 +3224,8 @@ function MessageAreaContent({
 
     return () => {
       cancelled = true;
+      canonicalMessageLoadApplied = true;
+      bufferedMessageEvents.length = 0;
       agentDirectoryRefresh.cancel();
       retryAgentDirectoryRef.current = () => undefined;
       if (messageRealtimeRef.current.generation === generation) {
@@ -2627,7 +3264,7 @@ function MessageAreaContent({
       const target = document.getElementById(`message-${requestedMainMessageId}`);
       if (!target) return;
       handledSearchTargetRef.current = targetKey;
-      isNearBottomRef.current = false;
+      updateTranscriptNearBottom(false);
       setConversationView('messages');
       if (targetThreadId) {
         threadReturnFocusRef.current = null;
@@ -2652,6 +3289,7 @@ function MessageAreaContent({
     snapshotChannelId,
     targetReplyId,
     targetThreadId,
+    updateTranscriptNearBottom,
   ]);
 
   useEffect(() => {
@@ -2773,14 +3411,14 @@ function MessageAreaContent({
   const scrollToLatestMessage = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    isNearBottomRef.current = true;
+    updateTranscriptNearBottom(true);
     setNewMessageCount(0);
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     el.scrollTo({
       top: el.scrollHeight,
       behavior: reduceMotion ? 'auto' : 'smooth',
     });
-  }, []);
+  }, [updateTranscriptNearBottom]);
 
   const loadOlderMessages = useCallback(async () => {
     if (!channel || loadingMoreRef.current || !hasMore || messages.length === 0) return;
@@ -2788,8 +3426,10 @@ function MessageAreaContent({
     const generation = channelGenerationRef.current;
     const requestGeneration = olderMessagesRequestGenerationRef.current + 1;
     olderMessagesRequestGenerationRef.current = requestGeneration;
-    const oldestSeq = messages[0]?.seq;
-    if (oldestSeq === null || oldestSeq === undefined) return;
+    const numericSeqs = messages.flatMap((message) =>
+      typeof message.seq === 'number' ? [message.seq] : []);
+    if (numericSeqs.length === 0) return;
+    const oldestSeq = Math.min(...numericSeqs);
 
     loadingMoreRef.current = true;
     setLoadingMore(true);
@@ -2860,14 +3500,18 @@ function MessageAreaContent({
     const el = scrollContainerRef.current;
     if (!el) return;
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    isNearBottomRef.current = fromBottom < 100;
-    if (isNearBottomRef.current) setNewMessageCount(0);
+    const nearBottom = fromBottom < 100;
+    const isScrolledUp = fromBottom > el.clientHeight * 0.5;
+    transcriptScrollStateRef.current.scrollTop = el.scrollTop;
+    transcriptScrollStateRef.current.scrolledUp = isScrolledUp;
+    updateTranscriptNearBottom(nearBottom);
+    if (nearBottom) setNewMessageCount(0);
     // A screenful, so the button does not flicker in on a small nudge.
-    setScrolledUp(fromBottom > el.clientHeight * 0.5);
+    setScrolledUp(isScrolledUp);
     if (el.scrollTop < 100 && hasMore && !loadingMore && !olderMessagesError) {
       loadOlderMessages();
     }
-  }, [hasMore, loadingMore, loadOlderMessages, olderMessagesError]);
+  }, [hasMore, loadingMore, loadOlderMessages, olderMessagesError, updateTranscriptNearBottom]);
 
   const resolveMessageTargets = useCallback((content: string): MessageTargets => {
     if (channel?.type === 'dm' && agentInfo) {
@@ -3082,7 +3726,7 @@ function MessageAreaContent({
     setSendWarning('');
     setMentionQuery(null);
     setHasContent(false);
-    isNearBottomRef.current = true;
+    updateTranscriptNearBottom(true);
     setNewMessageCount(0);
     setMessages((current) => [...current, optimisticMessage]);
     if (draftSaveTimeoutRef.current) {
@@ -3104,6 +3748,7 @@ function MessageAreaContent({
     resolveMessageTargets,
     snapshotChannelId,
     t,
+    updateTranscriptNearBottom,
     userId,
   ]);
 
@@ -3115,6 +3760,14 @@ function MessageAreaContent({
     setSendWarning('');
     void deliverMessage(outgoing, resolveMessageTargets(outgoing.content), true);
   }, [channel?.id, deliverMessage, messages, resolveMessageTargets]);
+
+  const cancelMessageDelivery = useCallback((messageId: string) => {
+    setMessages((current) => current.filter((message) =>
+      message.id !== messageId || message.delivery !== 'failed'));
+    const receiptTimer = sentReceiptTimersRef.current.get(messageId);
+    if (receiptTimer) clearTimeout(receiptTimer);
+    sentReceiptTimersRef.current.delete(messageId);
+  }, []);
 
   // The list is fetched the first time someone reaches for it rather than on
   // every composer mount — most messages never name a document.
@@ -3497,6 +4150,25 @@ function MessageAreaContent({
 
       {/* Messages */}
       <TabsPanel className="flex min-h-0 flex-col" value="messages">
+      {channelLoadError && snapshotChannelId === channel.id && (
+        <div
+          className="flex items-center justify-between gap-3 border-b bg-warning/5 px-5 py-1.5 text-xs text-warning-foreground"
+          role="status"
+          title={channelLoadError}
+        >
+          <span>
+            {channelLoadTimedOut ? t('conversation.loadTimedOut') : t('conversation.loadFailed')}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={() => setChannelReloadToken((token) => token + 1)}
+          >
+            {t('runtime.retry')}
+          </Button>
+        </div>
+      )}
       {realtimeWarning && (
         <div className="flex items-center justify-between gap-3 border-b bg-warning/5 px-5 py-1.5 text-xs text-warning-foreground" role="status">
           <span>{realtimeWarning}</span>
@@ -3628,10 +4300,12 @@ function MessageAreaContent({
               key={msg.id}
               message={msg}
               highlighted={highlightedMessageId === msg.id}
+              cancelDeliveryLabel={t('message.editCancel')}
               deliveryFailedLabel={t('message.deliveryFailed')}
               deliveryPendingLabel={t('message.deliveryPending')}
               deliverySentLabel={t('message.deliverySent')}
               onKeyboardMove={moveMessageFocus}
+              onCancelDelivery={cancelMessageDelivery}
               onRetryDelivery={retryMessageDelivery}
               retryDeliveryLabel={t('message.retryDelivery')}
               runtimeErrorLabel={t('message.runtimeError')}
@@ -4006,7 +4680,7 @@ function MessageAreaContent({
         <div className="group/composer overflow-hidden rounded-[8px] border bg-card shadow-[0_1px_3px_0_rgba(0,0,0,0.08)] transition-shadow focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24">
           <div>
             <TiptapMessageInput
-              key={channel.id}
+              key={draftStorageKey ?? channel.id}
               ref={inputRef}
               showFormatting={formattingVisible}
               formattingLabels={formattingLabels}
@@ -4077,6 +4751,15 @@ function MessageAreaContent({
                       return true;
                     }
                   }
+                }
+                if (
+                  event.key === 'ArrowUp' &&
+                  !event.shiftKey &&
+                  !hasContent &&
+                  docQuery === null &&
+                  mentionQuery === null
+                ) {
+                  return editLastOwnMessage();
                 }
                 return false;
               }}
@@ -4313,6 +4996,7 @@ function MessageAreaContent({
           onParentEdit={(content) => submitMessageEdit(openThreadParent.id, content)}
           onRepliesChanged={handleThreadRepliesChanged}
           parent={openThreadParent}
+          serverId={server.id}
           focusReplyId={targetThreadId === openThreadParent.id ? targetReplyId : null}
           formattingVisible={formattingVisible}
           key={openThreadParent.id}

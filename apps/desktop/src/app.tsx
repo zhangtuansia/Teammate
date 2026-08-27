@@ -21,6 +21,7 @@ interface ServerInfo {
   slug: string;
   description: string | null;
   owner_id: string;
+  viewerId: string;
 }
 
 interface AgentInfo {
@@ -501,6 +502,9 @@ export function App() {
         await waitForRuntime(requestController.signal);
         runtimeReady = true;
         const client = createClient();
+        const { data: authData, error: authError } = await client.auth.getUser();
+        if (authError) throw new Error(authError.message);
+        if (!authData.user) throw new Error("Local identity is unavailable");
         const { data, error: queryError } = await client
           .from("servers")
           .select("*")
@@ -522,7 +526,10 @@ export function App() {
         setLoadState({
           slug: requestedSlug,
           request: retryKey,
-          server: data as ServerInfo,
+          server: {
+            ...(data as Omit<ServerInfo, "viewerId">),
+            viewerId: authData.user.id,
+          },
           error: "",
           errorKind: "",
         });
@@ -631,7 +638,7 @@ export function App() {
             serverSlug={server.slug}
           />
           <div className="flex min-h-0 flex-1">
-            <WorkspaceRail serverSlug={server.slug} />
+            <WorkspaceRail serverId={server.id} serverSlug={server.slug} />
             {/* Everything right of the rail is one slab lifted off it, the way
                 Slack rounds and shadows only that leading top corner. */}
             <div className="workspace-slab flex min-w-0 flex-1 overflow-hidden bg-card">

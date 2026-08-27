@@ -8,6 +8,8 @@ export interface WorkspaceServer {
   slug: string;
   description: string | null;
   owner_id: string;
+  /** Authenticated viewer that resolved this workspace. Keeps client caches account-scoped. */
+  viewerId: string;
 }
 
 const WorkspaceServerContext = createContext<WorkspaceServer | null>(null);

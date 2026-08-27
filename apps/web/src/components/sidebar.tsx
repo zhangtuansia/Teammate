@@ -483,6 +483,7 @@ export function Sidebar({
   const currentChannelIdsRef = useRef<Set<string>>(new Set());
   const currentDocumentIdsRef = useRef<Set<string>>(new Set());
   const currentUserIdRef = useRef("");
+  const unreadRequestGenerationRef = useRef(0);
   const [unread, setUnread] = useState<Map<string, { mentions: number; unread: number }>>(new Map());
   const workspaceViewRef = useRef<"home" | "documents" | "tasks" | "apps" | "settings">("home");
   const sidebarRefreshRef = useRef<ReturnType<typeof createTrailingRefreshScheduler> | null>(null);
@@ -1057,10 +1058,13 @@ export function Sidebar({
   // so a count landing does not re-run the whole sidebar load.
   const loadUnread = useCallback(async () => {
     if (!serverId) return;
+    const generation = unreadRequestGenerationRef.current + 1;
+    unreadRequestGenerationRef.current = generation;
     const { data, error } = await supabase.rpc("channel_unread_counts", {
       display_name: userName,
       server_uuid: serverId,
     });
+    if (unreadRequestGenerationRef.current !== generation) return;
     if (error || !Array.isArray(data)) return;
     const next = new Map<string, { mentions: number; unread: number }>();
     for (const row of data as Array<{ channel_id: string; mentions: number; unread: number }>) {
@@ -1085,6 +1089,7 @@ export function Sidebar({
       )
       .subscribe();
     return () => {
+      unreadRequestGenerationRef.current += 1;
       refresh.cancel();
       void supabase.removeChannel(subscription);
     };
@@ -1103,24 +1108,25 @@ export function Sidebar({
     currentChannelIdsRef.current = new Set();
     currentDocumentIdsRef.current = new Set();
     currentUserIdRef.current = "";
-    const frame = window.requestAnimationFrame(() => {
-      loadGenerationRef.current += 1;
-      documentCreateGenerationRef.current += 1;
-      loadRetryAttemptRef.current = 0;
-      if (loadRetryTimerRef.current !== null) {
-        window.clearTimeout(loadRetryTimerRef.current);
-        loadRetryTimerRef.current = null;
-      }
+    const resetGeneration = loadGenerationRef.current + 1;
+    loadGenerationRef.current = resetGeneration;
+    documentCreateGenerationRef.current += 1;
+    loadRetryAttemptRef.current = 0;
+    if (loadRetryTimerRef.current !== null) {
+      window.clearTimeout(loadRetryTimerRef.current);
+      loadRetryTimerRef.current = null;
+    }
+    creatingDocumentRef.current = false;
+    queueMicrotask(() => {
+      if (loadGenerationRef.current !== resetGeneration) return;
       setSidebarLoadError("");
       setDocumentActionError("");
-      creatingDocumentRef.current = false;
       setCreatingDocument(false);
       setDmChannels([]);
       setGroupChannels([]);
       setDocuments([]);
     });
     return () => {
-      window.cancelAnimationFrame(frame);
       loadGenerationRef.current += 1;
       loadControllerRef.current?.abort();
       loadControllerRef.current = null;
@@ -1134,7 +1140,7 @@ export function Sidebar({
   // Load sidebar data on mount (realtime subscriptions handle subsequent updates)
   useEffect(
     () => afterPaint(() => void refreshSidebarNow()),
-    [loadRetryToken, refreshSidebarNow, workspaceView],
+    [loadRetryToken, refreshSidebarNow, serverId, workspaceView],
   );
 
   useEffect(() => () => {
@@ -1520,48 +1526,59 @@ export function Sidebar({
           </div>
           <CollapsiblePanel>
             <div className="flex flex-col gap-px">
-              {visibleDmChannels.map((dm) => (
-              <button
-                key={dm.id}
-                onClick={() => navigateToChannel(dm)}
-                className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] transition-colors ${
-                  activeChannelId === dm.id
-                    ? "bg-rail font-semibold text-rail-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                }`}
-              >
-                {/* Agent avatar */}
-                <div className="relative flex-shrink-0 size-6">
-                  <GeneratedAvatar
-                    id={dm.agent?.id || dm.id}
-                    name={dm.agent?.display_name || dm.name}
-                    size="xs"
-                    avatarUrl={dm.agent?.avatar_url}
-                  />
-                  {/* Status dot */}
-                  <div
-                    className={`absolute right-0 bottom-0 h-1.5 w-1.5 translate-x-[1px] translate-y-[1px] rounded-full border-[1.5px] ${
-                      activeChannelId === dm.id ? "border-rail" : "border-background"
-                    } ${getStatusDot(dm.agent)}`}
-                    title={(() => {
-                      const act = agentActivities.get(dm.agent?.id || "");
-                      if (act?.label && act.activity !== "idle") {
-                        return act.detail ? `${act.label}: ${act.detail}` : act.label;
-                      }
-                      return dm.agent?.status === "online" || dm.agent?.status === "active"
-                        ? t("agent.status.online")
-                        : t("agent.status.offline");
-                    })()}
-                  />
-                </div>
+              {visibleDmChannels.map((dm) => {
+                const isActive = activeChannelId === dm.id;
+                const pending = isActive ? undefined : unread.get(dm.id);
+                return (
+                  <button
+                    key={dm.id}
+                    onClick={() => navigateToChannel(dm)}
+                    className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] transition-colors ${
+                      isActive
+                        ? "bg-rail font-semibold text-rail-foreground"
+                        : pending
+                          ? "font-black text-accent-foreground hover:bg-accent"
+                          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                    }`}
+                  >
+                    {/* Agent avatar */}
+                    <div className="relative flex-shrink-0 size-6">
+                      <GeneratedAvatar
+                        id={dm.agent?.id || dm.id}
+                        name={dm.agent?.display_name || dm.name}
+                        size="xs"
+                        avatarUrl={dm.agent?.avatar_url}
+                      />
+                      {/* Status dot */}
+                      <div
+                        className={`absolute right-0 bottom-0 h-1.5 w-1.5 translate-x-[1px] translate-y-[1px] rounded-full border-[1.5px] ${
+                          isActive ? "border-rail" : "border-background"
+                        } ${getStatusDot(dm.agent)}`}
+                        title={(() => {
+                          const act = agentActivities.get(dm.agent?.id || "");
+                          if (act?.label && act.activity !== "idle") {
+                            return act.detail ? `${act.label}: ${act.detail}` : act.label;
+                          }
+                          return dm.agent?.status === "online" || dm.agent?.status === "active"
+                            ? t("agent.status.online")
+                            : t("agent.status.offline");
+                        })()}
+                      />
+                    </div>
 
-                <div className="flex-1 min-w-0 text-left">
-                  <div className="truncate">
-                    {dm.agent?.display_name || dm.name}
-                  </div>
-                </div>
-              </button>
-              ))}
+                    <div className="flex-1 min-w-0 text-left">
+                      <div className="truncate">
+                        {dm.agent?.display_name || dm.name}
+                      </div>
+                    </div>
+                    {pending && pending.mentions > 0 && (
+                      <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-mention px-[5px] text-[10px] font-bold text-mention-foreground tabular-nums">
+                        {pending.mentions > 99 ? "99+" : pending.mentions}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </CollapsiblePanel>
         </Collapsible>

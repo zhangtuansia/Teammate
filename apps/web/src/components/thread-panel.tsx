@@ -57,10 +57,16 @@ function clampThreadPanelWidth(width: number) {
   return Math.min(MAX_THREAD_PANEL_WIDTH, Math.max(MIN_THREAD_PANEL_WIDTH, Math.round(safeWidth)));
 }
 
-function persistThreadDraft(key: string, content: string) {
+function persistThreadDraft(key: string | null, content: string) {
+  if (!key || typeof window === 'undefined') return;
   try {
-    if (content.trim()) window.sessionStorage.setItem(key, content);
-    else window.sessionStorage.removeItem(key);
+    if (content.trim()) {
+      window.localStorage.setItem(key, content);
+      window.sessionStorage.removeItem(key);
+    } else {
+      window.localStorage.removeItem(key);
+      window.sessionStorage.removeItem(key);
+    }
   } catch {
     // Draft persistence is a recovery aid; storage restrictions must not block replies.
   }
@@ -128,6 +134,7 @@ interface ThreadPanelProps {
   channelLabel: string;
   formattingVisible: boolean;
   parent: ThreadMessage;
+  serverId: string;
   userId: string | null;
   /** Resolved from the channel roster the message list already loaded. */
   identityFor: (senderId: string, message?: ThreadMessage) => {
@@ -214,6 +221,7 @@ function ThreadRow({
   identityFor,
   message,
   onKeyboardMove,
+  onCancel,
   onDelete,
   onSubmitEdit,
   onToggleReaction,
@@ -230,6 +238,7 @@ function ThreadRow({
     messageId: string,
     direction: 'previous' | 'next' | 'first' | 'last',
   ) => void;
+  onCancel?: (message: ThreadMessage) => void;
   onDelete?: () => void;
   onSubmitEdit?: (content: string) => void;
   onToggleReaction?: (emoji: string) => void;
@@ -409,15 +418,28 @@ function ThreadRow({
                   : t('message.deliveryFailed')}
             </span>
             {message.delivery === 'failed' && onRetry && (
-              <Button
-                className="h-5 gap-1 px-1.5 text-[11px]"
-                onClick={() => onRetry(message)}
-                size="xs"
-                variant="ghost"
-              >
-                <RotateCcwIcon aria-hidden="true" className="size-3" />
-                {t('message.retryDelivery')}
-              </Button>
+              <>
+                <Button
+                  className="h-5 gap-1 px-1.5 text-[11px]"
+                  onClick={() => onRetry(message)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <RotateCcwIcon aria-hidden="true" className="size-3" />
+                  {t('message.retryDelivery')}
+                </Button>
+                {onCancel && (
+                  <Button
+                    className="h-5 gap-1 px-1.5 text-[11px]"
+                    onClick={() => onCancel(message)}
+                    size="xs"
+                    variant="ghost"
+                  >
+                    <XIcon aria-hidden="true" className="size-3" />
+                    {t('message.editCancel')}
+                  </Button>
+                )}
+              </>
             )}
           </div>
         )}
@@ -449,6 +471,7 @@ export function ThreadPanel({
   channelLabel,
   formattingVisible,
   parent,
+  serverId,
   userId,
   identityFor,
   onClose,
@@ -460,18 +483,34 @@ export function ThreadPanel({
 }: ThreadPanelProps) {
   const supabase = createClient();
   const { t } = useAppSettings();
-  const draftStorageKey = useMemo(
+  const legacyDraftStorageKey = useMemo(
     () => `${THREAD_DRAFT_STORAGE_PREFIX}${channelId}:${parent.id}`,
     [channelId, parent.id],
   );
+  const draftStorageKey = useMemo(
+    () => userId
+      ? `${THREAD_DRAFT_STORAGE_PREFIX}${userId}:${serverId}:${channelId}:${parent.id}`
+      : null,
+    [channelId, parent.id, serverId, userId],
+  );
   const initialDraft = useMemo(() => {
-    if (typeof window === 'undefined') return '';
+    if (!draftStorageKey || typeof window === 'undefined') return '';
     try {
-      return window.sessionStorage.getItem(draftStorageKey) ?? '';
+      const persisted = window.localStorage.getItem(draftStorageKey);
+      const legacyDraft = process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === 'true'
+        ? window.localStorage.getItem(legacyDraftStorageKey) ||
+          window.sessionStorage.getItem(legacyDraftStorageKey) ||
+          ''
+        : '';
+      window.localStorage.removeItem(legacyDraftStorageKey);
+      window.sessionStorage.removeItem(legacyDraftStorageKey);
+      if (persisted !== null) return persisted;
+      if (legacyDraft) window.localStorage.setItem(draftStorageKey, legacyDraft);
+      return legacyDraft;
     } catch {
       return '';
     }
-  }, [draftStorageKey]);
+  }, [draftStorageKey, legacyDraftStorageKey]);
   const [replies, setReplies] = useState<ThreadMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -520,6 +559,13 @@ export function ThreadPanel({
   }, [reactions]);
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setHasContent(initialDraft.trim().length > 0);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [draftStorageKey, initialDraft]);
+
+  useEffect(() => {
     latestDraftRef.current = initialDraft;
     const draftValueRef = latestDraftRef;
     return () => {
@@ -533,6 +579,7 @@ export function ThreadPanel({
 
   const scheduleDraftSave = useCallback((content: string) => {
     latestDraftRef.current = content;
+    if (!draftStorageKey) return;
     if (draftSaveTimeoutRef.current) clearTimeout(draftSaveTimeoutRef.current);
     const key = draftStorageKey;
     draftSaveTimeoutRef.current = setTimeout(() => {
@@ -839,6 +886,12 @@ export function ThreadPanel({
     );
     void persistReply(optimistic);
   }, [applyReplies, persistReply]);
+
+  const cancelReply = useCallback((reply: ThreadMessage) => {
+    applyReplies(repliesRef.current.filter((current) =>
+      current.id !== reply.id || current.delivery !== 'failed'));
+    setSendError('');
+  }, [applyReplies]);
 
   const editReply = useCallback((messageId: string, content: string) => {
     const previous = repliesRef.current.find((reply) => reply.id === messageId);
@@ -1158,6 +1211,7 @@ export function ThreadPanel({
                 identityFor={identityFor}
                 key={reply.id}
                 message={reply}
+                onCancel={reply.delivery === 'failed' ? cancelReply : undefined}
                 onKeyboardMove={moveThreadMessageFocus}
                 onDelete={() => deleteReply(reply.id)}
                 onRetry={reply.delivery === 'failed' ? retryReply : undefined}
@@ -1225,8 +1279,10 @@ export function ThreadPanel({
           <TiptapMessageInput
             ariaLabel={t('message.thread.placeholder')}
             autoFocus
+            disabled={!userId}
             formattingLabels={formattingLabels}
             initialContent={initialDraft}
+            key={draftStorageKey ?? parent.id}
             onPasteFiles={(files) => void attachFiles(files)}
             onSend={send}
             onTextUpdate={(_textBeforeCursor, fullText) => {

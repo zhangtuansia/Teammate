@@ -180,6 +180,13 @@ interface WorkspaceDocumentViewModel extends WorkspaceDocumentRecord {
   generatorAvatarUrl: string | null;
 }
 
+interface UncertainDocumentSave {
+  content: string;
+  id: string;
+  revision: number;
+  title: string;
+}
+
 interface DocumentListSnapshot {
   serverId: string;
   documents: WorkspaceDocumentSummaryViewModel[];
@@ -274,10 +281,21 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const documentIdsRef = useRef<Set<string>>(new Set());
   const selectedDocumentIdRef = useRef<string | null>(documentId);
   const [draftId, setDraftId] = useState<string | null>(null);
-  const [draftUpdatedAt, setDraftUpdatedAt] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
+  // revision is the local edit sequence; updatedAt is the server compare-and-
+  // swap version. A response may advance the latter without owning the former.
+  const draftRef = useRef({
+    content: "",
+    dirty: false,
+    id: null as string | null,
+    revision: 0,
+    title: "",
+    updatedAt: null as string | null,
+  });
+  const saveQueuedRef = useRef(false);
+  const uncertainSavesRef = useRef<UncertainDocumentSave[]>([]);
   const [conflict, setConflict] = useState(false);
   // Typed in the sidebar, carried here in the address — one box, two panes.
   const search = searchParams.get("q") || "";
@@ -377,7 +395,24 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     }
   }, [serverId]);
 
-  const loadDocument = useCallback(async (nextDocumentId: string, quiet = false) => {
+  const resolveDocumentSnapshotKey = useCallback((recordId: string, fallback: string) => {
+    const activeKey = selectedDocumentIdRef.current;
+    if (activeKey && (
+      activeKey === recordId ||
+      (activeKey.length < 36 &&
+        recordId.toLocaleLowerCase().startsWith(activeKey.toLocaleLowerCase()))
+    )) {
+      return activeKey;
+    }
+    const currentSnapshot = detailSnapshotRef.current;
+    if (currentSnapshot?.document.id === recordId) return currentSnapshot.documentId;
+    return fallback;
+  }, []);
+
+  const loadDocument = useCallback(async (
+    nextDocumentId: string,
+    quiet = false,
+  ): Promise<WorkspaceDocumentViewModel | null> => {
     detailRequestControllerRef.current?.abort();
     const requestController = new AbortController();
     detailRequestControllerRef.current = requestController;
@@ -420,7 +455,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       if (requestController.signal.aborted) throw new Error("Request aborted");
       if (queryError) throw new Error(queryError.message);
       if (!data) throw new Error("Document not found");
-      if (!isCurrent()) return;
+      if (!isCurrent()) return null;
 
       const record = data as WorkspaceDocumentRecord;
       const generatorResult = record.generated_by_agent_id
@@ -430,7 +465,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         : { data: [], error: null };
       if (requestController.signal.aborted) throw new Error("Request aborted");
       if (generatorResult.error) throw new Error(generatorResult.error.message);
-      if (!isCurrent()) return;
+      if (!isCurrent()) return null;
 
       const generator = ((generatorResult.data || []) as AgentRecord[]).find(
         (agent) => agent.id === record.generated_by_agent_id,
@@ -440,12 +475,17 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         generatorName: generator?.display_name || null,
         generatorAvatarUrl: generator?.avatar_url || null,
       };
-      const nextSnapshot = { serverId, documentId: nextDocumentId, document };
+      const nextSnapshot = {
+        serverId,
+        documentId: resolveDocumentSnapshotKey(record.id, nextDocumentId),
+        document,
+      };
       detailSnapshotRef.current = nextSnapshot;
       setDetailSnapshot(nextSnapshot);
       setDetailLoadState({ serverId, loading: false, refreshing: false, error: "" });
+      return document;
     } catch (loadError) {
-      if (detailGenerationRef.current !== generation) return;
+      if (detailGenerationRef.current !== generation) return null;
       setDetailLoadState({
         serverId,
         loading: false,
@@ -454,13 +494,14 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
           ? "Document loading timed out. Refresh and try again."
           : loadError instanceof Error ? loadError.message : String(loadError),
       });
+      return null;
     } finally {
       window.clearTimeout(timeout);
       if (detailRequestControllerRef.current === requestController) {
         detailRequestControllerRef.current = null;
       }
     }
-  }, [serverId]);
+  }, [resolveDocumentSnapshotKey, serverId]);
 
   /**
    * Every note in the folder becomes a document. They are copied, not linked:
@@ -651,14 +692,20 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
           if (!active) return;
           const record = payload.new?.id ? payload.new : payload.old;
           if (!record?.id) return;
+          const selectedKey = selectedDocumentIdRef.current;
+          const isSelectedDocument = Boolean(selectedKey && (
+            selectedKey === record.id ||
+            (selectedKey.length < 36 &&
+              record.id.toLocaleLowerCase().startsWith(selectedKey.toLocaleLowerCase()))
+          ));
           const belongsToServer = record.server_id === serverId || (
             !record.server_id && (
-              documentIdsRef.current.has(record.id) || record.id === selectedDocumentIdRef.current
+              documentIdsRef.current.has(record.id) || isSelectedDocument
             )
           );
           if (!belongsToServer) return;
           scheduleDocumentsRefresh();
-          if (record.id === selectedDocumentIdRef.current) scheduleDocumentRefresh(record.id);
+          if (isSelectedDocument) scheduleDocumentRefresh(selectedKey || record.id);
         },
       )
       .subscribe((status: string) => {
@@ -777,21 +824,40 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   );
 
   useEffect(() => {
-    if (selectedDocument?.id === draftId && dirty) return;
+    if (selectedDocument?.id === draftRef.current.id && draftRef.current.dirty) return;
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
       if (!selectedDocument) {
+        draftRef.current = {
+          content: "",
+          dirty: false,
+          id: null,
+          revision: draftRef.current.revision + 1,
+          title: "",
+          updatedAt: null,
+        };
+        saveQueuedRef.current = false;
+        uncertainSavesRef.current = [];
         setDraftId(null);
-        setDraftUpdatedAt(null);
         setTitle("");
         setContent("");
         setDirty(false);
         setError("");
+        setConflict(false);
         return;
       }
+      draftRef.current = {
+        content: selectedDocument.content,
+        dirty: false,
+        id: selectedDocument.id,
+        revision: draftRef.current.revision + 1,
+        title: selectedDocument.title,
+        updatedAt: selectedDocument.updated_at,
+      };
+      saveQueuedRef.current = false;
+      uncertainSavesRef.current = [];
       setDraftId(selectedDocument.id);
-      setDraftUpdatedAt(selectedDocument.updated_at);
       setTitle(selectedDocument.title);
       setContent(selectedDocument.content);
       // The Markdown guard asks whether a rich editor can hand the text back
@@ -803,6 +869,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       setDirty(false);
       if (selectedDocument.id !== draftId) {
         setError("");
+        setConflict(false);
       }
     });
     return () => {
@@ -810,93 +877,223 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     };
   }, [dirty, draftId, selectedDocument]);
 
+  function markDraftEdited(update: { content?: string; title?: string }) {
+    draftRef.current = {
+      ...draftRef.current,
+      ...update,
+      dirty: true,
+      revision: draftRef.current.revision + 1,
+    };
+    if (savingRef.current) saveQueuedRef.current = true;
+    setDirty(true);
+  }
+
+  function rememberUncertainSave(draft: typeof draftRef.current, savedTitle: string) {
+    if (!draft.id) return;
+    const uncertainSave: UncertainDocumentSave = {
+      content: draft.content,
+      id: draft.id,
+      revision: draft.revision,
+      title: savedTitle,
+    };
+    uncertainSavesRef.current = [
+      ...uncertainSavesRef.current.filter((entry) =>
+        entry.id !== uncertainSave.id || entry.revision !== uncertainSave.revision),
+      uncertainSave,
+    ];
+  }
+
   async function saveDocument() {
-    if (!selectedDocument || savingRef.current || deletingRef.current) return;
+    if (deletingRef.current || !draftRef.current.id || !draftRef.current.dirty) return;
+    if (savingRef.current) {
+      saveQueuedRef.current = true;
+      return;
+    }
     savingRef.current = true;
     setSaving(true);
     setError("");
     documentMutationControllerRef.current?.abort();
-    const requestController = new AbortController();
-    documentMutationControllerRef.current = requestController;
     const mutationGeneration = documentMutationGenerationRef.current + 1;
     documentMutationGenerationRef.current = mutationGeneration;
     const isCurrentMutation = () =>
       documentMutationGenerationRef.current === mutationGeneration;
-    const timeout = window.setTimeout(
-      () => requestController.abort(),
-      WORKSPACE_REQUEST_TIMEOUT_MS,
-    );
-    const nextTitle = title.trim() || t("documents.untitled");
-    const nextUpdatedAt = new Date().toISOString();
     try {
-      let updateQuery = createClient()
-        .from("documents")
-        .update({ title: nextTitle, content, updated_at: nextUpdatedAt })
-        .eq("id", selectedDocument.id)
-        .eq("server_id", serverId);
-      if (draftUpdatedAt) updateQuery = updateQuery.eq("updated_at", draftUpdatedAt);
-      const { data: updatedDocument, error: updateError } = await updateQuery
-        .select("id, server_id, title, content, created_by, generated_by_agent_id, created_at, updated_at")
-        .abortSignal(requestController.signal)
-        .maybeSingle();
-      if (!isCurrentMutation()) return;
-      if (updateError) {
-        setError(updateError.message);
-        return;
-      }
-      if (!updatedDocument) {
-        // A teammate wrote to this document while it was open. Their version
-        // wins the write; the reload puts it on screen rather than letting the
-        // autosave keep retrying over the top of it.
-        setConflict(true);
-        setDirty(false);
-        await loadDocument(selectedDocument.id, true);
-        return;
-      }
-      setConflict(false);
-      const updatedRecord = updatedDocument as WorkspaceDocumentRecord;
-      const nextDetailSnapshot = {
-        serverId,
-        documentId: selectedDocument.id,
-        document: {
-          ...updatedRecord,
-          generatorName: selectedDocument.generatorName,
-          generatorAvatarUrl: selectedDocument.generatorAvatarUrl,
-        },
-      };
-      detailSnapshotRef.current = nextDetailSnapshot;
-      setDetailSnapshot(nextDetailSnapshot);
-      setListSnapshot((current) => {
-        if (!current || current.serverId !== serverId) return current;
-        const documents = current.documents
-          .map((document) => document.id === updatedRecord.id
-            ? {
-                ...document,
-                title: updatedRecord.title,
-                updated_at: updatedRecord.updated_at,
+      while (isCurrentMutation() && draftRef.current.id && draftRef.current.dirty) {
+        const draft = { ...draftRef.current };
+        if (!draft.id) break;
+        saveQueuedRef.current = false;
+        const requestController = new AbortController();
+        documentMutationControllerRef.current = requestController;
+        const timeout = window.setTimeout(
+          () => requestController.abort(),
+          WORKSPACE_REQUEST_TIMEOUT_MS,
+        );
+        const nextTitle = draft.title.trim() || t("documents.untitled");
+        const nextUpdatedAt = new Date().toISOString();
+        try {
+          let updateQuery = createClient()
+            .from("documents")
+            .update({ title: nextTitle, content: draft.content, updated_at: nextUpdatedAt })
+            .eq("id", draft.id)
+            .eq("server_id", serverId);
+          if (draft.updatedAt) updateQuery = updateQuery.eq("updated_at", draft.updatedAt);
+          const { data: updatedDocument, error: updateError } = await updateQuery
+            .select("id, server_id, title, content, created_by, generated_by_agent_id, folder_path, pinned_at, format, created_at, updated_at")
+            .abortSignal(requestController.signal)
+            .maybeSingle();
+          if (!isCurrentMutation()) return;
+          if (updateError) {
+            saveQueuedRef.current = false;
+            if (requestController.signal.aborted) rememberUncertainSave(draft, nextTitle);
+            setError(
+              requestController.signal.aborted
+                ? "Document save timed out. Your draft is still here; try again."
+                : updateError.message,
+            );
+            break;
+          }
+          if (!updatedDocument) {
+            // Do not discard the only local copy until the competing version is
+            // actually in hand. A timed-out native request may also have finished
+            // in the background; matching its payload turns this into a late ack.
+            setConflict(true);
+            const remoteDocument = await loadDocument(draft.id, true);
+            if (!isCurrentMutation()) return;
+            const currentDraft = draftRef.current;
+            if (!remoteDocument || currentDraft.id !== draft.id) break;
+            const acknowledgedUncertainSave = [...uncertainSavesRef.current]
+              .reverse()
+              .find((entry) =>
+                entry.id === draft.id &&
+                entry.title === remoteDocument.title &&
+                entry.content === remoteDocument.content);
+
+            if (acknowledgedUncertainSave) {
+              uncertainSavesRef.current = uncertainSavesRef.current.filter(
+                (entry) => entry.id !== draft.id,
+              );
+              const savedRevisionIsCurrent =
+                currentDraft.revision === acknowledgedUncertainSave.revision;
+              draftRef.current = {
+                ...currentDraft,
+                content: savedRevisionIsCurrent ? remoteDocument.content : currentDraft.content,
+                dirty: !savedRevisionIsCurrent,
+                title: savedRevisionIsCurrent ? remoteDocument.title : currentDraft.title,
+                updatedAt: remoteDocument.updated_at,
+              };
+              setConflict(false);
+              if (savedRevisionIsCurrent) {
+                setTitle(remoteDocument.title);
+                setContent(remoteDocument.content);
+                setDirty(false);
+              } else {
+                saveQueuedRef.current = true;
               }
-            : document)
-          .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime());
-        const nextSnapshot = { ...current, documents };
-        listSnapshotRef.current = nextSnapshot;
-        return nextSnapshot;
-      });
-      setTitle(nextTitle);
-      setDraftUpdatedAt(updatedRecord.updated_at);
-      setDirty(false);
-      scheduleDocumentsRefresh();
-    } catch (saveError) {
-      if (!isCurrentMutation()) return;
-      setError(
-        requestController.signal.aborted
-          ? "Document save timed out. Your draft is still here; try again."
-          : saveError instanceof Error ? saveError.message : t("documents.saveFailed"),
-      );
-    } finally {
-      window.clearTimeout(timeout);
-      if (documentMutationControllerRef.current === requestController) {
-        documentMutationControllerRef.current = null;
+              scheduleDocumentsRefresh();
+              if (saveQueuedRef.current && draftRef.current.dirty) continue;
+              break;
+            }
+
+            // A teammate wrote to this document while it was open. Their version
+            // wins only after it has loaded successfully, so a failed refresh
+            // leaves the local draft and its navigation guard intact.
+            uncertainSavesRef.current = uncertainSavesRef.current.filter(
+              (entry) => entry.id !== draft.id,
+            );
+            draftRef.current = {
+              content: remoteDocument.content,
+              dirty: false,
+              id: remoteDocument.id,
+              revision: currentDraft.revision + 1,
+              title: remoteDocument.title,
+              updatedAt: remoteDocument.updated_at,
+            };
+            saveQueuedRef.current = false;
+            setTitle(remoteDocument.title);
+            setContent(remoteDocument.content);
+            setRichTextEditable(
+              remoteDocument.format === "html" || canEditAsRichText(remoteDocument.content),
+            );
+            setDirty(false);
+            break;
+          }
+          setConflict(false);
+          const updatedRecord = updatedDocument as WorkspaceDocumentRecord;
+          uncertainSavesRef.current = uncertainSavesRef.current.filter(
+            (entry) => entry.id !== draft.id,
+          );
+          const currentDocument = detailSnapshotRef.current?.document;
+          if (draftRef.current.id === draft.id) {
+            const nextDetailSnapshot = {
+              serverId,
+              documentId: resolveDocumentSnapshotKey(draft.id, draft.id),
+              document: {
+                ...updatedRecord,
+                generatorName: currentDocument?.id === draft.id
+                  ? currentDocument.generatorName
+                  : null,
+                generatorAvatarUrl: currentDocument?.id === draft.id
+                  ? currentDocument.generatorAvatarUrl
+                  : null,
+              },
+            };
+            detailSnapshotRef.current = nextDetailSnapshot;
+            setDetailSnapshot(nextDetailSnapshot);
+          }
+          setListSnapshot((current) => {
+            if (!current || current.serverId !== serverId) return current;
+            const documents = current.documents
+              .map((document) => document.id === updatedRecord.id
+                ? {
+                    ...document,
+                    title: updatedRecord.title,
+                    updated_at: updatedRecord.updated_at,
+                  }
+                : document)
+              .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime());
+            const nextSnapshot = { ...current, documents };
+            listSnapshotRef.current = nextSnapshot;
+            return nextSnapshot;
+          });
+
+          const currentDraft = draftRef.current;
+          if (currentDraft.id !== draft.id) break;
+          const savedRevisionIsCurrent = currentDraft.revision === draft.revision;
+          draftRef.current = {
+            ...currentDraft,
+            dirty: !savedRevisionIsCurrent,
+            title: savedRevisionIsCurrent ? nextTitle : currentDraft.title,
+            updatedAt: updatedRecord.updated_at,
+          };
+          if (savedRevisionIsCurrent) {
+            setTitle(nextTitle);
+            setDirty(false);
+          } else {
+            // The response only acknowledges the revision it carried. A newer
+            // local revision keeps the guard raised and drains immediately in
+            // the next iteration using this response's updated_at as its base.
+            saveQueuedRef.current = true;
+          }
+          scheduleDocumentsRefresh();
+          if (!saveQueuedRef.current || !draftRef.current.dirty) break;
+        } catch (saveError) {
+          if (!isCurrentMutation()) return;
+          saveQueuedRef.current = false;
+          if (requestController.signal.aborted) rememberUncertainSave(draft, nextTitle);
+          setError(
+            requestController.signal.aborted
+              ? "Document save timed out. Your draft is still here; try again."
+              : saveError instanceof Error ? saveError.message : t("documents.saveFailed"),
+          );
+          break;
+        } finally {
+          window.clearTimeout(timeout);
+          if (documentMutationControllerRef.current === requestController) {
+            documentMutationControllerRef.current = null;
+          }
+        }
       }
+    } finally {
       if (isCurrentMutation()) {
         savingRef.current = false;
         setSaving(false);
@@ -904,9 +1101,32 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
     }
   }
 
-  // Nothing is unsaved for long now, so leaving only has to wait for a save
-  // already in flight rather than ask the person to decide about a draft.
-  useUnsavedChangesGuard(saving, () => undefined, false);
+  // A mutation in flight cannot be abandoned halfway through. If a save has
+  // already failed, though, navigation offers an explicit discard path rather
+  // than trapping the person in the document with no way out.
+  useUnsavedChangesGuard(
+    dirty || saving || deleting,
+    () => {
+      if (!selectedDocument) return;
+      draftRef.current = {
+        content: selectedDocument.content,
+        dirty: false,
+        id: selectedDocument.id,
+        revision: draftRef.current.revision + 1,
+        title: selectedDocument.title,
+        updatedAt: selectedDocument.updated_at,
+      };
+      saveQueuedRef.current = false;
+      uncertainSavesRef.current = uncertainSavesRef.current.filter(
+        (entry) => entry.id !== selectedDocument.id,
+      );
+      setTitle(selectedDocument.title);
+      setContent(selectedDocument.content);
+      setDirty(false);
+      setError("");
+    },
+    !saving && !deleting,
+  );
 
   // Autosave. A pause in typing is the signal — saving on every keystroke would
   // put a partial sentence in front of whichever teammate reads it next.
@@ -920,8 +1140,8 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
       window.clearTimeout(timer);
       if (saveTimerRef.current === timer) saveTimerRef.current = null;
     };
-    // saveDocument closes over the current draft, which is exactly what should
-    // be written when the pause happens.
+    // saveDocument reads the ref when the pause ends, so the timer never sends
+    // the render that originally scheduled it after newer input has arrived.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content, dirty, selectedDocument, title]);
 
@@ -950,7 +1170,11 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         .abortSignal(requestController.signal);
       if (!isCurrentMutation()) return;
       if (deleteError) {
-        setError(deleteError.message);
+        setError(
+          requestController.signal.aborted
+            ? "Document deletion timed out. Refresh before trying again."
+            : deleteError.message,
+        );
         return;
       }
       setListSnapshot((current) => {
@@ -964,6 +1188,11 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         return nextSnapshot;
       });
       setConfirmDelete(false);
+      draftRef.current = { ...draftRef.current, dirty: false };
+      saveQueuedRef.current = false;
+      uncertainSavesRef.current = uncertainSavesRef.current.filter(
+        (entry) => entry.id !== selectedDocument.id,
+      );
       setDirty(false);
       window.requestAnimationFrame(() => {
         router.push(`/s/${serverSlug}/documents`);
@@ -1110,8 +1339,9 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
             <input
               className="w-full border-0 bg-transparent p-0 text-[28px] font-bold leading-tight outline-none placeholder:text-muted-foreground/60"
               onChange={(event) => {
-                setTitle(event.target.value);
-                setDirty(true);
+                const nextTitle = event.target.value;
+                setTitle(nextTitle);
+                markDraftEdited({ title: nextTitle });
               }}
               placeholder={t("documents.untitled")}
               ref={titleInputRef}
@@ -1132,7 +1362,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                   }))}
                 onChange={(markdown) => {
                   setContent(markdown);
-                  setDirty(true);
+                  markDraftEdited({ content: markdown });
                 }}
                 placeholder={t("documents.contentPlaceholder")}
                 teammates={teammates}
@@ -1145,8 +1375,9 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 <Textarea
                   className="min-h-[55vh] resize-none border-0 bg-transparent p-0 font-mono text-[13px] leading-[20px] shadow-none focus-visible:ring-0"
                   onChange={(event) => {
-                    setContent(event.target.value);
-                    setDirty(true);
+                    const nextContent = event.target.value;
+                    setContent(nextContent);
+                    markDraftEdited({ content: nextContent });
                   }}
                   placeholder={t("documents.contentPlaceholder")}
                   value={content}
@@ -1156,6 +1387,16 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
             {(error || currentDetailLoadState?.error) && (
               <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive">
                 <span>{error || currentDetailLoadState?.error}</span>
+                {error && dirty && (
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => void saveDocument()}
+                  >
+                    <RefreshCw />
+                    {t("runtime.retry")}
+                  </Button>
+                )}
                 {currentDetailLoadState?.error && (
                   <Button
                     variant="outline"

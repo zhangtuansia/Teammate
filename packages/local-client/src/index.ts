@@ -43,6 +43,15 @@ const isNativeWebKit =
   !navigator.userAgent.includes("Chrome");
 const LOCAL_EVENT_POLL_WAIT_MS = isNativeWebKit ? 750 : 20_000;
 const LOCAL_EVENT_POLL_GAP_MS = isNativeWebKit ? 25 : 0;
+const LOCAL_EVENT_POLL_TIMEOUT_GRACE_MS = 5_000;
+const LOCAL_EVENT_RETRY_BASE_MS = 500;
+const LOCAL_EVENT_RETRY_MAX_MS = 15_000;
+const LOCAL_EVENT_FAILURE_REPORT_THRESHOLD = 3;
+
+type LocalRealtimeStatus =
+  | "SUBSCRIBED"
+  | "CHANNEL_ERROR"
+  | "TIMED_OUT";
 
 function localAbortError() {
   const error = new Error("The local request was cancelled");
@@ -301,7 +310,7 @@ type RealtimeCallback = (payload: {
   new?: Record<string, unknown>;
   old?: Record<string, unknown>;
   payload?: Record<string, unknown>;
-}) => void;
+}) => void | Promise<void>;
 
 interface RealtimeHandler {
   kind: "postgres_changes" | "broadcast" | "presence";
@@ -322,7 +331,10 @@ interface LocalEvent {
 export class LocalRealtimeChannel {
   private handlers: RealtimeHandler[] = [];
   private presenceEntries: Record<string, Array<Record<string, unknown>>> = {};
+  private statusCallbacks = new Set<(status: string) => void>();
+  private lastStatus: LocalRealtimeStatus | null = null;
   private subscribed = false;
+  private subscriptionGeneration = 0;
 
   constructor(
     readonly topic: string,
@@ -339,11 +351,24 @@ export class LocalRealtimeChannel {
   }
 
   subscribe(callback?: (status: string) => void) {
+    if (callback) this.statusCallbacks.add(callback);
     if (!this.subscribed) {
       this.subscribed = true;
+      this.subscriptionGeneration += 1;
       this.client.addChannel(this);
+    } else if (callback && this.lastStatus) {
+      const status = this.lastStatus;
+      const generation = this.subscriptionGeneration;
+      queueMicrotask(() => {
+        if (
+          this.subscribed &&
+          this.subscriptionGeneration === generation &&
+          this.statusCallbacks.has(callback)
+        ) {
+          callback(status);
+        }
+      });
     }
-    queueMicrotask(() => callback?.("SUBSCRIBED"));
     return this;
   }
 
@@ -377,9 +402,50 @@ export class LocalRealtimeChannel {
   }
 
   async unsubscribe() {
-    this.client.removeChannel(this);
-    this.subscribed = false;
+    await this.client.removeChannel(this);
     return "ok";
+  }
+
+  notifyStatus(status: LocalRealtimeStatus) {
+    if (!this.subscribed || this.lastStatus === status) return;
+    this.lastStatus = status;
+    const generation = this.subscriptionGeneration;
+    for (const callback of this.statusCallbacks) {
+      queueMicrotask(() => {
+        if (
+          this.subscribed &&
+          this.subscriptionGeneration === generation &&
+          this.statusCallbacks.has(callback)
+        ) {
+          callback(status);
+        }
+      });
+    }
+  }
+
+  onRemoved() {
+    this.subscribed = false;
+    this.subscriptionGeneration += 1;
+    this.lastStatus = null;
+    this.statusCallbacks.clear();
+  }
+
+  private invokeHandler(
+    handler: RealtimeHandler,
+    payload: Parameters<RealtimeCallback>[0],
+  ) {
+    try {
+      const result = handler.callback(payload);
+      if (result && typeof result.then === "function") {
+        void result.catch((error) => {
+          console.error(`Local realtime handler failed for ${this.topic}:`, error);
+        });
+      }
+    } catch (error) {
+      // A consumer bug must not prevent another handler or channel from seeing
+      // an event the transport has already received and advanced past.
+      console.error(`Local realtime handler failed for ${this.topic}:`, error);
+    }
   }
 
   dispatch(event: LocalEvent) {
@@ -390,7 +456,7 @@ export class LocalRealtimeChannel {
       this.presenceEntries = { [key]: [event.payload || {}] };
       for (const handler of this.handlers) {
         if (handler.kind === "presence") {
-          handler.callback({ payload: event.payload || {} });
+          this.invokeHandler(handler, { payload: event.payload || {} });
         }
       }
       return;
@@ -401,7 +467,7 @@ export class LocalRealtimeChannel {
 
       if (event.kind === "broadcast") {
         if (handler.filter.event && handler.filter.event !== event.event) continue;
-        handler.callback({ payload: event.payload || {} });
+        this.invokeHandler(handler, { payload: event.payload || {} });
         continue;
       }
 
@@ -415,7 +481,8 @@ export class LocalRealtimeChannel {
       }
       if (!matchesRealtimeFilter(event.record, handler.filter.filter)) continue;
 
-      handler.callback(
+      this.invokeHandler(
+        handler,
         event.event === "DELETE"
           ? { old: event.record || {} }
           : { new: event.record || {} }
@@ -460,6 +527,8 @@ export class LocalClient {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollAbortController: AbortController | null = null;
   private polling = false;
+  private consecutivePollFailures = 0;
+  private realtimeStatus: LocalRealtimeStatus | null = null;
   private readonly localUser: LocalUser = {
     id: LOCAL_USER_ID,
     email: "local@teammate.dev",
@@ -500,11 +569,16 @@ export class LocalClient {
 
   addChannel(channel: LocalRealtimeChannel) {
     this.channels.add(channel);
+    // The shared transport may already have completed a real poll while this
+    // channel is new. Reuse that truthful client state immediately instead of
+    // making short-lived RPC channels wait behind the current long poll.
+    if (this.realtimeStatus) channel.notifyStatus(this.realtimeStatus);
     this.schedulePoll(0);
   }
 
   removeChannel(channel: LocalRealtimeChannel) {
     this.channels.delete(channel);
+    channel.onRemoved();
     if (this.channels.size === 0 && this.pollTimer) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
@@ -512,16 +586,21 @@ export class LocalClient {
     if (this.channels.size === 0) {
       this.pollAbortController?.abort();
       this.pollAbortController = null;
+      this.consecutivePollFailures = 0;
+      this.realtimeStatus = null;
     }
     return Promise.resolve("ok");
   }
 
   async removeAllChannels() {
+    for (const channel of this.channels) channel.onRemoved();
     this.channels.clear();
     if (this.pollTimer) clearTimeout(this.pollTimer);
     this.pollTimer = null;
     this.pollAbortController?.abort();
     this.pollAbortController = null;
+    this.consecutivePollFailures = 0;
+    this.realtimeStatus = null;
     return "ok";
   }
 
@@ -533,11 +612,49 @@ export class LocalClient {
     }, delay);
   }
 
+  private retryDelay() {
+    const exponent = Math.max(0, this.consecutivePollFailures - 1);
+    const backoff = Math.min(
+      LOCAL_EVENT_RETRY_BASE_MS * 2 ** exponent,
+      LOCAL_EVENT_RETRY_MAX_MS,
+    );
+    const jittered = backoff * (0.8 + Math.random() * 0.4);
+    return Math.max(LOCAL_EVENT_RETRY_BASE_MS, Math.min(
+      Math.round(jittered),
+      LOCAL_EVENT_RETRY_MAX_MS,
+    ));
+  }
+
+  private notePollSuccess() {
+    this.consecutivePollFailures = 0;
+    this.realtimeStatus = "SUBSCRIBED";
+    // Notify on every successful pass so a channel added while the shared poll
+    // was already healthy still receives its own first truthful status.
+    for (const channel of this.channels) channel.notifyStatus("SUBSCRIBED");
+  }
+
+  private notePollFailure(status: Exclude<LocalRealtimeStatus, "SUBSCRIBED">) {
+    this.consecutivePollFailures += 1;
+    if (this.consecutivePollFailures < LOCAL_EVENT_FAILURE_REPORT_THRESHOLD) return;
+    // Once degraded, keep one stable state until a poll succeeds. Alternating
+    // network and timeout errors should not make every subscriber flicker.
+    if (this.realtimeStatus === "CHANNEL_ERROR" || this.realtimeStatus === "TIMED_OUT") {
+      for (const channel of this.channels) channel.notifyStatus(this.realtimeStatus);
+      return;
+    }
+    this.realtimeStatus = status;
+    for (const channel of this.channels) channel.notifyStatus(status);
+  }
+
   private async pollEvents() {
     if (this.polling || this.channels.size === 0) return;
     this.polling = true;
-    let retryDelay = 500;
+    let retryDelay = LOCAL_EVENT_RETRY_BASE_MS;
     const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(new DOMException("Local realtime poll timed out", "TimeoutError")),
+      LOCAL_EVENT_POLL_WAIT_MS + LOCAL_EVENT_POLL_TIMEOUT_GRACE_MS,
+    );
     this.pollAbortController = controller;
     try {
       // WKWebView may keep just one authenticated connection to the loopback
@@ -556,13 +673,34 @@ export class LocalClient {
         };
         this.cursor = result.cursor;
         for (const event of result.events) {
-          for (const channel of this.channels) channel.dispatch(event);
+          for (const channel of this.channels) {
+            try {
+              channel.dispatch(event);
+            } catch (error) {
+              // Keep an unexpected channel-level failure isolated too. The
+              // HTTP poll itself succeeded, so it must still recover normally
+              // and every remaining channel must receive this event.
+              console.error(`Local realtime channel failed for ${channel.topic}:`, error);
+            }
+          }
         }
+        this.notePollSuccess();
         retryDelay = LOCAL_EVENT_POLL_GAP_MS;
+      } else {
+        this.notePollFailure("CHANNEL_ERROR");
+        retryDelay = this.retryDelay();
       }
     } catch {
-      // The service may be starting. Keep polling while channels are subscribed.
+      // Removing the final channel deliberately aborts the shared request and
+      // must not manufacture a degraded status for a later subscription.
+      if (!controller.signal.aborted || controller.signal.reason?.name === "TimeoutError") {
+        this.notePollFailure(
+          controller.signal.reason?.name === "TimeoutError" ? "TIMED_OUT" : "CHANNEL_ERROR",
+        );
+        retryDelay = this.retryDelay();
+      }
     } finally {
+      clearTimeout(timeout);
       if (this.pollAbortController === controller) this.pollAbortController = null;
       this.polling = false;
       this.schedulePoll(retryDelay);

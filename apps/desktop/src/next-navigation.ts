@@ -82,7 +82,7 @@ export function useRouter() {
       refresh: () => window.dispatchEvent(new HashChangeEvent("hashchange")),
       back: () => window.history.back(),
       forward: () => window.history.forward(),
-      prefetch: async () => undefined,
+      prefetch: (_path: string, _options?: unknown) => undefined,
     }),
     [],
   );

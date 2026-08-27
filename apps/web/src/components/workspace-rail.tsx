@@ -103,6 +103,7 @@ function layoutAreas(height: number): RailLayout {
 }
 
 export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serverSlug: string }) {
+  const localMode = process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === "true";
   const pathname = usePathname();
   const router = useRouter();
   const { navigate } = useWorkspaceNavigation();
@@ -116,6 +117,7 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
   const [attention, setAttention] = useState({ mentions: 0, unread: 0 });
   const tabsRegionRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+  const attentionRequestGenerationRef = useRef(0);
   const [account, setAccount] = useState<{ avatarUrl: string | null; id: string; name: string }>({
     avatarUrl: null,
     id: "",
@@ -123,6 +125,7 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
   });
 
   useEffect(() => {
+    if (!localMode) return;
     let cancelled = false;
     async function loadWorkspaces() {
       const {
@@ -187,7 +190,7 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
     };
     // Creating a workspace lands you in it, so keying on the slug is also what
     // picks up the new one.
-  }, [serverSlug, supabase]);
+  }, [localMode, serverSlug, supabase]);
 
   useEffect(() => {
     const region = tabsRegionRef.current;
@@ -211,10 +214,13 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
   }, []);
 
   const loadAttention = useCallback(async () => {
+    const generation = attentionRequestGenerationRef.current + 1;
+    attentionRequestGenerationRef.current = generation;
     const { data, error } = await supabase.rpc("channel_unread_counts", {
       display_name: account.name,
       server_uuid: serverId,
     });
+    if (attentionRequestGenerationRef.current !== generation) return;
     if (error || !Array.isArray(data)) return;
     let unread = 0;
     let mentions = 0;
@@ -226,6 +232,7 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
   }, [account.name, serverId, supabase]);
 
   useEffect(() => {
+    if (!localMode) return;
     const refresh = createTrailingRefreshScheduler(loadAttention, 200);
     void refresh.runNow();
     const subscription = supabase
@@ -240,14 +247,15 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
       )
       .subscribe();
     return () => {
+      attentionRequestGenerationRef.current += 1;
       refresh.cancel();
       void supabase.removeChannel(subscription);
     };
-  }, [loadAttention, serverId, supabase]);
+  }, [loadAttention, localMode, serverId, supabase]);
 
   // Hosted workspaces have no documents or tasks to switch between, and their
   // settings live under the account menu instead.
-  if (process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE !== "true") return null;
+  if (!localMode) return null;
 
   const current = pathname.endsWith("/documents")
     ? "documents"
@@ -260,6 +268,10 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
           : "home";
 
   const activeWorkspace = workspaces.find((workspace) => workspace.slug === serverSlug);
+  const phantomLayerCount = Math.min(
+    2,
+    workspaces.filter((workspace) => workspace.slug !== serverSlug).length,
+  );
   const { overflowAreas, visibleAreas } = layoutAreas(tabsHeight);
   const currentIsOverflowed = overflowAreas.some((area) => area.id === current);
   const focusableId = currentIsOverflowed
@@ -341,6 +353,10 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
         className="workspace-rail flex h-full w-[70px] shrink-0 flex-col items-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
         data-window-active={windowActive}
         data-workspace-keyboard-section
+        onFocus={(event) => {
+          if (event.target !== event.currentTarget || !focusableId) return;
+          tabRefs.current.get(focusableId)?.focus({ preventScroll: true });
+        }}
         tabIndex={-1}
       >
         <Menu open={workspaceMenuOpen} onOpenChange={setWorkspaceMenuOpen}>
@@ -352,8 +368,12 @@ export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serv
             delay={300}
             openOnHover
           >
-            <span aria-hidden="true" className="workspace-switcher-layer workspace-switcher-layer-back" />
-            <span aria-hidden="true" className="workspace-switcher-layer workspace-switcher-layer-mid" />
+            {phantomLayerCount >= 2 && (
+              <span aria-hidden="true" className="workspace-switcher-layer workspace-switcher-layer-back" />
+            )}
+            {phantomLayerCount >= 1 && (
+              <span aria-hidden="true" className="workspace-switcher-layer workspace-switcher-layer-mid" />
+            )}
             <GeneratedAvatar
               className="workspace-avatar-ring relative rounded-md"
               id={activeWorkspace?.id || serverSlug}

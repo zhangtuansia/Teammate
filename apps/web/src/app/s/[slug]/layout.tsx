@@ -19,6 +19,7 @@ interface Server {
   slug: string;
   description: string | null;
   owner_id: string;
+  viewerId: string;
 }
 
 interface ServerResolution {
@@ -77,7 +78,10 @@ export default function ServerLayout({
         setResolution({
           slug,
           request,
-          server: data as Server,
+          server: {
+            ...(data as Omit<Server, "viewerId">),
+            viewerId: user.id,
+          },
           error: "",
         });
       } catch (loadError) {
