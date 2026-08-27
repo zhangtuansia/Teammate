@@ -9,6 +9,7 @@ import { AgentActivityProvider } from "@/hooks/use-agent-activity";
 import { useAppSettings } from "@/hooks/use-app-settings";
 import { WorkspaceServerProvider } from "@/components/workspace-server-context";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import { WorkspaceSection } from "./workspace-section";
 import { DesktopSettingsPage } from "./settings";
@@ -65,6 +66,7 @@ interface WorkspaceCountsSnapshot {
 
 const LOCAL_SERVICE_URL =
   process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_SERVER_URL || "http://127.0.0.1:8787";
+const CHANNEL_LOAD_TIMEOUT_MS = 8_000;
 
 function abortError() {
   return new DOMException("The workspace request was cancelled", "AbortError");
@@ -270,29 +272,57 @@ function Conversation({ server }: { server: ServerInfo }) {
 
   useEffect(() => {
     const generation = ++channelGenerationRef.current;
+    const requestController = new AbortController();
     let cancelled = false;
+    let timedOut = false;
     const isCurrent = () => !cancelled && channelGenerationRef.current === generation;
     if (!channelId) {
       return () => {
         cancelled = true;
+        requestController.abort();
       };
     }
 
-    createClient()
+    const loadTimeout = window.setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+      if (!isCurrent()) return;
+      setChannelState({
+        serverId: server.id,
+        channelId,
+        request: channelRequest,
+        channel: null,
+        error: t("conversation.loadTimedOut"),
+      });
+    }, CHANNEL_LOAD_TIMEOUT_MS);
+
+    const channelQuery = createClient()
       .from("channels")
       .select("id, server_id, name, type, description")
       .eq("id", channelId)
       .eq("server_id", server.id)
-      .maybeSingle()
+      .maybeSingle();
+    // WKWebView can leave a cross-origin fetch permanently pending when an
+    // AbortSignal is attached, including after abort(). LocalClient requests
+    // are already protected from stale writes by the generation check above,
+    // so only remote Supabase queries need transport-level cancellation.
+    const request = process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === "true"
+      ? channelQuery
+      : channelQuery.abortSignal(requestController.signal);
+
+    request
       .then((result: { data: unknown; error?: { message: string } | null }) => {
-        if (!isCurrent()) return;
+        window.clearTimeout(loadTimeout);
+        if (!isCurrent() || timedOut) return;
         if (result.error || !result.data) {
           setChannelState({
             serverId: server.id,
             channelId,
             request: channelRequest,
             channel: null,
-            error: result.error?.message || t("conversation.notFound"),
+            error: timedOut
+              ? t("conversation.loadTimedOut")
+              : result.error?.message || t("conversation.notFound"),
           });
           return;
         }
@@ -305,18 +335,25 @@ function Conversation({ server }: { server: ServerInfo }) {
         });
       })
       .catch((error: unknown) => {
-        if (!isCurrent()) return;
+        window.clearTimeout(loadTimeout);
+        if (!isCurrent() || timedOut) return;
         setChannelState({
           serverId: server.id,
           channelId,
           request: channelRequest,
           channel: null,
-          error: error instanceof Error ? error.message : t("conversation.loadFailed"),
+          error: timedOut
+            ? t("conversation.loadTimedOut")
+            : error instanceof Error
+              ? error.message
+              : t("conversation.loadFailed"),
         });
       });
 
     return () => {
       cancelled = true;
+      window.clearTimeout(loadTimeout);
+      requestController.abort();
     };
   }, [channelId, channelRequest, server.id, t]);
 
@@ -376,7 +413,12 @@ function Conversation({ server }: { server: ServerInfo }) {
     : null;
   if (!currentChannelState) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+      <div
+        aria-live="polite"
+        className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"
+        role="status"
+      >
+        <Spinner aria-hidden="true" className="size-3.5 motion-reduce:animate-none" />
         {t("conversation.loading")}
       </div>
     );
@@ -558,8 +600,10 @@ export function App() {
   if (!currentLoadState?.server) {
     return (
       <main
-        className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground"
+        aria-live="polite"
+        className="flex h-full items-center justify-center gap-2 bg-background text-sm text-muted-foreground"
         data-tauri-drag-region="deep">
+        <Spinner aria-hidden="true" className="size-3.5 motion-reduce:animate-none" />
         {t("runtime.starting")}
       </main>
     );
@@ -592,7 +636,12 @@ export function App() {
                 Slack rounds and shadows only that leading top corner. */}
             <div className="workspace-slab flex min-w-0 flex-1 overflow-hidden bg-card">
               <Sidebar serverSlug={server.slug} serverId={server.id} />
-              <main className="workspace-primary relative flex flex-1 overflow-hidden bg-card">
+              <main
+                aria-label={t("nav.content")}
+                className="workspace-primary relative flex flex-1 overflow-hidden bg-card outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                data-workspace-keyboard-section
+                tabIndex={-1}
+              >
                 {workspaceSection === "home" ? (
                   <Conversation server={server} />
                 ) : workspaceSection === "settings" ? (

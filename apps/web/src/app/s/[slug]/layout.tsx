@@ -10,6 +10,7 @@ import { AgentActivityProvider } from "@/hooks/use-agent-activity";
 import { DesktopSettingsProvider } from "../../../../../desktop/src/settings";
 import { WorkspaceServerProvider } from "@/components/workspace-server-context";
 import { WorkspaceNavigationGuardProvider } from "@/hooks/use-navigation-guard";
+import { useAppSettings } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
 
 interface Server {
@@ -34,6 +35,7 @@ export default function ServerLayout({
 }) {
   const params = useParams();
   const router = useRouter();
+  const { t } = useAppSettings();
   const slug = params.slug as string;
   const [request, setRequest] = useState(0);
   const [resolution, setResolution] = useState<ServerResolution | null>(null);
@@ -134,11 +136,17 @@ export default function ServerLayout({
               serverSlug={server.slug}
             />
             <div className="flex min-h-0 flex-1">
-              <WorkspaceRail serverSlug={server.slug} />
+              <WorkspaceRail serverId={server.id} serverSlug={server.slug} />
               {/* One slab lifted off the rail, matching the desktop frame. */}
               <div className="workspace-slab flex min-w-0 flex-1 overflow-hidden bg-card">
                 <Sidebar serverSlug={server.slug} serverId={server.id} />
-                <div className="workspace-primary relative flex flex-1 overflow-hidden bg-card">
+                <div
+                  aria-label={t("nav.content")}
+                  className="workspace-primary relative flex flex-1 overflow-hidden bg-card outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+                  data-workspace-keyboard-section
+                  role="main"
+                  tabIndex={-1}
+                >
                   {children}
                 </div>
               </div>

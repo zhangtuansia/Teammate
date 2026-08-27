@@ -1,6 +1,13 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+  type CSSProperties,
+} from 'react';
 import { buildSystemPrompt } from '@teammate/shared/system-prompt';
 import { createClient } from '@/lib/supabase/client';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -67,6 +74,17 @@ import {
 import { useWorkspaceServer } from '@/components/workspace-server-context';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { GeneratedAvatar } from './generated-avatar';
+import { ResizablePanelHandle } from '@/components/ui/resizable-panel-handle';
+
+const AGENT_PANEL_WIDTH_KEY = 'teammate:agent-panel-width';
+const DEFAULT_AGENT_PANEL_WIDTH = 360;
+const MIN_AGENT_PANEL_WIDTH = 336;
+const MAX_AGENT_PANEL_WIDTH = 560;
+
+function clampAgentPanelWidth(width: number) {
+  const safeWidth = Number.isFinite(width) ? width : DEFAULT_AGENT_PANEL_WIDTH;
+  return Math.min(MAX_AGENT_PANEL_WIDTH, Math.max(MIN_AGENT_PANEL_WIDTH, Math.round(safeWidth)));
+}
 
 interface AgentInfo {
   id: string;
@@ -192,12 +210,45 @@ export function AgentSettingsPanel({
   const [activeTab, setActiveTab] = useState<'settings' | 'workspace'>('settings');
   const [ownerVerification, setOwnerVerification] = useState<OwnerVerification | null>(null);
   const [ownerVerificationAttempt, setOwnerVerificationAttempt] = useState(0);
+  const [panelWidth, setPanelWidth] = useState(DEFAULT_AGENT_PANEL_WIDTH);
+  const panelRef = useRef<HTMLElement | null>(null);
   const rpcConnectionRef = useRef<BridgeRpcConnection | null>(null);
   const rpcCallbacksRef = useRef(new Map<string, (payload: Record<string, unknown>) => void>());
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const ownerAccessAllowed = ownerVerification?.agentId === agent.id &&
     ownerVerification.ownerId === agent.owner_id &&
     ownerVerification.allowed;
+
+  const applyPanelWidth = useCallback((nextWidth: number) => {
+    const width = clampAgentPanelWidth(nextWidth);
+    panelRef.current?.style.setProperty('--agent-panel-width', `${width}px`);
+    return width;
+  }, []);
+
+  const commitPanelWidth = useCallback((nextWidth: number) => {
+    const width = applyPanelWidth(nextWidth);
+    setPanelWidth(width);
+    try {
+      window.localStorage.setItem(AGENT_PANEL_WIDTH_KEY, String(width));
+    } catch {
+      // Storage restrictions only make the preference session-scoped.
+    }
+  }, [applyPanelWidth]);
+
+  useLayoutEffect(() => {
+    let preferredWidth = DEFAULT_AGENT_PANEL_WIDTH;
+    try {
+      const storedWidth = Number(window.localStorage.getItem(AGENT_PANEL_WIDTH_KEY));
+      if (Number.isFinite(storedWidth) && storedWidth > 0) {
+        preferredWidth = clampAgentPanelWidth(storedWidth);
+      }
+    } catch {
+      // The inline default keeps the panel usable when storage is unavailable.
+    }
+    const width = applyPanelWidth(preferredWidth);
+    const frame = window.requestAnimationFrame(() => setPanelWidth(width));
+    return () => window.cancelAnimationFrame(frame);
+  }, [applyPanelWidth]);
 
   useEffect(() => {
     returnFocusRef.current = document.activeElement instanceof HTMLElement
@@ -578,8 +629,21 @@ export function AgentSettingsPanel({
   return (
     <aside
       aria-label={`${t('message.agentSettings')}: ${agent.display_name}`}
-      className="flex h-full w-[min(360px,calc(100vw_-_1rem))] flex-shrink-0 flex-col border-l bg-card animate-slide-in-right"
+      className="relative flex h-full w-[min(var(--agent-panel-width),calc(100vw_-_1rem))] flex-shrink-0 flex-col border-l bg-card animate-slide-in-right"
+      data-workspace-keyboard-section
+      ref={panelRef}
+      style={{ '--agent-panel-width': `${panelWidth}px` } as CSSProperties}
+      tabIndex={-1}
     >
+      <ResizablePanelHandle
+        ariaLabel={t('agentSettings.resize')}
+        defaultValue={DEFAULT_AGENT_PANEL_WIDTH}
+        max={MAX_AGENT_PANEL_WIDTH}
+        min={MIN_AGENT_PANEL_WIDTH}
+        onResize={applyPanelWidth}
+        onResizeEnd={commitPanelWidth}
+        value={panelWidth}
+      />
       {panelContent}
     </aside>
   );

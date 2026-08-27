@@ -2,9 +2,12 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Teammate Dev",
   "identifier": "com.teammate.desktop.dev",
+  "build": {
+    "beforeBuildCommand": "node scripts/before-build-dev.mjs"
+  },
   "app": {
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8788; img-src 'self' http://127.0.0.1:8788 data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8788; img-src 'self' http://127.0.0.1:8788 data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   }
 }

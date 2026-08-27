@@ -985,6 +985,240 @@
     0 1px 3px 0 rgb(0 0 0 / 0.08);
 }
 
+/* The rail is a stateful tab strip, not a stack of generic icon buttons. The
+   timing and geometry mirror Slack's compiled tab component; the colours stay
+   on Teammate's semantic rail pair so every palette keeps its contrast. */
+.workspace-rail {
+  opacity: 1;
+  transition: opacity 125ms cubic-bezier(0.36, 0.19, 0.29, 1);
+}
+
+.workspace-rail[data-window-active='false'] {
+  opacity: 0.66;
+}
+
+.workspace-rail-tab {
+  display: flex;
+  width: 52px;
+  height: 68px;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  color: var(--rail-foreground);
+  outline: none;
+  transition: color 125ms cubic-bezier(0.36, 0.19, 0.29, 1);
+}
+
+.workspace-rail-tab-icon {
+  position: relative;
+  display: flex;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  transition:
+    background-color 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09),
+    box-shadow 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09);
+}
+
+.workspace-rail-tab-glyph {
+  width: 20px;
+  height: 20px;
+  transition: transform 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09);
+}
+
+.workspace-rail-tab-label {
+  max-width: 52px;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-rail-tab:hover .workspace-rail-tab-icon,
+.workspace-rail-tab[data-popup-open] .workspace-rail-tab-icon {
+  background: color-mix(in srgb, var(--rail-foreground) 13%, transparent);
+}
+
+.workspace-rail-tab:hover .workspace-rail-tab-glyph,
+.workspace-rail-tab[data-popup-open] .workspace-rail-tab-glyph {
+  transform: scale(1.15);
+}
+
+.workspace-rail-tab:active .workspace-rail-tab-icon {
+  background: color-mix(in srgb, var(--rail-foreground) 13%, transparent);
+}
+
+.workspace-rail-tab[data-active='true'] {
+  color: var(--rail-foreground);
+}
+
+.workspace-rail-tab[data-active='true'] .workspace-rail-tab-icon {
+  background: color-mix(in srgb, var(--rail-foreground) 13%, transparent);
+}
+
+.workspace-rail-tab:focus-visible .workspace-rail-tab-icon {
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 5px color-mix(in srgb, var(--ring) 30%, transparent);
+}
+
+.workspace-rail-badge {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  display: inline-flex;
+  min-width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--rail);
+  border-radius: 999px;
+  padding: 0 3px;
+  background: var(--rail-foreground);
+  color: var(--rail);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.workspace-rail-badge[data-mention='true'] {
+  background: var(--mention);
+  color: var(--mention-foreground);
+}
+
+.workspace-rail-settings-separator {
+  width: 52px;
+  margin-top: 13px;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, var(--rail-foreground) 13%, transparent);
+}
+
+.workspace-switcher-trigger {
+  position: relative;
+  isolation: isolate;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+
+.workspace-switcher-layer {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--rail-foreground) 28%, var(--rail));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rail-foreground) 20%, transparent);
+  transform-origin: bottom;
+  transition:
+    opacity 240ms cubic-bezier(0.25, 1, 0.5, 1),
+    transform 240ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.workspace-switcher-layer-back {
+  opacity: 0.3;
+  transform: translateY(6px) scale(0.778);
+}
+
+.workspace-switcher-layer-mid {
+  opacity: 0.45;
+  transform: translateY(3px) scale(0.889);
+}
+
+.workspace-switcher-trigger[data-peek-visible='true'] .workspace-switcher-layer-back {
+  opacity: 0;
+  transform: translateY(16px) scale(0.778);
+}
+
+.workspace-switcher-trigger[data-peek-visible='true'] .workspace-switcher-layer-mid {
+  opacity: 0;
+  transform: translateY(6px) scale(0.889);
+}
+
+/* Slack's workspace menu does not scale from the trigger. It slides eight
+   pixels down while fading in, with separate motion and opacity curves. */
+.workspace-switcher-menu {
+  transition:
+    transform 240ms cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 240ms cubic-bezier(0.33, 1, 0.68, 1);
+  will-change: transform, opacity;
+}
+
+.workspace-switcher-menu[data-starting-style] {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.workspace-switcher-menu [data-slot='menu-item'] {
+  min-height: 52px;
+  gap: 12px;
+  padding-inline: 12px 16px;
+}
+
+.workspace-rail-peek-menu {
+  transition:
+    transform 160ms cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 160ms cubic-bezier(0.33, 1, 0.68, 1);
+  will-change: transform, opacity;
+}
+
+.workspace-rail-peek-menu[data-starting-style] {
+  opacity: 0;
+  transform: translateX(-8px);
+}
+
+.workspace-rail-control {
+  display: flex;
+  width: 36px;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--rail-foreground) 13%, transparent);
+  color: var(--rail-foreground);
+  outline: none;
+  transition:
+    background-color 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09),
+    box-shadow 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09),
+    transform 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09);
+}
+
+.workspace-rail-control:hover {
+  background: color-mix(in srgb, var(--rail-foreground) 22%, transparent);
+  transform: scale(1.1);
+}
+
+.workspace-rail-control:active {
+  background: var(--rail-foreground);
+  color: var(--rail);
+}
+
+.workspace-rail-control:focus-visible {
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 5px color-mix(in srgb, var(--ring) 30%, transparent);
+}
+
+.workspace-rail-create svg {
+  transition: transform 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.workspace-rail-create[data-open='true'] svg {
+  transform: rotate(135deg);
+}
+
+.workspace-rail-account {
+  display: flex;
+  border-radius: 8px;
+  outline: none;
+  transition: box-shadow 125ms cubic-bezier(0.17, 0.67, 0.55, 1.09);
+}
+
 /* Dark ground swallows a 9%-black drop, so only the drops are restated; the
    13% ring already follows --foreground and inverts on its own. */
 .dark .workspace-slab {
@@ -1001,6 +1235,21 @@
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--foreground) 13%, transparent),
     0 18px 48px 0 rgb(0 0 0 / 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-rail,
+  .workspace-rail-tab-icon,
+  .workspace-rail-tab-glyph,
+  .workspace-rail-tab,
+  .workspace-switcher-layer,
+  .workspace-switcher-menu,
+  .workspace-rail-peek-menu,
+  .workspace-rail-control,
+  .workspace-rail-create svg,
+  .workspace-rail-account {
+    transition-duration: 0.01ms;
+  }
 }
 
 /* ── Themes ───────────────────────────────────────────────────────────────

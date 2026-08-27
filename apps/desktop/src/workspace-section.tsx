@@ -33,6 +33,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Dialog,
   DialogClose,
@@ -48,6 +49,7 @@ import { GeneratedAvatar } from "@/components/generated-avatar";
 import { useUnsavedChangesGuard } from "@/hooks/use-navigation-guard";
 
 const WORKSPACE_REQUEST_TIMEOUT_MS = 18_000;
+const NEW_DOCUMENT_FOCUS_KEY = "teammate:new-document-title-focus";
 
 type WorkspaceSectionName = "documents" | "tasks";
 
@@ -303,6 +305,8 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const deletingRef = useRef(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState("");
+  const pendingCreatedDocumentIdRef = useRef<string | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadDocuments = useCallback(async (quiet = false) => {
     listRequestControllerRef.current?.abort();
@@ -555,7 +559,14 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
         .select("id")
         .single();
       if (createError || !data) throw new Error(createError?.message || t("documents.createFailed"));
-      router.push(`/s/${serverSlug}/documents?document=${(data as { id: string }).id}`);
+      const createdDocumentId = (data as { id: string }).id;
+      pendingCreatedDocumentIdRef.current = createdDocumentId;
+      try {
+        window.sessionStorage.setItem(NEW_DOCUMENT_FOCUS_KEY, createdDocumentId);
+      } catch {
+        // The in-memory ref still covers shells where session storage is unavailable.
+      }
+      router.push(`/s/${serverSlug}/documents?document=${createdDocumentId}`);
     } catch (createError) {
       setListLoadState({
         error: createError instanceof Error ? createError.message : t("documents.createFailed"),
@@ -719,6 +730,31 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
   const listLoading = !currentListSnapshot && (currentListLoadState?.loading ?? true);
   const detailLoading = Boolean(documentId) && !currentDetailSnapshot &&
     (currentDetailLoadState?.loading ?? true);
+
+  useEffect(() => {
+    let pendingDocumentId = pendingCreatedDocumentIdRef.current;
+    try {
+      pendingDocumentId ||= window.sessionStorage.getItem(NEW_DOCUMENT_FOCUS_KEY);
+    } catch {
+      // The in-memory ref is enough when this component stays mounted.
+    }
+    if (!selectedDocument || pendingDocumentId !== selectedDocument.id) return;
+    pendingCreatedDocumentIdRef.current = null;
+    try {
+      window.sessionStorage.removeItem(NEW_DOCUMENT_FOCUS_KEY);
+    } catch {
+      // There is nothing else to clean up when storage is unavailable.
+    }
+    let selectionFrame: number | null = null;
+    const frame = window.requestAnimationFrame(() => {
+      titleInputRef.current?.focus();
+      selectionFrame = window.requestAnimationFrame(() => titleInputRef.current?.select());
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (selectionFrame !== null) window.cancelAnimationFrame(selectionFrame);
+    };
+  }, [selectedDocument]);
 
   // How this document is written, which decides both how the editor parses it
   // and what "source" mode shows you.
@@ -954,7 +990,12 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
 
   if ((!documentId && listLoading) || (documentId && detailLoading)) {
     return (
-      <div className="flex min-w-0 flex-1 items-center justify-center bg-card text-sm text-muted-foreground">
+      <div
+        aria-live="polite"
+        className="flex min-w-0 flex-1 items-center justify-center gap-2 bg-card text-sm text-muted-foreground"
+        role="status"
+      >
+        <Spinner aria-hidden="true" className="size-3.5 motion-reduce:animate-none" />
         {t("documents.loading")}
       </div>
     );
@@ -1073,6 +1114,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 setDirty(true);
               }}
               placeholder={t("documents.untitled")}
+              ref={titleInputRef}
               value={title}
             />
             {useRichText ? (
@@ -1356,7 +1398,7 @@ function DocumentsSection({ serverId, serverSlug }: { serverId: string; serverSl
                 <button
                   aria-label={document.pinned_at ? t("documents.unpin") : t("documents.pin")}
                   aria-pressed={Boolean(document.pinned_at)}
-                  className={`relative z-10 flex size-6 shrink-0 items-center justify-center rounded transition-opacity hover:bg-accent ${
+                  className={`relative z-10 flex size-6 shrink-0 items-center justify-center rounded outline-none transition-opacity hover:bg-accent focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring ${
                     document.pinned_at
                       ? "text-primary opacity-100"
                       : "text-muted-foreground opacity-0 group-hover/row:opacity-70"
@@ -1883,9 +1925,10 @@ function TasksSection({ serverId, serverSlug }: { serverId: string; serverSlug: 
   const requestedStatus = searchParams.get("status") as TaskRecord["status"] | null;
   const selectedStatus = TASK_STATUSES.find((status) => status === requestedStatus) || null;
   const statusOrder: Array<TaskRecord["status"]> = [...TASK_STATUSES];
-  const orderedStatuses = selectedStatus
-    ? [selectedStatus, ...statusOrder.filter((status) => status !== selectedStatus)]
-    : statusOrder;
+  // The sidebar presents these as filters, so choosing one must narrow the
+  // board rather than merely moving that column to the front. Besides matching
+  // the label, this keeps a focused stage fully visible in compact windows.
+  const orderedStatuses = selectedStatus ? [selectedStatus] : statusOrder;
   const groups = orderedStatuses
     .map((status) => ({
       status,
@@ -2124,6 +2167,13 @@ function TasksSection({ serverId, serverSlug }: { serverId: string; serverSlug: 
     router.push(`/s/${serverSlug}/${prefix}/${task.channel.id}`);
   }
 
+  function handleCreateDialogOpenChange(open: boolean) {
+    setCreateOpen(open);
+    if (!open) {
+      window.requestAnimationFrame(() => taskFocusFallbackRef.current?.focus());
+    }
+  }
+
   const visibleTaskError = error || currentTaskLoadState?.error || "";
 
   return (
@@ -2156,7 +2206,12 @@ function TasksSection({ serverId, serverSlug }: { serverId: string; serverSlug: 
         )}
       />
       {loading ? (
-        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+        <div
+          aria-live="polite"
+          className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"
+          role="status"
+        >
+          <Spinner aria-hidden="true" className="size-3.5 motion-reduce:animate-none" />
           {t("tasks.loading")}
         </div>
       ) : visibleTaskError && tasks.length === 0 ? (
@@ -2346,7 +2401,7 @@ function TasksSection({ serverId, serverSlug }: { serverId: string; serverSlug: 
         </div>
       )}
 
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog open={createOpen} onOpenChange={handleCreateDialogOpenChange}>
         <DialogPopup className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t("tasks.new")}</DialogTitle>

@@ -3530,6 +3530,7 @@ function searchWorkspace(serverId: string, rawQuery: string) {
   const messages = db
     .prepare(
       `SELECT m.id, m.channel_id, m.content, m.created_at, m.sender_id, m.sender_type,
+              m.thread_parent_id,
               c.name AS channel_name, c.type AS channel_type,
               COALESCE(a.display_name, p.display_name) AS sender_name
        FROM messages m

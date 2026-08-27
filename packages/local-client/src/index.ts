@@ -37,6 +37,39 @@ interface QueryRequest {
 
 type QueryCallback<T> = (value: QueryResult) => T | PromiseLike<T>;
 
+const isNativeWebKit =
+  typeof navigator !== "undefined" &&
+  navigator.userAgent.includes("AppleWebKit") &&
+  !navigator.userAgent.includes("Chrome");
+const LOCAL_EVENT_POLL_WAIT_MS = isNativeWebKit ? 750 : 20_000;
+const LOCAL_EVENT_POLL_GAP_MS = isNativeWebKit ? 25 : 0;
+
+function localAbortError() {
+  const error = new Error("The local request was cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
+/**
+ * WKWebView can leave a cross-origin POST permanently pending when its fetch
+ * receives an AbortSignal, even after that signal fires. Keep cancellation at
+ * the promise boundary instead: callers still stop waiting immediately, while
+ * the loopback request is allowed to finish harmlessly in the background.
+ */
+function fetchLocalRequest(url: string, init: RequestInit, signal?: AbortSignal) {
+  if (!signal) return fetch(url, init);
+  if (signal.aborted) return Promise.reject(localAbortError());
+
+  const request = fetch(url, init);
+  return new Promise<Response>((resolve, reject) => {
+    const onAbort = () => reject(localAbortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    void request
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 class LocalQueryBuilder implements PromiseLike<QueryResult> {
   private action: QueryRequest["action"] = "select";
   private filters: QueryFilter[] = [];
@@ -173,15 +206,18 @@ class LocalQueryBuilder implements PromiseLike<QueryResult> {
     };
 
     try {
-      const response = await fetch(`${this.baseUrl}/api/query`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.accessToken}`,
+      const response = await fetchLocalRequest(
+        `${this.baseUrl}/api/query`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.accessToken}`,
+          },
+          body: JSON.stringify(request),
         },
-        body: JSON.stringify(request),
-        signal: this.signal,
-      });
+        this.signal,
+      );
       const result = (await response.json()) as QueryResult;
       if (!response.ok && !result.error) {
         return {
@@ -228,7 +264,7 @@ class LocalRpcBuilder implements PromiseLike<QueryResult> {
 
   private async execute(): Promise<QueryResult> {
     try {
-      const response = await fetch(
+      const response = await fetchLocalRequest(
         `${this.baseUrl}/api/rpc/${encodeURIComponent(this.functionName)}`,
         {
           method: "POST",
@@ -237,8 +273,8 @@ class LocalRpcBuilder implements PromiseLike<QueryResult> {
             Authorization: `Bearer ${this.accessToken}`,
           },
           body: JSON.stringify(this.args),
-          signal: this.signal,
         },
+        this.signal,
       );
       const result = (await response.json()) as QueryResult;
       if (!response.ok && !result.error) {
@@ -504,7 +540,10 @@ export class LocalClient {
     const controller = new AbortController();
     this.pollAbortController = controller;
     try {
-      const search = new URLSearchParams({ wait: "20000" });
+      // WKWebView may keep just one authenticated connection to the loopback
+      // origin. A 20-second events request can then starve channel/document
+      // POSTs behind it, so native WebKit yields the connection frequently.
+      const search = new URLSearchParams({ wait: String(LOCAL_EVENT_POLL_WAIT_MS) });
       if (this.cursor !== null) search.set("after", String(this.cursor));
       const response = await fetch(`${this.baseUrl}/api/events?${search}`, {
         headers: this.authorizationHeaders(),
@@ -519,7 +558,7 @@ export class LocalClient {
         for (const event of result.events) {
           for (const channel of this.channels) channel.dispatch(event);
         }
-        retryDelay = 0;
+        retryDelay = LOCAL_EVENT_POLL_GAP_MS;
       }
     } catch {
       // The service may be starting. Keep polling while channels are subscribed.

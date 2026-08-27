@@ -35,6 +35,8 @@ export interface TiptapMessageInputHandle {
 
 interface TiptapMessageInputProps {
   placeholder?: string;
+  /** Focus once the editor instance is ready, including lazy first mount. */
+  autoFocus?: boolean;
   ariaLabel?: string;
   ariaControls?: string;
   ariaExpanded?: boolean;
@@ -348,6 +350,7 @@ const TiptapMessageInput = forwardRef<
 >(function TiptapMessageInput(
   {
     placeholder,
+    autoFocus = false,
     ariaLabel,
     ariaControls,
     ariaExpanded,
@@ -428,6 +431,12 @@ const TiptapMessageInput = forwardRef<
     },
     immediatelyRender: false,
   });
+
+  useEffect(() => {
+    if (!autoFocus || !editor) return;
+    const frame = window.requestAnimationFrame(() => editor.commands.focus('end'));
+    return () => window.cancelAnimationFrame(frame);
+  }, [autoFocus, editor]);
 
   useEffect(() => {
     if (!editor) return;

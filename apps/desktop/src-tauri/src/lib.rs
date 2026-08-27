@@ -179,7 +179,10 @@ pub fn run() {
                     "--port".to_string(),
                     LOCAL_SERVER_PORT.to_string(),
                 ])
-                .env("TEAMMATE_LOCAL_CONTROLLER_TOKEN", controller_credential);
+                .env(
+                    "TEAMMATE_LOCAL_CONTROLLER_TOKEN",
+                    controller_credential.clone(),
+                );
             let (mut events, child) = command.spawn()?;
             let runtime_terminated = Arc::new(AtomicBool::new(false));
             let event_terminated = Arc::clone(&runtime_terminated);
@@ -211,6 +214,17 @@ pub fn run() {
                 terminated: runtime_terminated,
             });
             if let Some(window) = app.get_webview_window("main") {
+                // The command remains the normal credential path. Injecting the
+                // same renderer-scoped value also covers WebKit occasionally
+                // delaying the first invoke while the app is restoring a window.
+                // Without this fallback React never mounts and the window stays
+                // blank even though the local runtime is already healthy.
+                let credential_script = format!(
+                    "window.__TEAMMATE_LOCAL_CONTROLLER_CREDENTIAL__='{controller_credential}';window.dispatchEvent(new Event('teammate:local-controller-credential'));"
+                );
+                if let Err(error) = window.eval(&credential_script) {
+                    eprintln!("Could not inject the local controller credential: {error}");
+                }
                 configure_main_window(&window);
             }
             app.state::<AppLifecycle>()

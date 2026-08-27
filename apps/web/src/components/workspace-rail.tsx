@@ -1,14 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
-import { BlocksIcon, CheckIcon, FileTextIcon, HomeIcon, ListChecksIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { CheckIcon, PlusIcon } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
+import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
 import { CreateServerDialog } from "./create-server-dialog";
 import { GeneratedAvatar } from "./generated-avatar";
+import {
+  WorkspaceRailIcon,
+  type WorkspaceRailGlyph,
+} from "./workspace-rail-icons";
 
 /**
  * Which workspace you are in, and which part of it, kept apart from which
@@ -22,13 +34,12 @@ import { GeneratedAvatar } from "./generated-avatar";
  * one, a folder tree in another — and those switches only read as deliberate
  * while the things driving them stay in view.
  *
- * The measurements come from Slack's own rail rather than from looking at it:
- * 70px wide, a 36px workspace avatar up top, 52×68 tabs under it whose icon sits
- * in a 36px rounded box, and an 11px bold label. The column paints no background
- * of its own — the app's base surface shows through, and the panels to its right
- * are the ones that lift off it. Selection is only ever that icon box filling
- * in; the label does not change colour or weight, which is what keeps a column
- * of six of them from looking like a row of competing buttons.
+ * The measurements and behaviour come from Slack's renderer bundle rather than
+ * from tracing pixels in a screenshot: 70px wide, a 36px workspace avatar, and
+ * 52×68 tabs whose glyph sits in a 36px rounded box. Its vertical tabs use
+ * manual activation, swap to a filled glyph when selected, and collapse lower
+ * priority destinations into a Browse tab when height is constrained. This
+ * rail follows that model while keeping Teammate's own routes and vocabulary.
  *
  * The frame around it follows the same source: the rail paints nothing, the
  * shell behind it carries --rail, and the sidebar and chat together are one
@@ -43,7 +54,7 @@ interface WorkspaceSummary {
 }
 
 interface Area {
-  icon: typeof HomeIcon;
+  glyph: WorkspaceRailGlyph;
   id: string;
   label: TranslationKey;
   /** Appended to the workspace root, so home is the root itself. */
@@ -51,27 +62,60 @@ interface Area {
 }
 
 const AREAS: Area[] = [
-  { icon: HomeIcon, id: "home", label: "nav.home", path: "" },
-  { icon: FileTextIcon, id: "documents", label: "nav.documents", path: "/documents" },
-  { icon: ListChecksIcon, id: "tasks", label: "nav.tasks", path: "/tasks" },
-  { icon: BlocksIcon, id: "apps", label: "nav.apps", path: "/apps" },
+  { glyph: "home", id: "home", label: "nav.home", path: "" },
+  { glyph: "documents", id: "documents", label: "nav.documents", path: "/documents" },
+  { glyph: "tasks", id: "tasks", label: "nav.tasks", path: "/tasks" },
+  { glyph: "apps", id: "apps", label: "nav.apps", path: "/apps" },
 ];
 
 // Settings is not a place you work, so it sits apart from the three that are —
 // the same separation Slack gives the admin tab.
 const SETTINGS: Area = {
-  icon: SettingsIcon,
+  glyph: "settings",
   id: "settings",
   label: "nav.settings",
   path: "/settings",
 };
 
-export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
+const ALL_AREAS = [...AREAS, SETTINGS];
+const TAB_HEIGHT = 68;
+const SETTINGS_GAP = 21;
+
+interface RailLayout {
+  overflowAreas: Area[];
+  visibleAreas: Area[];
+}
+
+function layoutAreas(height: number): RailLayout {
+  const fullHeight = ALL_AREAS.length * TAB_HEIGHT + SETTINGS_GAP;
+  if (height >= fullHeight) {
+    return { overflowAreas: [], visibleAreas: ALL_AREAS };
+  }
+
+  // Browse consumes a row of its own. Home always survives; the remaining
+  // destinations retain preference order inside the menu, as Slack does.
+  const rows = Math.max(2, Math.floor(height / TAB_HEIGHT));
+  const visibleAreas = ALL_AREAS.slice(0, Math.max(1, rows - 1));
+  return {
+    overflowAreas: ALL_AREAS.slice(visibleAreas.length),
+    visibleAreas,
+  };
+}
+
+export function WorkspaceRail({ serverId, serverSlug }: { serverId: string; serverSlug: string }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { navigate } = useWorkspaceNavigation();
   const { t } = useAppSettings();
+  const supabase = useMemo(() => createClient(), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [windowActive, setWindowActive] = useState(true);
+  const [tabsHeight, setTabsHeight] = useState(Number.POSITIVE_INFINITY);
+  const [attention, setAttention] = useState({ mentions: 0, unread: 0 });
+  const tabsRegionRef = useRef<HTMLDivElement | null>(null);
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const [account, setAccount] = useState<{ avatarUrl: string | null; id: string; name: string }>({
     avatarUrl: null,
     id: "",
@@ -81,7 +125,6 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
   useEffect(() => {
     let cancelled = false;
     async function loadWorkspaces() {
-      const supabase = createClient();
       const {
         data: { user },
       } = await supabase.auth.getUser();
@@ -124,8 +167,7 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
     // Your name and face are edited a screen away, under settings, which is not
     // a navigation this column sees. Without this the rail would keep showing
     // who you used to be until the next workspace switch.
-    const client = createClient();
-    const subscription = client
+    const subscription = supabase
       .channel(`workspace-rail:${serverSlug}`)
       .on(
         "postgres_changes",
@@ -141,11 +183,67 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
 
     return () => {
       cancelled = true;
-      client.removeChannel(subscription);
+      void supabase.removeChannel(subscription);
     };
     // Creating a workspace lands you in it, so keying on the slug is also what
     // picks up the new one.
-  }, [serverSlug]);
+  }, [serverSlug, supabase]);
+
+  useEffect(() => {
+    const region = tabsRegionRef.current;
+    if (!region) return;
+    const measure = () => setTabsHeight(region.clientHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(region);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const syncWindowState = () => setWindowActive(document.hasFocus());
+    syncWindowState();
+    window.addEventListener("focus", syncWindowState);
+    window.addEventListener("blur", syncWindowState);
+    return () => {
+      window.removeEventListener("focus", syncWindowState);
+      window.removeEventListener("blur", syncWindowState);
+    };
+  }, []);
+
+  const loadAttention = useCallback(async () => {
+    const { data, error } = await supabase.rpc("channel_unread_counts", {
+      display_name: account.name,
+      server_uuid: serverId,
+    });
+    if (error || !Array.isArray(data)) return;
+    let unread = 0;
+    let mentions = 0;
+    for (const row of data as Array<{ mentions: number; unread: number }>) {
+      unread += Number(row.unread) || 0;
+      mentions += Number(row.mentions) || 0;
+    }
+    setAttention({ mentions, unread });
+  }, [account.name, serverId, supabase]);
+
+  useEffect(() => {
+    const refresh = createTrailingRefreshScheduler(loadAttention, 200);
+    void refresh.runNow();
+    const subscription = supabase
+      .channel(`workspace-rail-unread:${serverId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () =>
+        refresh.schedule(),
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "channel_read_state" },
+        () => refresh.schedule(),
+      )
+      .subscribe();
+    return () => {
+      refresh.cancel();
+      void supabase.removeChannel(subscription);
+    };
+  }, [loadAttention, serverId, supabase]);
 
   // Hosted workspaces have no documents or tasks to switch between, and their
   // settings live under the account menu instead.
@@ -162,56 +260,114 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
           : "home";
 
   const activeWorkspace = workspaces.find((workspace) => workspace.slug === serverSlug);
+  const { overflowAreas, visibleAreas } = layoutAreas(tabsHeight);
+  const currentIsOverflowed = overflowAreas.some((area) => area.id === current);
+  const focusableId = currentIsOverflowed
+    ? "more"
+    : visibleAreas.some((area) => area.id === current)
+      ? current
+      : visibleAreas[0]?.id;
+  const visibleTabIds = [
+    ...visibleAreas.map((area) => area.id),
+    ...(overflowAreas.length > 0 ? ["more"] : []),
+  ];
+
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, id: string) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = Math.max(0, visibleTabIds.indexOf(id));
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? visibleTabIds.length - 1
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + visibleTabIds.length)
+          % visibleTabIds.length;
+    tabRefs.current.get(visibleTabIds[nextIndex])?.focus();
+  };
 
   const renderArea = (area: Area) => {
-    const Icon = area.icon;
     const active = current === area.id;
     const label = t(area.label);
+    const href = `/s/${serverSlug}${area.path}`;
+    const isHome = area.id === "home";
+    const badgeCount = isHome ? (attention.mentions || attention.unread) : 0;
+    const badgeLabel = isHome && badgeCount > 0
+      ? t(attention.mentions > 0 ? "nav.mentions" : "nav.unread", { count: String(badgeCount) })
+      : "";
     return (
       <button
         key={area.id}
+        ref={(node) => {
+          if (node) tabRefs.current.set(area.id, node);
+          else tabRefs.current.delete(area.id);
+        }}
         type="button"
-        onClick={() => navigate(`/s/${serverSlug}${area.path}`)}
-        title={label}
+        onClick={() => {
+          if (pathname !== href) navigate(href);
+        }}
+        onFocus={() => router.prefetch(href)}
+        onKeyDown={(event) => handleTabKeyDown(event, area.id)}
+        onPointerEnter={() => router.prefetch(href)}
+        title={badgeLabel ? `${label} · ${badgeLabel}` : label}
+        aria-label={badgeLabel ? `${label}, ${badgeLabel}` : label}
         aria-current={active ? "page" : undefined}
-        className="group flex h-[68px] w-[52px] flex-col items-center gap-1 py-2 text-rail-foreground/85"
+        aria-selected={active}
+        className="workspace-rail-tab"
+        data-active={active}
+        role="tab"
+        tabIndex={focusableId === area.id ? 0 : -1}
       >
-        <span
-          // Slack runs two alpha ladders and never mixes them: a surface that
-          // rests empty goes 6% then 13%, and one that already carries a fill
-          // goes 13% then 22% then 28%. A selected tab is the second kind, so
-          // pressing it deepens what is there rather than starting over.
-          className={`flex size-9 items-center justify-center rounded-md transition-colors ${
-            active
-              ? "bg-rail-foreground/12 group-hover:bg-rail-foreground/22 group-active:bg-rail-foreground/28"
-              : "group-hover:bg-rail-foreground/6 group-active:bg-rail-foreground/13"
-          }`}
-        >
-          <Icon className="size-5" strokeWidth={active ? 2.2 : 1.8} />
+        <span className="workspace-rail-tab-icon">
+          <WorkspaceRailIcon
+            active={active}
+            className="workspace-rail-tab-glyph"
+            glyph={area.glyph}
+          />
+          {badgeCount > 0 && (
+            <span aria-hidden="true" className="workspace-rail-badge" data-mention={attention.mentions > 0}>
+              {badgeCount > 99 ? "99+" : badgeCount}
+            </span>
+          )}
         </span>
-        <span className="text-[11px] leading-none font-bold">{label}</span>
+        <span className="workspace-rail-tab-label">{label}</span>
       </button>
     );
   };
 
   return (
     <>
-      <nav className="flex h-full w-[70px] shrink-0 flex-col items-center" aria-label={t("nav.workspace")}>
-        <Menu>
+      <nav
+        aria-label={t("nav.workspace")}
+        className="workspace-rail flex h-full w-[70px] shrink-0 flex-col items-center outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+        data-window-active={windowActive}
+        data-workspace-keyboard-section
+        tabIndex={-1}
+      >
+        <Menu open={workspaceMenuOpen} onOpenChange={setWorkspaceMenuOpen}>
           <MenuTrigger
-            className="mt-2 mb-4 shrink-0 rounded-md transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            className="workspace-switcher-trigger mt-2 mb-3 shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             title={t("workspace.switch")}
             aria-label={t("workspace.switch")}
+            data-peek-visible={workspaceMenuOpen}
+            delay={300}
+            openOnHover
           >
+            <span aria-hidden="true" className="workspace-switcher-layer workspace-switcher-layer-back" />
+            <span aria-hidden="true" className="workspace-switcher-layer workspace-switcher-layer-mid" />
             <GeneratedAvatar
-              className="workspace-avatar-ring rounded-md"
+              className="workspace-avatar-ring relative rounded-md"
               id={activeWorkspace?.id || serverSlug}
               initials
               name={activeWorkspace?.name || serverSlug}
               size="message"
             />
           </MenuTrigger>
-          <MenuPopup align="start" className="max-h-72 w-56">
+          <MenuPopup
+            align="start"
+            className="workspace-switcher-menu max-h-72 w-64"
+            side="right"
+            sideOffset={10}
+          >
             {workspaces.map((workspace) => (
               <MenuItem
                 key={workspace.id}
@@ -219,13 +375,15 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
                 onClick={() => {
                   if (workspace.slug !== serverSlug) navigate(`/s/${workspace.slug}`);
                 }}
+                onFocus={() => router.prefetch(`/s/${workspace.slug}`)}
+                onPointerEnter={() => router.prefetch(`/s/${workspace.slug}`)}
               >
                 <GeneratedAvatar
                   className="rounded-md"
                   id={workspace.id}
                   initials
                   name={workspace.name}
-                  size="xs"
+                  size="message"
                 />
                 <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
                 {workspace.slug === serverSlug && (
@@ -235,28 +393,96 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
             ))}
             <MenuSeparator />
             <MenuItem onClick={() => setShowCreate(true)}>
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground">
-                <PlusIcon className="size-3" />
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-md border border-dashed border-border text-muted-foreground">
+                <PlusIcon className="size-4" />
               </span>
               <span>{t("workspace.create")}</span>
             </MenuItem>
           </MenuPopup>
         </Menu>
 
-        <div className="flex flex-col items-center">{AREAS.map(renderArea)}</div>
-        {/* Slack sets its admin tab off from the areas by a gap rather than by
-            sending it to the bottom — the bottom belongs to the控制条 below. */}
-        <div className="mt-[21px] flex flex-col items-center">{renderArea(SETTINGS)}</div>
+        <div ref={tabsRegionRef} className="min-h-0 w-full flex-1 overflow-hidden">
+          <div
+            aria-label={t("nav.workspace")}
+            aria-orientation="vertical"
+            className="flex flex-col items-center"
+            role="tablist"
+          >
+            {visibleAreas.map((area, index) => (
+              <div
+                className={area.id === "settings" && index > 0 ? "workspace-rail-settings-separator" : undefined}
+                key={area.id}
+                role="presentation"
+              >
+                {renderArea(area)}
+              </div>
+            ))}
+            {overflowAreas.length > 0 && (
+              <Menu>
+                <MenuTrigger
+                  ref={(node) => {
+                    if (node instanceof HTMLButtonElement) tabRefs.current.set("more", node);
+                    else tabRefs.current.delete("more");
+                  }}
+                  aria-label={t("nav.more")}
+                  aria-current={currentIsOverflowed ? "page" : undefined}
+                  aria-selected={currentIsOverflowed}
+                  className="workspace-rail-tab"
+                  data-active={currentIsOverflowed}
+                  delay={300}
+                  onKeyDown={(event) => handleTabKeyDown(event, "more")}
+                  openOnHover
+                  role="tab"
+                  tabIndex={focusableId === "more" ? 0 : -1}
+                  title={t("nav.more")}
+                >
+                  <span className="workspace-rail-tab-icon">
+                    <WorkspaceRailIcon className="workspace-rail-tab-glyph" glyph="more" />
+                  </span>
+                  <span className="workspace-rail-tab-label">{t("nav.more")}</span>
+                </MenuTrigger>
+                <MenuPopup
+                  align="start"
+                  className="workspace-rail-peek-menu w-52"
+                  side="right"
+                  sideOffset={8}
+                >
+                  {overflowAreas.map((area) => {
+                    const active = current === area.id;
+                    return (
+                      <MenuItem
+                        className={active ? "bg-accent font-semibold" : undefined}
+                        key={area.id}
+                        onClick={() => {
+                          const href = `/s/${serverSlug}${area.path}`;
+                          if (pathname !== href) navigate(href);
+                        }}
+                        onFocus={() => router.prefetch(`/s/${serverSlug}${area.path}`)}
+                        onPointerEnter={() => router.prefetch(`/s/${serverSlug}${area.path}`)}
+                      >
+                        <WorkspaceRailIcon active={active} glyph={area.glyph} />
+                        <span>{t(area.label)}</span>
+                        {active && <CheckIcon className="ml-auto" strokeWidth={2.5} />}
+                      </MenuItem>
+                    );
+                  })}
+                </MenuPopup>
+              </Menu>
+            )}
+          </div>
+        </div>
 
         {/* Slack's control strip: round 36px buttons, 52px apart, the account
             last. These are actions on the workspace, not places inside it. */}
-        <div className="mt-auto flex flex-col items-center gap-4 pb-4">
+        <div className="flex shrink-0 flex-col items-center gap-4 pb-6 pt-2">
           <button
             type="button"
             onClick={() => setShowCreate(true)}
             title={t("workspace.create")}
             aria-label={t("workspace.create")}
-            className="flex size-9 items-center justify-center rounded-full bg-rail-foreground/12 text-rail-foreground transition-colors hover:bg-rail-foreground/22 active:bg-rail-foreground/28"
+            aria-expanded={showCreate}
+            className="workspace-rail-control workspace-rail-create"
+            data-open={showCreate}
           >
             <PlusIcon className="size-4" strokeWidth={2.2} />
           </button>
@@ -267,7 +493,7 @@ export function WorkspaceRail({ serverSlug }: { serverSlug: string }) {
             onClick={() => navigate(`/s/${serverSlug}/settings?section=profile`)}
             title={account.name ? `${account.name} · ${t("settings.navProfile")}` : t("settings.navProfile")}
             aria-label={t("settings.navProfile")}
-            className="flex rounded-md transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            className="workspace-rail-account focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           >
             <GeneratedAvatar
               avatarUrl={account.avatarUrl}

@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { CableIcon, Loader2Icon, PlusIcon, PuzzleIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import { AlertCircleIcon, CableIcon, Loader2Icon, PlusIcon, PuzzleIcon, Trash2Icon, UnplugIcon } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -58,6 +66,22 @@ const SOURCE_LABELS: Record<string, TranslationKey> = {
   pi: "apps.sourcePi",
 };
 
+function AppsHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <header className="relative flex h-16 shrink-0 items-center border-b px-6">
+      <div
+        aria-hidden="true"
+        className="desktop-native-drag absolute inset-0"
+        data-tauri-drag-region
+      />
+      <div className="pointer-events-none relative min-w-0">
+        <h1 className="truncate text-[15px] font-semibold text-foreground">{title}</h1>
+        <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle}</p>
+      </div>
+    </header>
+  );
+}
+
 export function AppsSection({ serverId }: { serverId: string }) {
   const { t } = useAppSettings();
   const [skills, setSkills] = useState<SkillRow[]>([]);
@@ -66,6 +90,9 @@ export function AppsSection({ serverId }: { serverId: string }) {
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<ConnectorRow | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<ConnectorRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [actionError, setActionError] = useState("");
 
   const load = useCallback(async () => {
     if (!serverId) return;
@@ -99,6 +126,7 @@ export function AppsSection({ serverId }: { serverId: string }) {
   useEffect(() => afterPaint(() => void load()), [load]);
 
   const setSkillEnabled = async (skill: SkillRow, enabled: boolean) => {
+    setActionError("");
     setSkills((rows) =>
       rows.map((row) => (row.id === skill.id ? { ...row, enabled } : row)),
     );
@@ -106,10 +134,14 @@ export function AppsSection({ serverId }: { serverId: string }) {
       .from("app_skills")
       .update({ enabled })
       .eq("id", skill.id);
-    if (updateError) void load();
+    if (updateError) {
+      setActionError(t("apps.updateFailed"));
+      void load();
+    }
   };
 
   const setConnectorEnabled = async (connector: ConnectorRow, enabled: boolean) => {
+    setActionError("");
     setConnectors((rows) =>
       rows.map((row) => (row.id === connector.id ? { ...row, enabled } : row)),
     );
@@ -117,17 +149,27 @@ export function AppsSection({ serverId }: { serverId: string }) {
       .from("app_connectors")
       .update({ enabled })
       .eq("id", connector.id);
-    if (updateError) void load();
+    if (updateError) {
+      setActionError(t("apps.updateFailed"));
+      void load();
+    }
   };
 
   const deleteConnector = async (connector: ConnectorRow) => {
+    if (deleting) return;
+    setDeleting(true);
+    setActionError("");
     const { error: deleteError } = await createClient()
       .from("app_connectors")
       .delete()
       .eq("id", connector.id);
-    if (!deleteError) {
-      setConnectors((rows) => rows.filter((row) => row.id !== connector.id));
+    setDeleting(false);
+    if (deleteError) {
+      setActionError(t("apps.deleteConnectorFailed"));
+      return;
     }
+    setConnectors((rows) => rows.filter((row) => row.id !== connector.id));
+    setPendingDelete(null);
   };
 
   const sortedSkills = useMemo(
@@ -142,28 +184,51 @@ export function AppsSection({ serverId }: { serverId: string }) {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-        <Loader2Icon className="size-4 animate-spin" />
-        {t("apps.loading")}
+      <div className="flex h-full flex-col bg-card">
+        <AppsHeader title={t("apps.title")} subtitle={t("apps.subtitle")} />
+        <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
+          <Loader2Icon className="size-4 animate-spin" />
+          <span aria-live="polite" role="status">{t("apps.loading")}</span>
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex h-full items-center justify-center px-6 text-sm text-muted-foreground">
-        {t("apps.loadFailed")} · {error}
+      <div className="flex h-full flex-col bg-card">
+        <AppsHeader title={t("apps.title")} subtitle={t("apps.subtitle")} />
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-sm text-muted-foreground">
+          <p className="max-w-lg" role="alert">{t("apps.loadFailed")} · {error}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setLoading(true);
+              void load();
+            }}
+          >
+            {t("runtime.retry")}
+          </Button>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="mx-auto w-full max-w-6xl px-6 py-8">
-        <header className="mb-6">
-          <h1 className="text-lg font-semibold text-foreground">{t("apps.title")}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{t("apps.subtitle")}</p>
-        </header>
+    <div className="flex h-full flex-col bg-card">
+      <AppsHeader title={t("apps.title")} subtitle={t("apps.subtitle")} />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-6xl px-6 py-6">
+        {actionError && (
+          <div
+            className="mb-5 flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+            role="alert"
+          >
+            <AlertCircleIcon className="size-4 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+        )}
 
         <ConnectorCatalog
           installed={connectors}
@@ -238,13 +303,17 @@ export function AppsSection({ serverId }: { serverId: string }) {
                   key={connector.id}
                   connector={connector}
                   onEdit={() => setEditing(connector)}
-                  onDelete={() => void deleteConnector(connector)}
+                  onDelete={() => {
+                    setActionError("");
+                    setPendingDelete(connector);
+                  }}
                   onToggle={(enabled) => void setConnectorEnabled(connector, enabled)}
                 />
               ))}
             </div>
           )}
         </section>
+        </div>
       </div>
 
       {(showCreate || editing) && (
@@ -262,6 +331,40 @@ export function AppsSection({ serverId }: { serverId: string }) {
           }}
         />
       )}
+      <AlertDialog
+        open={Boolean(pendingDelete)}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setPendingDelete(null);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("apps.deleteConnectorTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("apps.deleteConnectorDescription", { name: pendingDelete?.name || "" })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {actionError && (
+            <p className="px-1 text-sm text-destructive" role="alert">
+              {actionError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <Button variant="ghost" disabled={deleting} onClick={() => setPendingDelete(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              loading={deleting}
+              onClick={() => {
+                if (pendingDelete) void deleteConnector(pendingDelete);
+              }}
+            >
+              {t("common.delete")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
     </div>
   );
 }
@@ -291,10 +394,22 @@ function ConnectorCard({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
-        <Button size="icon-sm" variant="ghost" onClick={onEdit} title={t("common.edit")}>
+        <Button
+          aria-label={t("common.edit")}
+          size="icon-sm"
+          variant="ghost"
+          onClick={onEdit}
+          title={t("common.edit")}
+        >
           <PuzzleIcon className="size-3.5" />
         </Button>
-        <Button size="icon-sm" variant="ghost" onClick={onDelete} title={t("common.delete")}>
+        <Button
+          aria-label={t("common.delete")}
+          size="icon-sm"
+          variant="ghost"
+          onClick={onDelete}
+          title={t("common.delete")}
+        >
           <Trash2Icon className="size-3.5" />
         </Button>
         <Switch
@@ -445,6 +560,12 @@ function ConnectorCatalog({
   const category = (searchParams.get("category") || "featured") as ConnectorCategory;
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState<string | null>(null);
+  const [installFailure, setInstallFailure] = useState<{
+    message: string;
+    scope: string;
+  } | null>(null);
+  const installScope = `${category}\u0000${query}`;
+  const installError = installFailure?.scope === installScope ? installFailure.message : "";
 
   const installedNames = useMemo(
     () => new Set(installed.map((row) => row.name)),
@@ -454,6 +575,7 @@ function ConnectorCatalog({
 
   const install = async (entry: CatalogEntry) => {
     setPending(entry.id);
+    setInstallFailure(null);
     // The placeholder rides along in the arguments and in the environment so
     // the connector is visible and editable rather than silently broken; the
     // add is the fast path, filling in the specifics stays a deliberate edit.
@@ -463,7 +585,7 @@ function ConnectorCatalog({
     const env = Object.fromEntries(
       (entry.requires || []).map((required) => [required.key, ""]),
     );
-    await createClient()
+    const { error } = await createClient()
       .from("app_connectors")
       .insert({
         args: JSON.stringify(args),
@@ -474,6 +596,13 @@ function ConnectorCatalog({
         server_id: serverId,
       });
     setPending(null);
+    if (error) {
+      setInstallFailure({
+        message: t("apps.installConnectorFailed", { name: entry.name }),
+        scope: installScope,
+      });
+      return;
+    }
     onInstalled();
   };
 
@@ -497,6 +626,12 @@ function ConnectorCatalog({
           />
         </div>
       </div>
+
+      {installError && (
+        <p className="mb-3 text-sm text-destructive" role="alert">
+          {installError}
+        </p>
+      )}
 
       {entries.length === 0 ? (
         <Card className="p-6 text-center text-sm text-muted-foreground">

@@ -10,11 +10,21 @@ import { ContextMenu } from "./context-menu";
 import { useAgentActivity } from "@/hooks/use-agent-activity";
 import { useAppSettings, type TranslationKey } from "@/hooks/use-app-settings";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu";
 import { BrainIcon, CodeIcon, GlobeIcon, SparklesIcon, TrendingUpIcon } from "lucide-react";
-import { ChevronDownIcon, ChevronRightIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, WrenchIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, PlusIcon, PencilIcon, LogOutIcon, SettingsIcon, UserPlusIcon, UserIcon, UsersIcon, FileTextIcon, ListChecksIcon, CircleIcon, Clock3Icon, ScanEyeIcon, CheckCircle2Icon, BotIcon, MessageSquareIcon, SearchIcon, FolderIcon, FolderPlusIcon, PinIcon, SquarePenIcon, WrenchIcon, XIcon } from "lucide-react";
 import { GeneratedAvatar } from "./generated-avatar";
 import { useWorkspaceNavigation } from "@/hooks/use-navigation-guard";
+import { useWorkspaceServer } from "./workspace-server-context";
 import { withRequestDeadline } from "@/lib/request-deadline";
 import { createTrailingRefreshScheduler } from "@/lib/trailing-refresh";
 import { afterPaint } from "@/lib/after-paint";
@@ -24,6 +34,8 @@ import { filesFromDrop } from "@/lib/folder-import";
 import { importFilesAsDocuments } from "@/lib/import-documents";
 import { ancestorPaths, buildDocumentTree, folderLabel, type DocumentFolder } from "@/lib/document-tree";
 import { CONNECTOR_CATEGORIES } from "@/lib/connector-catalog";
+
+const NEW_DOCUMENT_FOCUS_KEY = "teammate:new-document-title-focus";
 
 interface Channel {
   id: string;
@@ -186,7 +198,7 @@ function DocumentRow({
         <button
           aria-label={pinned ? t("documents.unpin") : t("documents.pin")}
           aria-pressed={pinned}
-          className={`mr-1.5 flex size-5 shrink-0 items-center justify-center rounded transition-opacity hover:bg-accent ${
+          className={`mr-1.5 flex size-5 shrink-0 items-center justify-center rounded outline-none transition-opacity hover:bg-accent focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring ${
             pinned ? "text-primary opacity-100" : "opacity-0 group-hover/doc:opacity-60"
           }`}
           onClick={() => onTogglePin(document)}
@@ -424,6 +436,7 @@ export function Sidebar({
 }) {
   const [dmChannels, setDmChannels] = useState<DmChannel[]>([]);
   const [groupChannels, setGroupChannels] = useState<Channel[]>([]);
+  const [conversationQuery, setConversationQuery] = useState("");
   const [documents, setDocuments] = useState<WorkspaceDocument[]>([]);
   const [documentQuery, setDocumentQuery] = useState("");
   const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
@@ -440,12 +453,17 @@ export function Sidebar({
   const [channelsOpen, setChannelsOpen] = useState(true);
   const [creatingDocument, setCreatingDocument] = useState(false);
   const [documentActionError, setDocumentActionError] = useState("");
+  const [pendingDocumentDelete, setPendingDocumentDelete] = useState<WorkspaceDocument | null>(null);
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
   const [sidebarMetrics, setSidebarMetrics] = useState({
     width: DEFAULT_SIDEBAR_WIDTH,
     maxWidth: MAX_SIDEBAR_WIDTH,
   });
   const sidebarRef = useRef<HTMLElement | null>(null);
   const separatorRef = useRef<HTMLDivElement | null>(null);
+  const createMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const createAgentReturnFocusRef = useRef<HTMLElement | null>(null);
+  const createChannelReturnFocusRef = useRef<HTMLElement | null>(null);
   const sidebarWidthRef = useRef(DEFAULT_SIDEBAR_WIDTH);
   const preferredSidebarWidthRef = useRef(DEFAULT_SIDEBAR_WIDTH);
   const resizeFrameRef = useRef<number | null>(null);
@@ -481,6 +499,7 @@ export function Sidebar({
   const agentActivities = useAgentActivity();
   const { t, openSettings } = useAppSettings();
   const { navigate, run } = useWorkspaceNavigation();
+  const server = useWorkspaceServer();
   const localMode = process.env.NEXT_PUBLIC_TEAMMATE_LOCAL_MODE === "true";
 
   // Determine active channel from URL
@@ -498,6 +517,23 @@ export function Sidebar({
   const activeAppCategory = searchParams.get("category") || "featured";
   const activeDocumentId = searchParams.get("document");
   const documentSearch = searchParams.get("q") || "";
+  const normalizedConversationQuery = conversationQuery.trim().toLocaleLowerCase();
+  const visibleDmChannels = useMemo(() => {
+    if (!normalizedConversationQuery) return dmChannels;
+    return dmChannels.filter((dm) =>
+      `${dm.agent?.display_name || ""} ${dm.agent?.name || ""} ${dm.name}`
+        .toLocaleLowerCase()
+        .includes(normalizedConversationQuery),
+    );
+  }, [dmChannels, normalizedConversationQuery]);
+  const visibleGroupChannels = useMemo(() => {
+    if (!normalizedConversationQuery) return groupChannels;
+    return groupChannels.filter((channel) =>
+      `${channel.name} ${channel.description || ""}`
+        .toLocaleLowerCase()
+        .includes(normalizedConversationQuery),
+    );
+  }, [groupChannels, normalizedConversationQuery]);
   // The box holds what you typed; the address holds what has been searched for.
   // When the address moves on its own — the back button, a link — the box
   // follows it. Adjusting during the render is how React would rather hear it
@@ -608,20 +644,30 @@ export function Sidebar({
 
   const deleteDocument = useCallback(
     async (document: WorkspaceDocument) => {
+      if (deletingDocumentId) return;
       setDocumentActionError("");
+      setDeletingDocumentId(document.id);
       // Gone from the list at once; a document you deleted should not sit there
       // while the write travels.
       setDocuments((current) => current.filter((entry) => entry.id !== document.id));
       const { error } = await supabase.from("documents").delete().eq("id", document.id);
       if (error) {
-        setDocumentActionError(error.message);
+        setDocumentActionError(t("documents.deleteFailed"));
         setDocuments((current) => [document, ...current]);
+        setDeletingDocumentId(null);
         return;
       }
+      setPendingDocumentDelete(null);
+      setDeletingDocumentId(null);
       if (activeDocumentId === document.id) navigate(`/s/${serverSlug}/documents`);
     },
-    [activeDocumentId, navigate, serverSlug, supabase],
+    [activeDocumentId, deletingDocumentId, navigate, serverSlug, supabase, t],
   );
+
+  const requestDocumentDelete = useCallback((document: WorkspaceDocument) => {
+    setDocumentActionError("");
+    setPendingDocumentDelete(document);
+  }, []);
 
   /**
    * A folder holds documents and nothing else, so making one means making its
@@ -1229,6 +1275,34 @@ export function Sidebar({
     void refreshSidebarNow();
   }
 
+  function openCreateAgent(returnFocus: HTMLElement | null) {
+    createAgentReturnFocusRef.current = returnFocus;
+    setShowCreateAgent(true);
+  }
+
+  function openCreateChannel(returnFocus: HTMLElement | null) {
+    createChannelReturnFocusRef.current = returnFocus;
+    setShowCreateChannel(true);
+  }
+
+  function closeCreateAgent() {
+    setShowCreateAgent(false);
+    const returnFocus = createAgentReturnFocusRef.current;
+    createAgentReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+
+  function closeCreateChannel() {
+    setShowCreateChannel(false);
+    const returnFocus = createChannelReturnFocusRef.current;
+    createChannelReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+
   function handleChannelDeleted(channelId: string) {
     setEditingChannel(null);
     void refreshSidebarNow();
@@ -1288,6 +1362,11 @@ export function Sidebar({
       const document = data as WorkspaceDocument;
       currentDocumentIdsRef.current.add(document.id);
       setDocuments((current) => [document, ...current.filter((item) => item.id !== document.id)]);
+      try {
+        window.sessionStorage.setItem(NEW_DOCUMENT_FOCUS_KEY, document.id);
+      } catch {
+        // Focus still falls back to the document surface when storage is unavailable.
+      }
       router.push(`/s/${serverSlug}/documents?document=${document.id}`);
     } catch (createError) {
       if (!isCurrentCreate()) return;
@@ -1326,11 +1405,40 @@ export function Sidebar({
 
   return (
     <aside
+      aria-label={t("nav.sidebar")}
       ref={sidebarRef}
-      className="desktop-sidebar relative flex h-full shrink-0 flex-col bg-rail/10"
+      className="desktop-sidebar relative flex h-full shrink-0 flex-col bg-rail/10 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
+      data-workspace-keyboard-section
       style={{ width: `var(${SIDEBAR_WIDTH_CSS_PROPERTY}, ${DEFAULT_SIDEBAR_WIDTH}px)` }}
+      tabIndex={-1}
     >
-      <div className="flex-1 overflow-y-auto px-2 pt-3 pb-2 space-y-4">
+      <div className="flex h-11 shrink-0 items-center gap-1 px-3">
+        <h2 className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground">
+          {server.name}
+        </h2>
+        <Menu>
+          <MenuTrigger
+            aria-label={t("sidebar.create")}
+            className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            ref={createMenuTriggerRef}
+            title={t("sidebar.create")}
+          >
+            <SquarePenIcon className="size-3.5" />
+          </MenuTrigger>
+          <MenuPopup align="end" className="w-44">
+            <MenuItem onClick={() => openCreateAgent(createMenuTriggerRef.current)}>
+              <BotIcon />
+              {t("nav.createAgent")}
+            </MenuItem>
+            <MenuItem onClick={() => openCreateChannel(createMenuTriggerRef.current)}>
+              <MessageSquareIcon />
+              {t("nav.createChannel")}
+            </MenuItem>
+          </MenuPopup>
+        </Menu>
+      </div>
+
+      <div className="flex-1 space-y-3 overflow-y-auto px-2 pb-2">
         {sidebarLoadError && (
           <div
             role="alert"
@@ -1358,19 +1466,52 @@ export function Sidebar({
         )}
         {workspaceView === "home" && (
           <>
+        <div className="relative px-1">
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2 text-muted-foreground/75" />
+          <input
+            aria-label={t("sidebar.searchConversations")}
+            className="h-7 w-full appearance-none rounded-md bg-card/75 pr-7 pl-7 text-[12px] outline-none shadow-[0_0_0_1px_var(--border)] placeholder:text-muted-foreground/75 focus:bg-card focus:ring-2 focus:ring-ring/30 [&::-webkit-search-cancel-button]:hidden"
+            onChange={(event) => setConversationQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && conversationQuery) {
+                event.preventDefault();
+                setConversationQuery("");
+              }
+            }}
+            placeholder={t("sidebar.searchConversations")}
+            type="search"
+            value={conversationQuery}
+          />
+          {conversationQuery && (
+            <button
+              aria-label={t("sidebar.clearSearch")}
+              className="absolute top-1/2 right-2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => setConversationQuery("")}
+              type="button"
+            >
+              <XIcon className="size-3" />
+            </button>
+          )}
+        </div>
+
         {/* DM Conversations */}
-        <Collapsible open={agentsOpen} onOpenChange={setAgentsOpen}>
-          <div className="mb-1 flex h-8 items-center justify-between px-2">
-            <CollapsibleTrigger className="flex h-8 min-w-0 items-center gap-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <Collapsible
+          open={Boolean(normalizedConversationQuery) || agentsOpen}
+          onOpenChange={(open) => {
+            if (!normalizedConversationQuery) setAgentsOpen(open);
+          }}
+        >
+          <div className="group/section flex h-7 items-center justify-between px-2">
+            <CollapsibleTrigger className="flex h-7 min-w-0 items-center gap-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground">
+              <ChevronRightIcon className={`size-3 transition-transform ${normalizedConversationQuery || agentsOpen ? "rotate-90" : ""}`} />
               <span className="truncate">{t("nav.agents")}</span>
-              <ChevronRightIcon className={`size-3 transition-transform ${agentsOpen ? "rotate-90" : ""}`} />
             </CollapsibleTrigger>
             <Button
               type="button"
               variant="ghost"
-              size="icon"
-              onClick={() => setShowCreateAgent(true)}
-              className="text-muted-foreground hover:text-accent-foreground"
+              size="icon-xs"
+              onClick={(event) => openCreateAgent(event.currentTarget)}
+              className="text-muted-foreground opacity-0 transition-opacity hover:text-accent-foreground group-hover/section:opacity-100 focus-visible:opacity-100"
               title={t("nav.createAgent")}
               aria-label={t("nav.createAgent")}
             >
@@ -1378,15 +1519,15 @@ export function Sidebar({
             </Button>
           </div>
           <CollapsiblePanel>
-            <div className="flex flex-col gap-[2px]">
-              {dmChannels.map((dm) => (
+            <div className="flex flex-col gap-px">
+              {visibleDmChannels.map((dm) => (
               <button
                 key={dm.id}
                 onClick={() => navigateToChannel(dm)}
-                className={`flex w-full items-center gap-2 rounded-lg px-2 h-[32px] text-[13px] transition-all ${
+                className={`flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] transition-colors ${
                   activeChannelId === dm.id
-                    ? "bg-sanda-3 text-accent-foreground font-medium"
-                    : "text-muted-foreground hover:bg-sanda-3 hover:text-accent-foreground"
+                    ? "bg-rail font-semibold text-rail-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                 }`}
               >
                 {/* Agent avatar */}
@@ -1399,15 +1540,17 @@ export function Sidebar({
                   />
                   {/* Status dot */}
                   <div
-                    className={`absolute bottom-0 right-0 h-1.5 w-1.5 translate-x-[1px] translate-y-[1px] rounded-full border-[1.5px] border-background ${getStatusDot(dm.agent)}`}
+                    className={`absolute right-0 bottom-0 h-1.5 w-1.5 translate-x-[1px] translate-y-[1px] rounded-full border-[1.5px] ${
+                      activeChannelId === dm.id ? "border-rail" : "border-background"
+                    } ${getStatusDot(dm.agent)}`}
                     title={(() => {
                       const act = agentActivities.get(dm.agent?.id || "");
                       if (act?.label && act.activity !== "idle") {
                         return act.detail ? `${act.label}: ${act.detail}` : act.label;
                       }
                       return dm.agent?.status === "online" || dm.agent?.status === "active"
-                        ? "Online"
-                        : "Offline";
+                        ? t("agent.status.online")
+                        : t("agent.status.offline");
                     })()}
                   />
                 </div>
@@ -1424,18 +1567,23 @@ export function Sidebar({
         </Collapsible>
 
         {/* Group Channels */}
-        <Collapsible open={channelsOpen} onOpenChange={setChannelsOpen}>
-          <div className="mb-1 flex h-8 items-center justify-between px-2">
-            <CollapsibleTrigger className="flex h-8 min-w-0 items-center gap-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground">
+        <Collapsible
+          open={Boolean(normalizedConversationQuery) || channelsOpen}
+          onOpenChange={(open) => {
+            if (!normalizedConversationQuery) setChannelsOpen(open);
+          }}
+        >
+          <div className="group/section flex h-7 items-center justify-between px-2">
+            <CollapsibleTrigger className="flex h-7 min-w-0 items-center gap-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground">
+              <ChevronRightIcon className={`size-3 transition-transform ${normalizedConversationQuery || channelsOpen ? "rotate-90" : ""}`} />
               <span className="truncate">{t("nav.channels")}</span>
-              <ChevronRightIcon className={`size-3 transition-transform ${channelsOpen ? "rotate-90" : ""}`} />
             </CollapsibleTrigger>
             <Button
               type="button"
               variant="ghost"
-              size="icon"
-              onClick={() => setShowCreateChannel(true)}
-              className="text-muted-foreground hover:text-accent-foreground"
+              size="icon-xs"
+              onClick={(event) => openCreateChannel(event.currentTarget)}
+              className="text-muted-foreground opacity-0 transition-opacity hover:text-accent-foreground group-hover/section:opacity-100 focus-visible:opacity-100"
               title={t("nav.createChannel")}
               aria-label={t("nav.createChannel")}
             >
@@ -1443,8 +1591,8 @@ export function Sidebar({
             </Button>
           </div>
           <CollapsiblePanel>
-            <div className="flex flex-col gap-[2px]">
-              {groupChannels.map((channel) => {
+            <div className="flex flex-col gap-px">
+              {visibleGroupChannels.map((channel) => {
               const isActive = activeChannelId === channel.id;
               // Slack's rule: a channel with something waiting reads at full
               // strength and in bold; the badge is reserved for messages that
@@ -1453,12 +1601,12 @@ export function Sidebar({
               return (
                 <ContextMenu
                   key={channel.id}
-                  className={`group flex h-[32px] w-full items-center rounded-lg text-[13px] transition-all ${
+                  className={`group flex h-7 w-full items-center rounded-md text-[13px] transition-colors ${
                     isActive
-                      ? "bg-sanda-3 font-medium text-accent-foreground"
+                      ? "bg-rail font-semibold text-rail-foreground"
                       : pending
-                        ? "font-black text-accent-foreground hover:bg-sanda-3"
-                        : "text-muted-foreground hover:bg-sanda-3 hover:text-accent-foreground"
+                        ? "font-black text-accent-foreground hover:bg-accent"
+                        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                   }`}
                   items={[
                     {
@@ -1473,7 +1621,7 @@ export function Sidebar({
                     onClick={() => navigateToChannel(channel)}
                     className="flex min-w-0 flex-1 items-center gap-2 px-2 text-left"
                   >
-                    <span className={pending ? "text-accent-foreground" : "text-muted-foreground"}>
+                    <span className={isActive || pending ? "" : "text-muted-foreground"}>
                       #
                     </span>
                     <span className="truncate">{channel.name}</span>
@@ -1486,10 +1634,12 @@ export function Sidebar({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
+                    size="icon-xs"
                     onClick={() => setEditingChannel(channel)}
-                    className={`mr-1 text-muted-foreground transition-opacity hover:text-accent-foreground ${
-                      isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    className={`mr-1 transition-opacity ${
+                      isActive
+                        ? "text-rail-foreground/75 opacity-100 hover:bg-rail-foreground/10 hover:text-rail-foreground"
+                        : "text-muted-foreground opacity-0 hover:text-accent-foreground group-hover:opacity-100 focus:opacity-100"
                     }`}
                     title={t("channel.manageAgents")}
                     aria-label={t("channel.manageAgents")}
@@ -1503,6 +1653,14 @@ export function Sidebar({
           </CollapsiblePanel>
         </Collapsible>
 
+        {normalizedConversationQuery &&
+          visibleDmChannels.length === 0 &&
+          visibleGroupChannels.length === 0 && (
+            <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+              {t("sidebar.noConversationMatches")}
+            </p>
+          )}
+
           </>
         )}
 
@@ -1514,12 +1672,28 @@ export function Sidebar({
               <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <input
                 aria-label={t("documents.searchPlaceholder")}
-                className="h-8 w-full rounded-lg bg-accent/70 pl-8 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:shadow-[0_0_0_1px_var(--border)]"
+                className="h-8 w-full rounded-lg bg-accent/70 pl-8 pr-8 text-[13px] outline-none placeholder:text-muted-foreground focus:bg-card focus:ring-2 focus:ring-ring/30"
                 onChange={(event) => setDocumentQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && documentQuery) {
+                    event.preventDefault();
+                    setDocumentQuery("");
+                  }
+                }}
                 placeholder={t("documents.searchPlaceholder")}
                 type="text"
                 value={documentQuery}
               />
+              {documentQuery && (
+                <button
+                  aria-label={t("documents.clearSearch")}
+                  className="absolute right-2 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => setDocumentQuery("")}
+                  type="button"
+                >
+                  <XIcon className="size-3" />
+                </button>
+              )}
             </div>
             <div className="flex h-[22px] items-center justify-between px-2">
               <span className="text-[12px] font-medium text-muted-foreground">
@@ -1568,7 +1742,7 @@ export function Sidebar({
                         document={document}
                         editing={editingKey === `document:${document.id}`}
                         key={`pinned-${document.id}`}
-                        onDelete={deleteDocument}
+                        onDelete={requestDocumentDelete}
                         onEdit={setEditingKey}
                         onOpen={openDocument}
                         onRename={renameDocument}
@@ -1604,7 +1778,7 @@ export function Sidebar({
                     folder={folder}
                     key={folder.path}
                     onCreateIn={createInFolder}
-                    onDeleteDocument={deleteDocument}
+                    onDeleteDocument={requestDocumentDelete}
                     onEdit={setEditingKey}
                     onImportInto={importInto}
                     onMoveDocument={moveDocument}
@@ -1661,7 +1835,7 @@ export function Sidebar({
                           document={document}
                           editing={editingKey === `document:${document.id}`}
                           key={document.id}
-                          onDelete={deleteDocument}
+                          onDelete={requestDocumentDelete}
                           onEdit={setEditingKey}
                           onOpen={openDocument}
                           onRename={renameDocument}
@@ -1840,13 +2014,13 @@ export function Sidebar({
       )}
       <CreateAgentDialog
         open={showCreateAgent}
-        onClose={() => setShowCreateAgent(false)}
+        onClose={closeCreateAgent}
         onCreated={handleAgentCreated}
         serverId={serverId}
       />
       <CreateChannelDialog
         open={showCreateChannel}
-        onClose={() => setShowCreateChannel(false)}
+        onClose={closeCreateChannel}
         onCreated={handleChannelCreated}
         serverId={serverId}
       />
@@ -1859,6 +2033,49 @@ export function Sidebar({
           onDeleted={handleChannelDeleted}
         />
       )}
+      <AlertDialog
+        open={Boolean(pendingDocumentDelete)}
+        onOpenChange={(open) => {
+          if (!open && !deletingDocumentId) setPendingDocumentDelete(null);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("documents.deleteTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDocumentDelete?.title && (
+                <span className="mb-1 block font-medium text-foreground">
+                  {pendingDocumentDelete.title}
+                </span>
+              )}
+              {t("documents.deleteDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {documentActionError && (
+            <p className="px-1 text-sm text-destructive" role="alert">
+              {documentActionError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <Button
+              variant="ghost"
+              disabled={Boolean(deletingDocumentId)}
+              onClick={() => setPendingDocumentDelete(null)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              loading={Boolean(deletingDocumentId)}
+              onClick={() => {
+                if (pendingDocumentDelete) void deleteDocument(pendingDocumentDelete);
+              }}
+            >
+              {t("common.delete")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
       <div
         ref={separatorRef}
         role="separator"

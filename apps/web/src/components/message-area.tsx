@@ -1,6 +1,7 @@
 'use client';
 
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import {
   AlertCircleIcon,
@@ -8,13 +9,16 @@ import {
   ArrowUpRightIcon,
   AtSignIcon,
   CheckIcon,
+  ChevronDownIcon,
   LoaderCircleIcon,
   MessageSquareIcon,
+  MoreVerticalIcon,
   SmilePlusIcon,
   PencilIcon,
   PlusIcon,
   Trash2Icon,
   RotateCcwIcon,
+  SendHorizontalIcon,
   SettingsIcon,
   TypeIcon,
   XIcon,
@@ -47,8 +51,11 @@ import { useMessageSounds } from '@/hooks/use-message-sounds';
 import { useWorkspaceNavigation } from '@/hooks/use-navigation-guard';
 import { useWorkspaceServer } from '@/components/workspace-server-context';
 import { Button } from '@/components/ui/button';
+import { Calendar } from '@/components/ui/calendar';
 import { Kbd } from '@/components/ui/kbd';
 import { Toggle } from '@/components/ui/toggle';
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs';
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from '@/components/ui/menu';
 import {
   ATTACHMENT_ACCEPT,
   attachmentMarkdown,
@@ -61,12 +68,15 @@ import { LinkPreviewCard, extractLinks } from '@/components/ui/link-preview';
 import { ThinkingIndicator } from '@/components/ui/thinking-indicator';
 import { GeneratedAvatar } from './generated-avatar';
 import { ThreadPanel } from './thread-panel';
+import { EmojiPickerButton } from './emoji-picker-button';
+import { MessageDeleteDialog } from './message-delete-dialog';
 import { createTrailingRefreshScheduler } from '@/lib/trailing-refresh';
 import { parseRuntimeError } from '@/lib/runtime-error';
 import { formatMessageClock, parseMessageTime } from '@/lib/message-time';
 
 const RUNTIME_ERROR_MESSAGE_PREFIX = '<!-- teammate:runtime-error -->';
 const DRAFT_STORAGE_PREFIX = 'teammate:message-draft:';
+const COMPOSER_FORMATTING_VISIBLE_KEY = 'teammate:composer-formatting-visible';
 const AGENT_RESPONSE_TIMEOUT_MS = 130_000;
 /**
  * How long a teammate has to be working before it is worth saying so.
@@ -146,6 +156,13 @@ interface AgentInfo {
 
 type AgentRealtimeUpdate = Partial<AgentInfo> & Pick<AgentInfo, 'id'>;
 
+function agentStatusDot(status: string) {
+  if (status === 'online' || status === 'active') return 'bg-success';
+  if (status === 'sleeping') return 'bg-warning';
+  if (status === 'error') return 'bg-destructive';
+  return 'bg-muted-foreground/45';
+}
+
 function patchAgentInfo(current: AgentInfo, update: AgentRealtimeUpdate): AgentInfo {
   return {
     ...current,
@@ -224,31 +241,40 @@ const UnreadDivider = memo(function UnreadDivider({ label }: { label: string }) 
 });
 
 /**
- * The day marker: no rule across the transcript, just a pill that pins to the
- * top while that day is on screen. Slack lets the pill float over the text
- * scrolling beneath it; here the whole row carries the pane's background and
- * spans the scroller's padding, so content passes cleanly behind the band
- * instead of bleeding out around the pill.
+ * The day marker follows Slack's horizontal rule and centered date pill. The
+ * whole row pins while that day is on screen, keeping the picker within reach
+ * without spending a second toolbar button on the same action.
  */
 const DayDivider = memo(function DayDivider({
   date,
+  jumpLabel,
   label,
+  onOpenPicker,
 }: {
   date: string;
+  jumpLabel: string;
   label: string;
+  onOpenPicker: (anchor: HTMLButtonElement) => void;
 }) {
   return (
     // The row is deliberately shorter than the pill it holds, so the marker
     // costs almost no vertical space and the transcript keeps its rhythm. The
     // margins below reserve just enough room for the overflow in the unpinned
     // position; once pinned, text passes behind the pill, which is opaque.
-    <div className="sticky top-0 z-20 mt-4 mb-6 flex h-[9px] justify-center first:mt-1">
-      <time
-        className="h-7 rounded-full bg-card px-4 text-[13px] font-bold leading-7 text-foreground shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]"
-        dateTime={date}
+    <div className="sticky top-0 z-20 mt-4 mb-6 flex h-[9px] items-center first:mt-1">
+      <span aria-hidden="true" className="h-px flex-1 bg-border" />
+      <button
+        aria-label={`${jumpLabel}: ${label}`}
+        aria-haspopup="dialog"
+        className="mx-2 flex h-7 items-center gap-1 rounded-full bg-card px-3.5 text-[13px] font-bold text-foreground outline-none shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={(event) => onOpenPicker(event.currentTarget)}
+        title={jumpLabel}
+        type="button"
       >
-        {label}
-      </time>
+        <time dateTime={date}>{label}</time>
+        <ChevronDownIcon aria-hidden="true" className="size-3.5 text-muted-foreground" />
+      </button>
+      <span aria-hidden="true" className="h-px flex-1 bg-border" />
     </div>
   );
 });
@@ -389,7 +415,11 @@ const ReactionChoices = memo(function ReactionChoices({
   t: (key: TranslationKey) => string;
 }) {
   return (
-    <div className="flex items-center gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
+    <div
+      aria-label={moreLabel}
+      className="flex items-center gap-0.5 rounded-lg bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]"
+      role="dialog"
+    >
       {QUICK_REACTIONS.map((emoji) => (
         <button
           className="rounded px-1.5 py-0.5 text-base transition-colors hover:bg-accent"
@@ -451,6 +481,7 @@ const ReactionBar = memo(function ReactionBar({
   // hover state — and the button the picker is anchored to — with it.
   const [pickerOpen, setPickerOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1">
       {reactions.map((reaction) => (
@@ -472,12 +503,21 @@ const ReactionBar = memo(function ReactionBar({
       ))}
       <div
         className="group/add relative"
+        onBlurCapture={(event) => {
+          const nextTarget = event.relatedTarget;
+          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+            setFocused(false);
+          }
+        }}
+        onFocusCapture={() => setFocused(true)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
       >
         <button
           aria-label={addLabel}
-          className={`flex h-6 items-center rounded-full border border-dashed border-border px-2 text-muted-foreground hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 ${
+          aria-expanded={hovered || focused || pickerOpen}
+          aria-haspopup="dialog"
+          className={`flex h-6 items-center rounded-full border border-dashed border-border px-2 text-muted-foreground outline-none hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 ${
             pickerOpen ? 'opacity-100' : 'opacity-0'
           }`}
           title={addLabel}
@@ -485,7 +525,7 @@ const ReactionBar = memo(function ReactionBar({
         >
           <SmilePlusIcon className="size-3.5" />
         </button>
-        {(hovered || pickerOpen) && (
+        {(hovered || focused || pickerOpen) && (
           <div className="absolute bottom-full left-0 z-20 mb-1 block">
             <ReactionChoices
               align="start"
@@ -606,6 +646,11 @@ interface MessageRowProps {
   deliveryFailedLabel: string;
   retryDeliveryLabel: string;
   onRetryDelivery: (messageId: string) => void;
+  onKeyboardMove?: (
+    messageId: string,
+    direction: 'previous' | 'next' | 'first' | 'last',
+  ) => void;
+  highlighted?: boolean;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -622,6 +667,8 @@ const MessageRow = memo(function MessageRow({
   deliveryFailedLabel,
   retryDeliveryLabel,
   onRetryDelivery,
+  onKeyboardMove,
+  highlighted,
   thread,
   threadLabel,
   threadLastReplyLabel,
@@ -648,12 +695,16 @@ const MessageRow = memo(function MessageRow({
   const { t } = useAppSettings();
   // The toolbar lives on hover, and reaching the picker means leaving the row.
   const [rowPickerOpen, setRowPickerOpen] = useState(false);
+  const [rowMenuOpen, setRowMenuOpen] = useState(false);
+  const [deleteConfirmationOpen, setDeleteConfirmationOpen] = useState(false);
+  const moreActionsTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Every row used to carry its whole toolbar — six reaction buttons, a picker
   // trigger, thread, edit, delete — mounted and hidden by CSS. Fifty messages
   // came to four thousand elements, three hundred of them emoji nobody could
   // see, and the scroll felt every one of them. It is built when reached for.
   const [hovered, setHovered] = useState(false);
-  const showToolbar = hovered || rowPickerOpen;
+  const [focused, setFocused] = useState(false);
+  const showToolbar = hovered || focused || rowPickerOpen || rowMenuOpen;
   const runtimeErrorDetail = message.content.startsWith(RUNTIME_ERROR_MESSAGE_PREFIX)
     ? message.content.slice(RUNTIME_ERROR_MESSAGE_PREFIX.length).trim()
     : null;
@@ -665,10 +716,37 @@ const MessageRow = memo(function MessageRow({
       // paint containment, which would clip the hover toolbar straddling the
       // row's top edge.
       id={`message-${message.id}`}
-      onFocus={() => setHovered(true)}
+      onBlurCapture={(event) => {
+        const nextTarget = event.relatedTarget;
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setFocused(false);
+        }
+      }}
+      onFocusCapture={() => setFocused(true)}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget || !onKeyboardMove) return;
+        const direction = event.key === 'ArrowUp'
+          ? 'previous'
+          : event.key === 'ArrowDown'
+            ? 'next'
+            : event.key === 'Home'
+              ? 'first'
+              : event.key === 'End'
+                ? 'last'
+                : null;
+        if (!direction) return;
+        event.preventDefault();
+        onKeyboardMove(message.id, direction);
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className={`group relative flex gap-2 px-5 py-2 hover:bg-accent ${
+      role="article"
+      tabIndex={-1}
+      className={`group relative flex gap-2 px-5 outline-none transition-colors hover:bg-accent/60 focus-within:bg-accent/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 ${
+        highlighted ? 'bg-primary/10 ring-1 ring-inset ring-primary/25' : ''
+      } ${
+        sameSender ? 'py-0.5' : 'pt-2 pb-1'
+      } ${
         message.motion === 'send'
           ? 'animate-message-send'
           : message.motion === 'receive'
@@ -679,7 +757,7 @@ const MessageRow = memo(function MessageRow({
       <div className="w-9 shrink-0 pt-0.5">
         {sameSender ? (
           <time
-            className="block text-right text-[12px] leading-[22px] text-muted-foreground opacity-0 tabular-nums group-hover:opacity-100"
+            className="block text-right text-[12px] leading-[22px] text-muted-foreground opacity-0 tabular-nums group-hover:opacity-100 group-focus-within:opacity-100"
             dateTime={message.created_at}
           >
             {formattedTime}
@@ -700,9 +778,7 @@ const MessageRow = memo(function MessageRow({
         // message that has no replies yet. It straddles the row's top edge so
         // it never covers the first line of text.
         <div
-          className={`absolute -top-3.5 right-6 z-10 group-focus-within:flex group-hover:flex ${
-            rowPickerOpen ? 'flex' : 'hidden'
-          }`}
+          className="absolute -top-3.5 right-6 z-10 flex"
         >
           <div className="flex gap-0.5 rounded-xl bg-card p-1 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)]">
             {onToggleReaction && (
@@ -742,29 +818,32 @@ const MessageRow = memo(function MessageRow({
             >
               <MessageSquareIcon className="size-4" />
             </Button>
-            {canModify && onStartEdit && (
-              <Button
-                aria-label={editLabel}
-                className="size-8 text-muted-foreground"
-                onClick={onStartEdit}
-                size="icon-sm"
-                title={editLabel}
-                variant="ghost"
-              >
-                <PencilIcon className="size-4" />
-              </Button>
-            )}
-            {canModify && onDelete && (
-              <Button
-                aria-label={deleteLabel}
-                className="size-8 text-muted-foreground hover:text-destructive"
-                onClick={onDelete}
-                size="icon-sm"
-                title={deleteLabel}
-                variant="ghost"
-              >
-                <Trash2Icon className="size-4" />
-              </Button>
+            {canModify && (onStartEdit || onDelete) && (
+              <Menu onOpenChange={setRowMenuOpen}>
+                <MenuTrigger
+                  ref={moreActionsTriggerRef}
+                  aria-label={t('message.moreActions')}
+                  className="flex size-8 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-popup-open:bg-accent data-popup-open:text-foreground"
+                  title={t('message.moreActions')}
+                >
+                  <MoreVerticalIcon className="size-4" />
+                </MenuTrigger>
+                <MenuPopup align="end" side="bottom">
+                  {onStartEdit && (
+                    <MenuItem onClick={onStartEdit}>
+                      <PencilIcon />
+                      {editLabel}
+                    </MenuItem>
+                  )}
+                  {onStartEdit && onDelete && <MenuSeparator />}
+                  {onDelete && (
+                    <MenuItem onClick={() => setDeleteConfirmationOpen(true)} variant="destructive">
+                      <Trash2Icon />
+                      {deleteLabel}
+                    </MenuItem>
+                  )}
+                </MenuPopup>
+              </Menu>
             )}
           </div>
         </div>
@@ -898,6 +977,20 @@ const MessageRow = memo(function MessageRow({
         )}
       </div>
 
+      {onDelete && deleteConfirmationOpen && (
+        <MessageDeleteDialog
+          content={message.content}
+          onConfirm={onDelete}
+          onOpenChange={(open) => {
+            setDeleteConfirmationOpen(open);
+            if (!open) {
+              window.requestAnimationFrame(() => moreActionsTriggerRef.current?.focus());
+            }
+          }}
+          open
+        />
+      )}
+
     </div>
   );
 });
@@ -931,6 +1024,14 @@ function MessageAreaContent({
   onToggleSettings,
   showSettings,
 }: MessageAreaProps) {
+  const server = useWorkspaceServer();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const targetMessageId = searchParams.get('message');
+  const targetThreadId = searchParams.get('thread');
+  const targetReplyId = searchParams.get('reply');
+  const requestedMainMessageId = targetThreadId || targetMessageId;
+  const [conversationView, setConversationView] = useState<'messages' | 'about'>('messages');
   const [messages, setMessages] = useState<Message[]>([]);
   // Replies keyed by the message they hang off. Kept beside the transcript
   // rather than inside it: they are not part of the main flow, and the parent
@@ -944,10 +1045,20 @@ function MessageAreaContent({
   // Reactions keyed by message. Like threads, they hang off the transcript
   // rather than living in it — a reaction never reorders or reflows the flow.
   const [reactions, setReactions] = useState<Map<string, ReactionRow[]>>(new Map());
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const [searchTargetError, setSearchTargetError] = useState('');
+  const [jumpDateOpen, setJumpDateOpen] = useState(false);
+  const [jumpDateBusy, setJumpDateBusy] = useState(false);
+  const [jumpDateError, setJumpDateError] = useState('');
+  const [selectedJumpDate, setSelectedJumpDate] = useState<Date>();
+  const [jumpDateAnchor, setJumpDateAnchor] = useState<HTMLElement | null>(null);
 
 
   const openThreadIdRef = useRef<string | null>(null);
+  const threadReturnFocusRef = useRef<HTMLElement | null>(null);
   const reactionsRef = useRef<Map<string, ReactionRow[]>>(new Map());
+  const handledSearchTargetRef = useRef('');
+  const searchHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     openThreadIdRef.current = openThreadId;
@@ -956,6 +1067,27 @@ function MessageAreaContent({
   useEffect(() => {
     reactionsRef.current = reactions;
   }, [reactions]);
+
+  useEffect(() => () => {
+    if (searchHighlightTimerRef.current) clearTimeout(searchHighlightTimerRef.current);
+  }, []);
+
+  const openThread = useCallback((messageId: string) => {
+    // The hover toolbar unmounts as soon as focus enters the thread composer,
+    // so its trigger cannot be a reliable return target. The message row is
+    // stable and remounts the toolbar when focus comes back.
+    threadReturnFocusRef.current = document.getElementById(`message-${messageId}`);
+    setOpenThreadId(messageId);
+  }, []);
+
+  const closeThread = useCallback(() => {
+    const returnTarget = threadReturnFocusRef.current;
+    threadReturnFocusRef.current = null;
+    setOpenThreadId(null);
+    window.requestAnimationFrame(() => {
+      if (returnTarget?.isConnected) returnTarget.focus();
+    });
+  }, []);
 
 
 
@@ -986,6 +1118,27 @@ function MessageAreaContent({
   const dragDepthRef = useRef(0);
   const [draggingFiles, setDraggingFiles] = useState(false);
 
+  useLayoutEffect(() => {
+    let shouldHideFormatting = false;
+    try {
+      shouldHideFormatting = window.localStorage.getItem(COMPOSER_FORMATTING_VISIBLE_KEY) === 'false';
+    } catch {
+      // A blocked local store only makes the preference session-scoped.
+    }
+    if (!shouldHideFormatting) return;
+    const frame = window.requestAnimationFrame(() => setFormattingVisible(false));
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  const updateFormattingVisible = useCallback((visible: boolean) => {
+    setFormattingVisible(visible);
+    try {
+      window.localStorage.setItem(COMPOSER_FORMATTING_VISIBLE_KEY, String(visible));
+    } catch {
+      // Formatting still changes for the current session when storage is unavailable.
+    }
+  }, []);
+
   const attachFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
     setAttachmentBusy(true);
@@ -1007,6 +1160,7 @@ function MessageAreaContent({
   const [sendWarning, setSendWarning] = useState("");
   const [snapshotChannelId, setSnapshotChannelId] = useState<string | null>(null);
   const [channelLoadError, setChannelLoadError] = useState("");
+  const [channelLoadTimedOut, setChannelLoadTimedOut] = useState(false);
   const [realtimeWarning, setRealtimeWarning] = useState("");
   const [agentDirectoryError, setAgentDirectoryError] = useState("");
   const [channelReloadToken, setChannelReloadToken] = useState(0);
@@ -1088,6 +1242,32 @@ function MessageAreaContent({
     withSeq.sort((left, right) => (left.seq as number) - (right.seq as number));
     return [...withSeq, ...pending];
   }, [messages]);
+
+  const focusMessageAtIndex = useCallback((index: number) => {
+    const message = orderedMessages[index];
+    if (!message) return;
+    const row = document.getElementById(`message-${message.id}`);
+    row?.focus({ preventScroll: true });
+    row?.scrollIntoView({ block: 'nearest' });
+  }, [orderedMessages]);
+
+  const moveMessageFocus = useCallback((
+    messageId: string,
+    direction: 'previous' | 'next' | 'first' | 'last',
+  ) => {
+    const currentIndex = orderedMessages.findIndex((message) => message.id === messageId);
+    if (currentIndex === -1) return;
+    if (direction === 'first') {
+      focusMessageAtIndex(0);
+      return;
+    }
+    if (direction === 'last') {
+      focusMessageAtIndex(orderedMessages.length - 1);
+      return;
+    }
+    const offset = direction === 'previous' ? -1 : 1;
+    focusMessageAtIndex(Math.max(0, Math.min(orderedMessages.length - 1, currentIndex + offset)));
+  }, [focusMessageAtIndex, orderedMessages]);
 
   const unread = useMemo(() => {
     if (unreadBoundarySeq === null || unreadBoundarySeq === 0) return null;
@@ -1417,6 +1597,8 @@ function MessageAreaContent({
 
   const submitMessageEdit = useCallback(
     (messageId: string, content: string) => {
+      const previous = messages.find((message) => message.id === messageId);
+      if (!previous) return;
       setEditingMessageId(null);
       const editedAt = new Date().toISOString();
       setMessages((current) =>
@@ -1429,36 +1611,85 @@ function MessageAreaContent({
           .from('messages')
           .update({ content, edited_at: editedAt })
           .eq('id', messageId);
-        if (error) setSendError(t('message.editFailed'));
+        if (!error) return;
+        setSendError(t('message.editFailed'));
+        setMessages((current) => current.map((message) =>
+          message.id === messageId && message.edited_at === editedAt ? previous : message));
       })();
     },
-    [supabase, t],
+    [messages, supabase, t],
   );
 
   const deleteMessage = useCallback(
     (messageId: string) => {
       // The row leaves the transcript immediately; realtime confirms it, and a
       // failure restores it rather than leaving a hole nobody can explain.
-      let removed: Message | undefined;
-      setMessages((current) => {
-        removed = current.find((message) => message.id === messageId);
-        return current.filter((message) => message.id !== messageId);
-      });
+      const removedIndex = messages.findIndex((message) => message.id === messageId);
+      if (removedIndex === -1) return;
+      const removed = messages[removedIndex];
+      setMessages((current) => current.filter((message) => message.id !== messageId));
       void (async () => {
         const { error } = await supabase.from('messages').delete().eq('id', messageId);
-        if (!error || !removed) return;
+        if (!error) return;
         setSendError(t('message.deleteFailed'));
-        setMessages((current) =>
-          current.some((message) => message.id === messageId)
-            ? current
-            : [...current, removed as Message],
-        );
+        setMessages((current) => {
+          if (current.some((message) => message.id === messageId)) return current;
+          const restored = [...current];
+          restored.splice(Math.min(removedIndex, restored.length), 0, removed);
+          return restored;
+        });
       })();
     },
-    [supabase, t],
+    [messages, supabase, t],
   );
 
   const { run: runGuardedAction } = useWorkspaceNavigation();
+  const jumpToDate = useCallback(async (date: Date) => {
+    if (!channel) return;
+    setSelectedJumpDate(date);
+    setJumpDateBusy(true);
+    setJumpDateError('');
+
+    const start = new Date(date);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('id')
+        .eq('channel_id', channel.id)
+        .or('thread_parent_id.is.null,thread_broadcast.eq.1')
+        .gte('created_at', start.toISOString())
+        .lt('created_at', end.toISOString())
+        .order('seq', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (error) {
+        setJumpDateError(t('message.jumpToDateFailed'));
+        return;
+      }
+      const target = data as { id: string } | null;
+      if (!target) {
+        setJumpDateError(t('message.jumpToDateEmpty'));
+        return;
+      }
+
+      handledSearchTargetRef.current = '';
+      const routeKind = channel.type === 'dm' ? 'dm' : 'channel';
+      const href = `/s/${encodeURIComponent(server.slug)}/${routeKind}/${encodeURIComponent(channel.id)}`
+        + `?message=${encodeURIComponent(target.id)}`;
+      runGuardedAction(() => {
+        setJumpDateOpen(false);
+        router.push(href);
+      });
+    } catch {
+      setJumpDateError(t('message.jumpToDateFailed'));
+    } finally {
+      setJumpDateBusy(false);
+    }
+  }, [channel, router, runGuardedAction, server.slug, supabase, t]);
   const playMessageCue = useMessageSounds(settings.messageSounds);
   const describeRuntimeError = useCallback((detail: string) => {
     const parsed = parseRuntimeError(detail);
@@ -1503,7 +1734,10 @@ function MessageAreaContent({
 
   const beginMessageRequest = useCallback(() => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), MESSAGE_REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(
+      () => controller.abort(new DOMException('The message request timed out', 'TimeoutError')),
+      MESSAGE_REQUEST_TIMEOUT_MS,
+    );
     requestControllersRef.current.set(controller, timeout);
     return controller;
   }, []);
@@ -1872,6 +2106,7 @@ function MessageAreaContent({
       if (!isCurrent()) return;
       setSnapshotChannelId(null);
       setChannelLoadError("");
+      setChannelLoadTimedOut(false);
       setRealtimeWarning("");
       setAgentDirectoryError("");
       setMessages([]);
@@ -1891,6 +2126,11 @@ function MessageAreaContent({
       setLiveAnnouncement(null);
       setSendError("");
       setSendWarning("");
+      setSearchTargetError("");
+      setHighlightedMessageId(null);
+      handledSearchTargetRef.current = '';
+      setConversationView('messages');
+      setOpenThreadId(null);
       setHasMore(true);
       setLoadingMore(false);
       loadingMoreRef.current = false;
@@ -1898,7 +2138,7 @@ function MessageAreaContent({
       void loadMessages();
       void agentDirectoryRefresh.runNow();
     });
-    isNearBottomRef.current = true;
+    isNearBottomRef.current = !requestedMainMessageId;
     if (typingTimeoutRef.current) {
       clearTimeout(typingTimeoutRef.current);
       typingTimeoutRef.current = null;
@@ -1990,9 +2230,14 @@ function MessageAreaContent({
           .abortSignal(controller.signal);
         if (error || !data) {
           if (isCurrent()) {
+            const timedOut = controller.signal.reason instanceof DOMException &&
+              controller.signal.reason.name === 'TimeoutError';
+            setChannelLoadTimedOut(timedOut);
             setChannelLoadError(
               controller.signal.aborted
-                ? t('conversation.loadFailed')
+                ? timedOut
+                  ? t('conversation.loadTimedOut')
+                  : t('conversation.loadFailed')
                 : error?.message || t('conversation.loadFailed'),
             );
           }
@@ -2000,30 +2245,95 @@ function MessageAreaContent({
         }
         if (isCurrent()) {
           const reversed = (data as Message[]).reverse();
-          for (const message of reversed) {
+          let contextMessages: Message[] = [];
+          let contextMayHaveOlder = false;
+
+          if (
+            requestedMainMessageId &&
+            !reversed.some((message) => message.id === requestedMainMessageId)
+          ) {
+            const targetResult = await supabase
+              .from('messages')
+              .select('*')
+              .eq('channel_id', channelId)
+              .eq('id', requestedMainMessageId)
+              .maybeSingle()
+              .abortSignal(controller.signal);
+
+            if (!isCurrent()) return;
+            const target = targetResult.data as Message | null;
+            if (targetResult.error || !target || target.thread_parent_id) {
+              setSearchTargetError(t('message.searchTargetMissing'));
+            } else if (typeof target.seq === 'number') {
+              const [beforeResult, afterResult] = await Promise.all([
+                supabase
+                  .from('messages')
+                  .select('*')
+                  .eq('channel_id', channelId)
+                  .or('thread_parent_id.is.null,thread_broadcast.eq.1')
+                  .lte('seq', target.seq)
+                  .order('seq', { ascending: false })
+                  .limit(20)
+                  .abortSignal(controller.signal),
+                supabase
+                  .from('messages')
+                  .select('*')
+                  .eq('channel_id', channelId)
+                  .or('thread_parent_id.is.null,thread_broadcast.eq.1')
+                  .gt('seq', target.seq)
+                  .order('seq', { ascending: true })
+                  .limit(20)
+                  .abortSignal(controller.signal),
+              ]);
+              if (!isCurrent()) return;
+              if (!beforeResult.error && !afterResult.error) {
+                const before = (beforeResult.data as Message[] | null) || [target];
+                const after = (afterResult.data as Message[] | null) || [];
+                contextMessages = [...before.reverse(), ...after];
+                contextMayHaveOlder = before.length === 20;
+              } else {
+                contextMessages = [target];
+              }
+            } else {
+              contextMessages = [target];
+            }
+          }
+
+          const merged = new Map<string, Message>();
+          for (const message of [...contextMessages, ...reversed]) {
+            merged.set(message.id, message);
+          }
+          const loadedMessages = Array.from(merged.values()).sort((left, right) => {
+            if (left.seq !== null && right.seq !== null) return left.seq - right.seq;
+            return new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+          });
+          for (const message of loadedMessages) {
             seenMessageIdsRef.current.add(message.id);
           }
           setMessages((current) => {
-            const merged = new Map(reversed.map((message) => [message.id, message]));
+            const next = new Map(loadedMessages.map((message) => [message.id, message]));
             for (const message of current) {
-              if (message.channel_id === channelId && !merged.has(message.id)) {
-                merged.set(message.id, message);
+              if (message.channel_id === channelId && !next.has(message.id)) {
+                next.set(message.id, message);
               }
             }
-            return Array.from(merged.values()).sort((left, right) => {
+            return Array.from(next.values()).sort((left, right) => {
               if (left.seq !== null && right.seq !== null) return left.seq - right.seq;
               return new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
             });
           });
-          setHasMore(data.length === 50);
-          requestAnimationFrame(() => {
-            if (!isCurrent()) return;
-            const scrollElement = scrollContainerRef.current;
-            if (scrollElement) scrollElement.scrollTop = scrollElement.scrollHeight;
-          });
+          setHasMore(data.length === 50 || contextMayHaveOlder);
+          if (!requestedMainMessageId) {
+            requestAnimationFrame(() => {
+              if (!isCurrent()) return;
+              const scrollElement = scrollContainerRef.current;
+              if (scrollElement) scrollElement.scrollTop = scrollElement.scrollHeight;
+            });
+          }
           soundReadyGenerationRef.current = generation;
           setSnapshotChannelId(channelId);
           setChannelLoadError("");
+          setChannelLoadTimedOut(false);
         }
         requestAnimationFrame(() => {
           if (!isCurrent()) return;
@@ -2033,13 +2343,18 @@ function MessageAreaContent({
             activeElement === document.body ||
             activeElement === document.documentElement ||
             (activeElement instanceof HTMLElement && activeElement.closest('.tiptap-input'));
-          if (focusIsIdle) inputRef.current?.focus();
+          if (focusIsIdle && !requestedMainMessageId) inputRef.current?.focus();
         });
       } catch (loadError) {
         if (isCurrent()) {
+          const timedOut = controller.signal.reason instanceof DOMException &&
+            controller.signal.reason.name === 'TimeoutError';
+          setChannelLoadTimedOut(timedOut);
           setChannelLoadError(
             controller.signal.aborted
-              ? t('conversation.loadFailed')
+              ? timedOut
+                ? t('conversation.loadTimedOut')
+                : t('conversation.loadFailed')
               : loadError instanceof Error
                 ? loadError.message
                 : t('conversation.loadFailed'),
@@ -2293,8 +2608,51 @@ function MessageAreaContent({
       supabase.removeChannel(membershipSubscription);
       supabase.removeChannel(agentSubscription);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- channel is memoized; only re-run when channel ID changes
-  }, [channel?.id, channelReloadToken, supabase]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- channel is memoized; reload only for identity, retry, or an explicit search target
+  }, [channel?.id, channelReloadToken, requestedMainMessageId, supabase]);
+
+  useEffect(() => {
+    if (
+      !channelId ||
+      !requestedMainMessageId ||
+      snapshotChannelId !== channelId ||
+      searchTargetError
+    ) return;
+    const targetKey = [channelId, requestedMainMessageId, targetThreadId, targetReplyId]
+      .filter(Boolean)
+      .join(':');
+    if (handledSearchTargetRef.current === targetKey) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(`message-${requestedMainMessageId}`);
+      if (!target) return;
+      handledSearchTargetRef.current = targetKey;
+      isNearBottomRef.current = false;
+      setConversationView('messages');
+      if (targetThreadId) {
+        threadReturnFocusRef.current = null;
+        setOpenThreadId(targetThreadId);
+      }
+      setHighlightedMessageId(requestedMainMessageId);
+      target.scrollIntoView({ block: 'center', behavior: 'auto' });
+      if (searchHighlightTimerRef.current) clearTimeout(searchHighlightTimerRef.current);
+      searchHighlightTimerRef.current = setTimeout(() => {
+        setHighlightedMessageId((current) =>
+          current === requestedMainMessageId ? null : current,
+        );
+        searchHighlightTimerRef.current = null;
+      }, 2400);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    channelId,
+    messages,
+    requestedMainMessageId,
+    searchTargetError,
+    snapshotChannelId,
+    targetReplyId,
+    targetThreadId,
+  ]);
 
   useEffect(() => {
     if (!agentTyping || !channel) return;
@@ -2847,10 +3205,22 @@ function MessageAreaContent({
       <div className="flex flex-1 items-center justify-center bg-card px-6">
         <div className="max-w-sm text-center">
           <p
-            className={channelLoadError ? 'text-sm text-destructive' : 'text-sm text-muted-foreground'}
+            className={channelLoadError
+              ? 'text-sm text-destructive'
+              : 'flex items-center justify-center gap-2 text-sm text-muted-foreground'}
             role={channelLoadError ? 'alert' : 'status'}
           >
-            {channelLoadError ? t('conversation.loadFailed') : t('conversation.loading')}
+            {channelLoadError ? (
+              channelLoadTimedOut ? t('conversation.loadTimedOut') : t('conversation.loadFailed')
+            ) : (
+              <>
+                <LoaderCircleIcon
+                  aria-hidden="true"
+                  className="size-3.5 animate-spin motion-reduce:animate-none"
+                />
+                {t('conversation.loading')}
+              </>
+            )}
           </p>
           {channelLoadError && (
             <Button
@@ -2933,126 +3303,200 @@ function MessageAreaContent({
     ? messages.find((message) => message.id === openThreadId)
     : undefined;
 
+  const conversationStart = (
+    <div className="max-w-xl">
+      {channel.type === 'dm' && agentInfo ? (
+        <GeneratedAvatar
+          avatarUrl={agentInfo.avatar_url}
+          id={agentInfo.id}
+          name={agentInfo.display_name}
+          size="lg"
+        />
+      ) : (
+        <div
+          aria-hidden="true"
+          className="flex size-12 items-center justify-center rounded-xl border bg-muted/55 text-2xl font-semibold text-foreground shadow-sm"
+        >
+          {channel.type === 'dm' ? <MessageSquareIcon className="size-5" /> : '#'}
+        </div>
+      )}
+      <h3 className="mt-4 text-xl font-bold tracking-tight text-foreground">
+        {channel.type === 'dm'
+          ? t('message.emptyDmTitle', {
+              name: agentInfo?.display_name || channel.name,
+            })
+          : t('message.emptyChannelTitle', { name: channel.name })}
+      </h3>
+      <p className="mt-1.5 text-[14px] leading-5 text-muted-foreground">
+        {(channel.type === 'dm' ? agentInfo?.description : channel.description)
+          || t('message.emptyPrompt')}
+      </p>
+    </div>
+  );
+
+  const jumpDatePicker = (
+    <Popover
+      onOpenChange={(open) => {
+        setJumpDateOpen(open);
+        if (open) setJumpDateError('');
+      }}
+      open={jumpDateOpen}
+    >
+      <PopoverPopup
+        align="center"
+        anchor={jumpDateAnchor ?? undefined}
+        className="w-auto"
+        padded={false}
+        side="bottom"
+      >
+        <div className="p-2">
+          <div className="px-2 pt-1">
+            <p className="text-sm font-semibold">{t('message.jumpToDate')}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {t('message.jumpToDateHint')}
+            </p>
+          </div>
+          <Calendar
+            className={jumpDateBusy ? 'pointer-events-none opacity-60' : undefined}
+            disabled={{ after: new Date() }}
+            mode="single"
+            onSelect={(date) => {
+              if (date && !jumpDateBusy) void jumpToDate(date);
+            }}
+            selected={selectedJumpDate}
+          />
+          <div className="min-h-5 px-2 pb-1 text-xs">
+            {jumpDateBusy ? (
+              <span className="flex items-center gap-1.5 text-muted-foreground" role="status">
+                <LoaderCircleIcon className="size-3 animate-spin motion-reduce:animate-none" />
+                {t('message.jumpToDateLoading')}
+              </span>
+            ) : jumpDateError ? (
+              <span className="text-destructive" role="alert">{jumpDateError}</span>
+            ) : null}
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+
   return (
     <div className="flex min-w-0 flex-1">
-    <div
+    <Tabs
       // With a thread open there is not room for both below a wide viewport, so
       // the thread takes over rather than squeezing the transcript to a column
       // of single characters.
       className={`min-w-0 flex-1 flex-col bg-card max-w-full text-pretty ${
-        openThreadParent ? 'hidden lg:flex' : 'flex'
+        openThreadParent ? 'hidden xl:flex' : 'flex'
       }`}
+      onValueChange={(value) => {
+        const nextView = value === 'about' ? 'about' : 'messages';
+        setConversationView(nextView);
+        if (nextView === 'about') {
+          threadReturnFocusRef.current = null;
+          setOpenThreadId(null);
+        }
+      }}
+      value={conversationView}
     >
-      {/* Channel header */}
-      <div
-        className="flex items-center gap-3 border-b-[0.5px] py-2 px-3 select-none"
-        data-tauri-drag-region="deep">
-        {channel.type === 'dm' && agentInfo ? (
-          <>
-            <div className="pointer-events-none relative size-8">
-              <GeneratedAvatar
-                id={agentInfo.id}
-                name={agentInfo.display_name}
-                size="md"
-                avatarUrl={agentInfo.avatar_url}
-              />
-              {(() => {
-                const act = getChannelActivity(agentInfo.id);
-                const isActive = act?.activity === 'thinking' || act?.activity === 'working';
-                const isOnline = agentInfo.status === 'online' || agentInfo.status === 'active';
-                const dotColor = act?.activity === 'error'
-                  ? 'bg-destructive'
-                  : isActive
-                    ? 'bg-success animate-status-pulse'
-                    : isOnline
-                      ? 'bg-success'
-                      : agentInfo.status === 'sleeping'
-                        ? 'bg-warning'
-                        : 'bg-muted-foreground/55';
-                return (
-                  <div
-                    className={`absolute bottom-0 right-0 h-2.5 w-2.5 translate-x-[2px] translate-y-[2px] rounded-full border-2 border-card ${dotColor}`}
-                  />
-                );
-              })()}
-            </div>
-            <div className="pointer-events-none flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <h2 className="text-[14px] font-semibold">{agentInfo.display_name}</h2>
+      {/* Slack separates conversation identity from the current view. The
+          compact title row stays stable while Messages/About changes below. */}
+      <div className="select-none border-b-[0.5px]">
+        <div
+          className="flex h-11 items-center gap-2.5 px-3"
+          data-tauri-drag-region="deep"
+        >
+          {channel.type === 'dm' && agentInfo ? (
+            <>
+              <div className="pointer-events-none relative size-7 shrink-0">
+                <GeneratedAvatar
+                  avatarUrl={agentInfo.avatar_url}
+                  id={agentInfo.id}
+                  name={agentInfo.display_name}
+                  size="sm"
+                />
+                <span
+                  className={`absolute right-0 bottom-0 size-2 translate-x-0.5 translate-y-0.5 rounded-full border-2 border-card ${agentStatusDot(agentInfo.status)}`}
+                />
+              </div>
+              <div className="pointer-events-none flex min-w-0 flex-1 items-center gap-2">
+                <h2 className="truncate text-[15px] font-bold">{agentInfo.display_name}</h2>
                 {(() => {
-                  const act = getChannelActivity(agentInfo.id);
-                  if (!act || act.activity === 'idle') return null;
-                  if (act.activity === 'error') {
+                  const activity = getChannelActivity(agentInfo.id);
+                  if (!activity || activity.activity === 'idle') return null;
+                  if (activity.activity === 'error') {
                     return (
-                      <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-destructive">
-                        <span className="shrink-0 font-medium">{t('message.runtimeError')}</span>
-                        {settings.showActivityDetails && act.detail && (
-                          <span className="truncate text-muted-foreground max-w-[240px]">{act.detail}</span>
-                        )}
+                      <span className="shrink-0 text-[11px] font-medium text-destructive">
+                        {t('message.runtimeError')}
                       </span>
                     );
                   }
-                  const label = act.label || (act.activity === 'thinking' ? t('message.thinking') : t('message.working'));
                   return (
-                    <span className="flex items-center gap-1.5 text-[11px] text-primary">
-                      <span className="font-medium">{label}</span>
-                      {settings.showActivityDetails && act.detail && (
-                        <span className="text-muted-foreground truncate max-w-[200px]">{act.detail}</span>
-                      )}
+                    <span className="min-w-0 truncate text-[11px] font-medium text-primary">
+                      {activity.label || (activity.activity === 'thinking'
+                        ? t('message.thinking')
+                        : t('message.working'))}
                     </span>
                   );
                 })()}
               </div>
-              {agentInfo.description && (
-                <p className="text-[12px] text-muted-foreground truncate">{agentInfo.description}</p>
+              {onToggleSettings && agentInfo.is_owner && userId && (
+                <Button
+                  aria-label={t('message.agentSettings')}
+                  onClick={() => {
+                    runGuardedAction(() => onToggleSettings(showSettings ? null : {
+                      id: agentInfo.id,
+                      display_name: agentInfo.display_name,
+                      status: agentInfo.status,
+                      description: agentInfo.description,
+                      avatar_url: agentInfo.avatar_url,
+                      owner_id: userId,
+                    }));
+                  }}
+                  size="icon-sm"
+                  title={t('message.agentSettings')}
+                  variant={showSettings ? 'secondary' : 'ghost'}
+                >
+                  <SettingsIcon />
+                </Button>
               )}
-            </div>
-            {onToggleSettings && agentInfo.is_owner && userId && (
-              <Button
-                onClick={() => {
-                  runGuardedAction(() => onToggleSettings(showSettings ? null : {
-                    id: agentInfo.id,
-                    display_name: agentInfo.display_name,
-                    status: agentInfo.status,
-                    description: agentInfo.description,
-                    avatar_url: agentInfo.avatar_url,
-                    owner_id: userId,
-                  }));
-                }}
-                variant={showSettings ? 'secondary' : 'ghost'}
-                size="icon-xs"
-                aria-label={t('message.agentSettings')}>
-                <SettingsIcon className="size-4.5" />
-              </Button>
-            )}
-          </>
-        ) : (
-          <>
-            <span className="pointer-events-none text-lg text-muted-foreground">#</span>
-            <div className="pointer-events-none flex-1 min-w-0">
-              <h2 className="text-[14px] font-semibold">{channel.name}</h2>
-              {channel.description && (
-                <p className="text-[12px] text-muted-foreground truncate">{channel.description}</p>
+            </>
+          ) : (
+            <>
+              <span className="pointer-events-none text-[18px] text-muted-foreground">#</span>
+              <h2 className="pointer-events-none min-w-0 flex-1 truncate text-[15px] font-bold">
+                {channel.name}
+              </h2>
+              {channelAgents.size > 0 && (
+                <div className="pointer-events-none flex -space-x-1.5">
+                  {Array.from(channelAgents.values()).slice(0, 4).map((agent) => (
+                    <GeneratedAvatar
+                      avatarUrl={agent.avatar_url}
+                      className="ring-2 ring-card"
+                      id={agent.id}
+                      key={agent.id}
+                      name={agent.display_name}
+                      size="xs"
+                    />
+                  ))}
+                </div>
               )}
-            </div>
-            {channelAgents.size > 0 && (
-              <div className="pointer-events-none flex items-center gap-1">
-                {Array.from(channelAgents.values()).map((agent) => (
-                  <GeneratedAvatar
-                    key={agent.id}
-                    id={agent.id}
-                    name={agent.display_name}
-                    size="xs"
-                    avatarUrl={agent.avatar_url}
-                  />
-                ))}
-              </div>
-            )}
-          </>
-        )}
+            </>
+          )}
+          {jumpDatePicker}
+        </div>
+        <TabsList className="h-8 w-full justify-start gap-1 px-3 py-0" variant="underline">
+          <TabsTab className="h-8 grow-0 rounded-none px-2 text-[13px]" value="messages">
+            {t('message.view.messages')}
+          </TabsTab>
+          <TabsTab className="h-8 grow-0 rounded-none px-2 text-[13px]" value="about">
+            {t('message.view.about')}
+          </TabsTab>
+        </TabsList>
       </div>
 
       {/* Messages */}
+      <TabsPanel className="flex min-h-0 flex-col" value="messages">
       {realtimeWarning && (
         <div className="flex items-center justify-between gap-3 border-b bg-warning/5 px-5 py-1.5 text-xs text-warning-foreground" role="status">
           <span>{realtimeWarning}</span>
@@ -3091,6 +3535,11 @@ function MessageAreaContent({
           </Button>
         </div>
       )}
+      {searchTargetError && (
+        <div className="border-b bg-warning/5 px-5 py-1.5 text-xs text-warning-foreground" role="alert">
+          {searchTargetError}
+        </div>
+      )}
       <div aria-atomic="true" aria-live="polite" className="sr-only">
         {liveAnnouncement && (
           <span key={liveAnnouncement.id}>{liveAnnouncement.text}</span>
@@ -3099,9 +3548,19 @@ function MessageAreaContent({
       <div className="relative min-h-0 flex-1">
       <div
         aria-busy={messages.some((message) => message.delivery === 'pending')}
+        aria-label={t('message.transcript')}
         className="h-full overflow-y-auto py-4"
+        data-workspace-keyboard-section
+        onKeyDown={(event) => {
+          if (event.target !== event.currentTarget || orderedMessages.length === 0) return;
+          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+          event.preventDefault();
+          focusMessageAtIndex(event.key === 'ArrowDown' ? 0 : orderedMessages.length - 1);
+        }}
         onScroll={handleScroll}
         ref={scrollContainerRef}
+        role="region"
+        tabIndex={0}
       >
         {loadingMore && (
           <div className="flex justify-center py-3" role="status">
@@ -3125,9 +3584,14 @@ function MessageAreaContent({
             </Button>
           </div>
         )}
-        {!hasMore && messages.length > 0 && (
-          <div className="flex justify-center py-3">
-            <span className="text-xs text-muted-foreground">{t('message.beginning')}</span>
+        {!hasMore && orderedMessages.length > 0 && (
+          <div className="px-5 pb-5 pt-6">
+            {conversationStart}
+          </div>
+        )}
+        {orderedMessages.length === 0 && (
+          <div className="flex min-h-full items-end px-5 pb-7 pt-12">
+            {conversationStart}
           </div>
         )}
         {orderedMessages.map((msg, i) => {
@@ -3163,9 +3627,11 @@ function MessageAreaContent({
               }
               key={msg.id}
               message={msg}
+              highlighted={highlightedMessageId === msg.id}
               deliveryFailedLabel={t('message.deliveryFailed')}
               deliveryPendingLabel={t('message.deliveryPending')}
               deliverySentLabel={t('message.deliverySent')}
+              onKeyboardMove={moveMessageFocus}
               onRetryDelivery={retryMessageDelivery}
               retryDeliveryLabel={t('message.retryDelivery')}
               runtimeErrorLabel={t('message.runtimeError')}
@@ -3201,9 +3667,7 @@ function MessageAreaContent({
               onStartEdit={() => setEditingMessageId(msg.id)}
               onCancelEdit={() => setEditingMessageId(null)}
               onSubmitEdit={(content) => submitMessageEdit(msg.id, content)}
-              onDelete={() => {
-                if (window.confirm(t('message.deleteConfirm'))) deleteMessage(msg.id);
-              }}
+              onDelete={() => deleteMessage(msg.id)}
               broadcastPreamble={
                 isBroadcast(msg) && msg.thread_parent_id
                   ? t('message.thread.broadcastFrom', {
@@ -3218,7 +3682,7 @@ function MessageAreaContent({
                   : (emoji: string) => toggleReaction(msg.id, emoji)
               }
               onOpenThread={
-                msg.sender_type === 'system' ? undefined : () => setOpenThreadId(msg.id)
+                msg.sender_type === 'system' ? undefined : () => openThread(msg.id)
               }
             />
           );
@@ -3229,7 +3693,16 @@ function MessageAreaContent({
           return (
             <div className="contents" key={`day-${msg.id}`}>
               {startsNewDay && (
-                <DayDivider date={msg.created_at} label={formatDayLabel(msg.created_at, t)} />
+                <DayDivider
+                  date={msg.created_at}
+                  jumpLabel={t('message.jumpToDate')}
+                  label={formatDayLabel(msg.created_at, t)}
+                  onOpenPicker={(anchor) => {
+                    setJumpDateAnchor(anchor);
+                    setJumpDateError('');
+                    setJumpDateOpen(true);
+                  }}
+                />
               )}
               {marker}
               {row}
@@ -3530,7 +4003,7 @@ function MessageAreaContent({
             <span className="text-[13px] font-bold text-primary">{t('message.dropFiles')}</span>
           </div>
         )}
-        <div className="rounded-[8px] border bg-card shadow-[0_1px_3px_0_rgba(0,0,0,0.08)] overflow-hidden focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24 transition-shadow">
+        <div className="group/composer overflow-hidden rounded-[8px] border bg-card shadow-[0_1px_3px_0_rgba(0,0,0,0.08)] transition-shadow focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/24">
           <div>
             <TiptapMessageInput
               key={channel.id}
@@ -3652,12 +4125,17 @@ function MessageAreaContent({
             <Toggle
               aria-label={t('message.showFormatting')}
               onMouseDown={(event) => event.preventDefault()}
-              onPressedChange={setFormattingVisible}
+              onPressedChange={updateFormattingVisible}
               pressed={formattingVisible}
               size="sm"
               title={t('message.showFormatting')}>
               <TypeIcon />
             </Toggle>
+            <EmojiPickerButton
+              label={t('message.addEmoji')}
+              onPick={(emoji) => inputRef.current?.insertText(emoji)}
+              t={t}
+            />
             {/* A DM has exactly one peer, so there is nobody to disambiguate
                 and mention autocomplete stays off. */}
             {channel.type !== 'dm' && (
@@ -3672,13 +4150,14 @@ function MessageAreaContent({
                 <AtSignIcon />
               </Button>
             )}
-            <p className="ml-auto hidden items-center gap-1 pr-1 text-xs text-muted-foreground sm:flex">
+            <p className="ml-auto hidden items-center gap-1 pr-1 text-xs text-muted-foreground opacity-0 transition-opacity group-focus-within/composer:opacity-100 sm:flex">
               <Kbd>Shift</Kbd>
               <span aria-hidden="true">+</span>
               <Kbd>Enter</Kbd>
               <span>{t('message.newLineHint')}</span>
             </p>
             <Button
+              aria-label={t('message.send')}
               className="max-sm:ml-auto"
               type="button"
               onClick={() => {
@@ -3695,14 +4174,125 @@ function MessageAreaContent({
                   !agentInfo
                 ))
               }
-              size="sm">
-              {t('message.send')}
+              size="icon-sm"
+              title={t('message.send')}>
+              <SendHorizontalIcon />
             </Button>
           </div>
         </div>
       </div>
-    </div>
-      {openThreadParent && (
+      </TabsPanel>
+
+      <TabsPanel className="min-h-0 overflow-y-auto bg-card" value="about">
+        <div className="mx-auto w-full max-w-3xl px-5 py-7 sm:px-8">
+          <section className="overflow-hidden rounded-2xl border bg-card">
+            <div className="flex items-center gap-4 px-5 py-5">
+              {channel.type === 'dm' && agentInfo ? (
+                <GeneratedAvatar
+                  avatarUrl={agentInfo.avatar_url}
+                  className="size-16"
+                  id={agentInfo.id}
+                  name={agentInfo.display_name}
+                  size="lg"
+                />
+              ) : (
+                <div className="flex size-16 shrink-0 items-center justify-center rounded-2xl bg-muted text-3xl font-medium text-muted-foreground">
+                  #
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <h2 className="truncate text-xl font-bold">
+                    {channel.type === 'dm' && agentInfo ? agentInfo.display_name : channel.name}
+                  </h2>
+                  {channel.type === 'dm' && agentInfo && (
+                    <span
+                      aria-hidden="true"
+                      className={`size-2.5 shrink-0 rounded-full ${agentStatusDot(agentInfo.status)}`}
+                    />
+                  )}
+                </div>
+                {channel.type === 'dm' && agentInfo && (
+                  <p className="mt-0.5 truncate text-[13px] text-muted-foreground">
+                    @{agentInfo.name}
+                  </p>
+                )}
+              </div>
+              {channel.type === 'dm' && agentInfo && onToggleSettings && agentInfo.is_owner && userId && (
+                <Button
+                  onClick={() => {
+                    runGuardedAction(() => onToggleSettings(showSettings ? null : {
+                      id: agentInfo.id,
+                      display_name: agentInfo.display_name,
+                      status: agentInfo.status,
+                      description: agentInfo.description,
+                      avatar_url: agentInfo.avatar_url,
+                      owner_id: userId,
+                    }));
+                  }}
+                  size="sm"
+                  variant="secondary"
+                >
+                  <SettingsIcon />
+                  {t('message.agentSettings')}
+                </Button>
+              )}
+            </div>
+            <div className="border-t px-5 py-4">
+              <h3 className="text-[13px] font-bold">{t('message.view.about')}</h3>
+              <p className="mt-1 text-[14px] leading-6 text-muted-foreground">
+                {(channel.type === 'dm' ? agentInfo?.description : channel.description)
+                  || t('message.about.noDescription')}
+              </p>
+            </div>
+          </section>
+
+          {channel.type !== 'dm' && (
+            <section className="mt-4 overflow-hidden rounded-2xl border bg-card">
+              <div className="flex items-center justify-between border-b px-5 py-3.5">
+                <h3 className="text-[13px] font-bold">{t('message.about.members')}</h3>
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {channelAgents.size}
+                </span>
+              </div>
+              {agentMembersLoading ? (
+                <p className="px-5 py-5 text-[13px] text-muted-foreground">
+                  {t('conversation.agentDirectoryLoading')}
+                </p>
+              ) : channelAgents.size === 0 ? (
+                <p className="px-5 py-5 text-[13px] text-muted-foreground">
+                  {t('message.about.noMembers')}
+                </p>
+              ) : (
+                <div className="divide-y">
+                  {Array.from(channelAgents.values()).map((agent) => (
+                    <div className="flex items-center gap-3 px-5 py-3" key={agent.id}>
+                      <div className="relative size-8 shrink-0">
+                        <GeneratedAvatar
+                          avatarUrl={agent.avatar_url}
+                          id={agent.id}
+                          name={agent.display_name}
+                          size="md"
+                        />
+                        <span
+                          aria-hidden="true"
+                          className={`absolute right-0 bottom-0 size-2 translate-x-0.5 translate-y-0.5 rounded-full border-2 border-card ${agentStatusDot(agent.status)}`}
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] font-semibold">{agent.display_name}</p>
+                        <p className="truncate text-xs text-muted-foreground">@{agent.name}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+        </div>
+      </TabsPanel>
+    </Tabs>
+      {conversationView === 'messages' && openThreadParent && (
         <ThreadPanel
           channelId={channel.id}
           channelLabel={channel.type === 'dm' && agentInfo
@@ -3718,9 +4308,15 @@ function MessageAreaContent({
             }
             return who;
           }}
-          onClose={() => setOpenThreadId(null)}
+          onClose={closeThread}
+          onParentDelete={() => deleteMessage(openThreadParent.id)}
+          onParentEdit={(content) => submitMessageEdit(openThreadParent.id, content)}
           onRepliesChanged={handleThreadRepliesChanged}
           parent={openThreadParent}
+          focusReplyId={targetThreadId === openThreadParent.id ? targetReplyId : null}
+          formattingVisible={formattingVisible}
+          key={openThreadParent.id}
+          onFormattingVisibleChange={updateFormattingVisible}
           userId={userId}
         />
       )}
