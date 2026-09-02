@@ -247,6 +247,8 @@ function DocumentFolderRow({
 }) {
   const open = openFolders.has(folder.path);
   const [dropTarget, setDropTarget] = useState(false);
+  const folderTriggerRef = useRef<HTMLButtonElement>(null);
+  const folderContentRef = useRef<HTMLDivElement>(null);
   const indent = 4 + folder.depth * TREE_INDENT;
 
   if (editingKey === `folder:${folder.path}`) {
@@ -273,11 +275,17 @@ function DocumentFolderRow({
   const row = (
     <>
       <button
+        ref={folderTriggerRef}
         aria-expanded={open}
         className={`group/folder flex h-8 w-full items-center gap-1 rounded-[6px] pr-2 text-left text-[13px] transition-colors ${
           dropTarget ? "bg-primary/15 text-primary" : "text-foreground/80 hover:bg-accent/60"
         }`}
-        onClick={() => onToggle(folder.path)}
+        onClick={() => {
+          if (open && folderContentRef.current?.contains(document.activeElement)) {
+            folderTriggerRef.current?.focus({ preventScroll: true });
+          }
+          onToggle(folder.path);
+        }}
         onDragLeave={() => setDropTarget(false)}
         onDragOver={(event) => {
           const { types } = event.dataTransfer;
@@ -322,6 +330,8 @@ function DocumentFolderRow({
           always there. A `0fr`→`1fr` row is the one way to animate to a height
           nobody has measured; it stays mounted so the close animates too. */}
       <div
+        ref={folderContentRef}
+        inert={!open}
         className="grid transition-[grid-template-rows] duration-200 ease-out"
         style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
       >

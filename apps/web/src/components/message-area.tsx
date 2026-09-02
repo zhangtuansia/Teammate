@@ -822,7 +822,7 @@ const MessageRow = memo(function MessageRow({
       onMouseLeave={() => setHovered(false)}
       role="article"
       tabIndex={-1}
-      className={`group relative flex gap-2 px-5 outline-none transition-colors hover:bg-accent/60 focus-within:bg-accent/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 ${
+      className={`group relative flex gap-2 px-5 outline-none transition-none hover:bg-accent/60 focus-within:bg-accent/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 ${
         highlighted ? 'bg-primary/10 ring-1 ring-inset ring-primary/25' : ''
       } ${
         sameSender ? 'py-0.5' : 'pt-2 pb-1'
@@ -4474,7 +4474,8 @@ function MessageAreaContent({
             className="pointer-events-auto flex items-center gap-2 rounded-full bg-primary px-3 py-1 text-[13px] font-bold text-primary-foreground shadow-lg"
             onClick={() => {
               const target = document.getElementById(`message-${unread.id}`);
-              target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+              target?.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
             }}
             type="button"
           >
@@ -4614,7 +4615,7 @@ function MessageAreaContent({
             {docMatches.map((document, index) => (
               <button
                 aria-selected={index === docIndex}
-                className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-colors ${
+                className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-none ${
                   index === docIndex
                     ? 'bg-accent text-accent-foreground'
                     : 'text-muted-foreground hover:bg-accent/50'
@@ -4668,7 +4669,7 @@ function MessageAreaContent({
                     data-agent-handle={agent.name}
                     data-agent-label={agent.display_name}
                     onMouseDown={handleMentionMouseDown}
-                    className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-colors ${
+                    className={`flex w-full items-center gap-2.5 px-3 py-1.5 text-[13px] transition-none ${
                       i === mentionIndex
                         ? 'bg-accent text-accent-foreground'
                         : 'text-muted-foreground hover:bg-accent/50'

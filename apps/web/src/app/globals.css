@@ -372,6 +372,31 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  :is(
+    [data-slot="dialog-backdrop"],
+    [data-slot="alert-dialog-backdrop"],
+    [data-slot="sheet-backdrop"],
+    [data-slot="dialog-popup"],
+    [data-slot="alert-dialog-popup"],
+    [data-slot="sheet-popup"]
+  ) {
+    transition-property: opacity !important;
+    transition-duration: 125ms !important;
+    transition-delay: 0ms !important;
+    transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1) !important;
+  }
+
+  :is(
+    [data-slot="dialog-popup"],
+    [data-slot="alert-dialog-popup"],
+    [data-slot="sheet-popup"]
+  ) {
+    scale: 1 !important;
+    translate: 0 0 !important;
+  }
+}
+
 @media (forced-colors: active) {
   .teammate-thinking-label {
     color: CanvasText;

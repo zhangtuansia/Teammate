@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AlertCircleIcon, CableIcon, Loader2Icon, PlusIcon, PuzzleIcon, Trash2Icon, UnplugIcon } from "lucide-react";
 import {
@@ -88,11 +88,30 @@ export function AppsSection({ serverId }: { serverId: string }) {
   const [connectors, setConnectors] = useState<ConnectorRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [editing, setEditing] = useState<ConnectorRow | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
+  // Retain the form through exit; IDs keep late callbacks from closing a newer form.
+  const [connectorDialog, setConnectorDialog] = useState<{
+    id: number;
+    serverId: string;
+    initial: ConnectorRow | null;
+    open: boolean;
+  } | null>(null);
+  const nextDialogId = useRef(0);
   const [pendingDelete, setPendingDelete] = useState<ConnectorRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState("");
+
+  if (connectorDialog && connectorDialog.serverId !== serverId) {
+    setConnectorDialog(null);
+  }
+
+  const openConnectorDialog = (initial: ConnectorRow | null) => {
+    const id = ++nextDialogId.current;
+    setConnectorDialog((current) =>
+      current && current.serverId === serverId && current.initial?.id === initial?.id
+        ? { ...current, open: true }
+        : { id, serverId, initial, open: true },
+    );
+  };
 
   const load = useCallback(async () => {
     if (!serverId) return;
@@ -286,7 +305,7 @@ export function AppsSection({ serverId }: { serverId: string }) {
               {t("apps.connectors")}
               <Badge variant="secondary">{connectors.length}</Badge>
             </h2>
-            <Button size="sm" variant="outline" onClick={() => setShowCreate(true)}>
+            <Button size="sm" variant="outline" onClick={() => openConnectorDialog(null)}>
               <PlusIcon className="size-3.5" />
               {t("apps.addConnector")}
             </Button>
@@ -302,7 +321,7 @@ export function AppsSection({ serverId }: { serverId: string }) {
                 <ConnectorCard
                   key={connector.id}
                   connector={connector}
-                  onEdit={() => setEditing(connector)}
+                  onEdit={() => openConnectorDialog(connector)}
                   onDelete={() => {
                     setActionError("");
                     setPendingDelete(connector);
@@ -316,17 +335,26 @@ export function AppsSection({ serverId }: { serverId: string }) {
         </div>
       </div>
 
-      {(showCreate || editing) && (
+      {connectorDialog && (
         <ConnectorDialog
+          key={connectorDialog.id}
           serverId={serverId}
-          initial={editing}
-          onClose={() => {
-            setShowCreate(false);
-            setEditing(null);
+          initial={connectorDialog.initial}
+          open={connectorDialog.open}
+          onOpenChange={(open) => {
+            setConnectorDialog((current) =>
+              current?.id === connectorDialog.id ? { ...current, open } : current,
+            );
+          }}
+          onClosed={() => {
+            setConnectorDialog((current) =>
+              current?.id === connectorDialog.id && !current.open ? null : current,
+            );
           }}
           onSaved={() => {
-            setShowCreate(false);
-            setEditing(null);
+            setConnectorDialog((current) =>
+              current?.id === connectorDialog.id ? { ...current, open: false } : current,
+            );
             void load();
           }}
         />
@@ -425,12 +453,16 @@ function ConnectorCard({
 function ConnectorDialog({
   serverId,
   initial,
-  onClose,
+  open,
+  onOpenChange,
+  onClosed,
   onSaved,
 }: {
   serverId: string;
   initial: ConnectorRow | null;
-  onClose: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onClosed: () => void;
   onSaved: () => void;
 }) {
   const { t } = useAppSettings();
@@ -486,7 +518,13 @@ function ConnectorDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      onOpenChangeComplete={(nextOpen) => {
+        if (!nextOpen) onClosed();
+      }}
+    >
       <DialogPopup>
         <DialogHeader>
           <DialogTitle>{initial ? t("apps.editConnector") : t("apps.addConnector")}</DialogTitle>
@@ -523,7 +561,7 @@ function ConnectorDialog({
           {saveError && <p className="text-xs text-destructive">{saveError}</p>}
         </DialogPanel>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
             {t("common.cancel")}
           </Button>
           <Button onClick={() => void save()} disabled={saving}>

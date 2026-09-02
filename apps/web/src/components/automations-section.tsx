@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarClockIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,7 +49,26 @@ export function AutomationsSection({ serverId }: { serverId: string }) {
   const [automations, setAutomations] = useState<AutomationRow[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
-  const [creating, setCreating] = useState(false);
+  // Retain the form through exit; IDs keep late callbacks from closing a newer form.
+  const [automationDialog, setAutomationDialog] = useState<{
+    id: number;
+    serverId: string;
+    open: boolean;
+  } | null>(null);
+  const nextDialogId = useRef(0);
+
+  if (automationDialog && automationDialog.serverId !== serverId) {
+    setAutomationDialog(null);
+  }
+
+  const openAutomationDialog = () => {
+    const id = ++nextDialogId.current;
+    setAutomationDialog((current) =>
+      current && current.serverId === serverId
+        ? { ...current, open: true }
+        : { id, serverId, open: true },
+    );
+  };
 
   const load = useCallback(async () => {
     if (!serverId) return;
@@ -125,7 +144,7 @@ export function AutomationsSection({ serverId }: { serverId: string }) {
           {t("automations.title")}
           <Badge variant="secondary">{automations.length}</Badge>
         </h2>
-        <Button size="sm" variant="outline" onClick={() => setCreating(true)}>
+        <Button size="sm" variant="outline" onClick={openAutomationDialog}>
           <PlusIcon className="size-3.5" />
           {t("automations.add")}
         </Button>
@@ -174,13 +193,26 @@ export function AutomationsSection({ serverId }: { serverId: string }) {
         </div>
       )}
 
-      {creating && (
+      {automationDialog && (
         <AutomationDialog
+          key={automationDialog.id}
           serverId={serverId}
           agents={agents}
-          onClose={() => setCreating(false)}
+          open={automationDialog.open}
+          onOpenChange={(open) => {
+            setAutomationDialog((current) =>
+              current?.id === automationDialog.id ? { ...current, open } : current,
+            );
+          }}
+          onClosed={() => {
+            setAutomationDialog((current) =>
+              current?.id === automationDialog.id && !current.open ? null : current,
+            );
+          }}
           onSaved={() => {
-            setCreating(false);
+            setAutomationDialog((current) =>
+              current?.id === automationDialog.id ? { ...current, open: false } : current,
+            );
             void load();
           }}
         />
@@ -192,12 +224,16 @@ export function AutomationsSection({ serverId }: { serverId: string }) {
 function AutomationDialog({
   serverId,
   agents,
-  onClose,
+  open,
+  onOpenChange,
+  onClosed,
   onSaved,
 }: {
   serverId: string;
   agents: AgentOption[];
-  onClose: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onClosed: () => void;
   onSaved: () => void;
 }) {
   const { t } = useAppSettings();
@@ -242,7 +278,13 @@ function AutomationDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      onOpenChangeComplete={(nextOpen) => {
+        if (!nextOpen) onClosed();
+      }}
+    >
       <DialogPopup>
         <DialogHeader>
           <DialogTitle>{t("automations.add")}</DialogTitle>
@@ -290,7 +332,7 @@ function AutomationDialog({
           {saveError && <p className="text-xs text-destructive">{saveError}</p>}
         </DialogPanel>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{t("common.cancel")}</Button>
           <Button onClick={() => void save()} disabled={saving}>
             {saving ? t("common.saving") : t("common.save")}
           </Button>

@@ -258,7 +258,7 @@ function ThreadRow({
   return (
     <div
       id={`thread-message-${message.id}`}
-      className={`group relative flex gap-2 px-5 outline-none transition-colors hover:bg-accent/40 focus-within:bg-accent/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 ${
+      className={`group relative flex gap-2 px-5 outline-none transition-none hover:bg-accent/40 focus-within:bg-accent/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 ${
         highlighted ? 'bg-primary/10 ring-1 ring-inset ring-primary/25' : ''
       } ${
         sameSender ? 'py-0.5' : 'pt-2 pb-1'
@@ -285,7 +285,7 @@ function ThreadRow({
     >
       {!editing && !message.pending && message.delivery !== 'failed'
         && ((viewerId && onToggleReaction) || (canModify && onSubmitEdit && onDelete)) && (
-        <div className="absolute -top-3.5 right-5 z-10 flex gap-0.5 rounded-xl bg-card p-0.5 opacity-0 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        <div className="absolute -top-3.5 right-5 z-10 flex gap-0.5 rounded-xl bg-card p-0.5 opacity-0 shadow-[0_0_0_1px_var(--border),0_1px_3px_0_rgba(0,0,0,0.08)] transition-none group-hover:opacity-100 group-focus-within:opacity-100">
           {viewerId && onToggleReaction && (
             <EmojiPickerButton
               label={t('message.addEmoji')}
